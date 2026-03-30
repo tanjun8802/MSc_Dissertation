@@ -1,0 +1,47 @@
+# configs/default.yaml
+# ====================
+# Default configuration for RL experiments.
+#
+# Override individual keys from the CLI or by loading a custom YAML file
+# and merging it with this default.
+
+# ------ Environment -------------------------------------------------------
+env:
+  name: GridWorld          # environment class name (see environments/)
+  height: 5
+  width: 5
+  start_pos: [0, 0]        # [row, col]
+  goal_pos: null           # null = reward-free mode (no terminal goal)
+  walls: []                # list of [row, col] wall positions
+  max_steps: 200           # episode time limit (null = unlimited)
+
+# ------ MDP ---------------------------------------------------------------
+mdp:
+  gamma: 0.99              # discount factor γ
+  reward_free: false       # set true to run reward-free exploration phase
+
+# ------ Agent -------------------------------------------------------------
+agent:
+  name: RandomAgent        # agent class name (see agents/)
+  # Q-learning / TD hyperparameters (used by concrete agents)
+  alpha: 0.1               # learning rate
+  epsilon: 1.0             # initial ε for ε-greedy exploration
+  epsilon_min: 0.05        # minimum ε after decay
+  epsilon_decay: 0.995     # multiplicative decay per episode
+
+# ------ Training ----------------------------------------------------------
+training:
+  n_episodes: 1000         # total training episodes
+  eval_every: 100          # evaluate every N episodes (0 = disabled)
+  seed: 42
+
+# ------ Replay buffer -----------------------------------------------------
+replay_buffer:
+  capacity: 100000         # maximum number of stored transitions
+  batch_size: 64           # mini-batch size for off-policy updates
+  min_size: 1000           # start learning only after this many transitions
+
+# ------ Logging -----------------------------------------------------------
+logging:
+  log_dir: logs            # directory for CSV / checkpoint output
+  verbose: true            # print episode summaries to stdout
