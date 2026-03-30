@@ -1,0 +1,46 @@
+# configs/rcrl.yaml
+# =================
+# Configuration for Reward-Conditioned (Return-Conditioned) RL.
+#
+# Reference:
+#   "Reward Conditioned Policies" (Emmons et al., 2021)
+#   arXiv:2112.13629
+#
+# Key insight: conditioning the policy on the desired *return* transforms
+# reward maximisation into behavioral cloning on relabeled trajectories.
+# At inference time, conditioning on the maximum observed return elicits
+# near-optimal behavior without explicit policy optimisation.
+
+# ------ Environment -------------------------------------------------------
+env:
+  name: GridWorld
+  height: 5
+  width: 5
+  start_pos: [0, 0]
+  goal_pos: [4, 4]        # [row, col] of the reward-giving goal cell
+  walls: []
+  max_steps: 200
+
+# ------ MDP ---------------------------------------------------------------
+mdp:
+  gamma: 0.99
+
+# ------ Agent -------------------------------------------------------------
+agent:
+  name: RewardConditionedAgent
+  n_return_bins: 10       # number of discrete return levels
+  alpha: 0.1              # soft behavioral-cloning learning rate
+  epsilon: 1.0            # initial ε for diverse data collection
+  epsilon_min: 0.05       # minimum ε (used during exploitation phase)
+  epsilon_decay: 0.995    # multiplicative decay per episode
+
+# ------ Training (two-phase) ----------------------------------------------
+training:
+  explore_episodes: 400   # Phase 1: collect diverse trajectories
+  exploit_episodes: 100   # Phase 2: evaluate return-conditioned policy
+  seed: 42
+
+# ------ Logging -----------------------------------------------------------
+logging:
+  log_dir: logs/rcrl
+  verbose: true

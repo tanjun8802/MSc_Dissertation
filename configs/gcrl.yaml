@@ -1,0 +1,47 @@
+# configs/gcrl.yaml
+# =================
+# Configuration for Goal-Conditioned Q-Learning with Hindsight Experience Replay.
+#
+# Reference:
+#   "A Single Goal is All You Need: On the Elegance of Task-Conditioned RL"
+#   (Mezghani et al., 2023)
+#
+# Key insight: even a single demonstration goal is sufficient to bootstrap
+# goal-conditioned learning when combined with Hindsight Experience Replay (HER).
+
+# ------ Environment -------------------------------------------------------
+env:
+  name: GridWorld
+  height: 5
+  width: 5
+  start_pos: [0, 0]
+  goal_pos: null          # null = goals are sampled randomly during training
+  walls: []
+  max_steps: 200
+
+# ------ MDP ---------------------------------------------------------------
+mdp:
+  gamma: 0.99
+
+# ------ Agent -------------------------------------------------------------
+agent:
+  name: GoalConditionedAgent
+  # Q-learning hyperparameters
+  alpha: 0.1              # TD step size
+  epsilon: 1.0            # initial ε for ε-greedy exploration
+  epsilon_min: 0.05       # floor on ε after annealing
+  epsilon_decay: 0.995    # multiplicative decay per episode
+  # HER hyperparameters
+  her_k: 4                # number of hindsight goal substitutions per transition
+                          # (Andrychowicz et al., 2017 use k=4 as default)
+
+# ------ Training ----------------------------------------------------------
+training:
+  n_episodes: 500         # total goal-conditioned training episodes
+  eval_every: 50          # evaluate on fixed eval_goal every N episodes
+  seed: 42
+
+# ------ Logging -----------------------------------------------------------
+logging:
+  log_dir: logs/gcrl
+  verbose: true
