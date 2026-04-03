@@ -1,15 +1,18 @@
 # configs/rcrl.yaml
 # =================
-# Configuration for Reward-Conditioned (Return-Conditioned) RL.
+# Configuration for Reward-Conditioned RL (RCRL).
 #
 # Reference:
-#   "Reward Conditioned Policies" (Emmons et al., 2021)
-#   arXiv:2112.13629
+#   "Reward-Conditioned Reinforcement Learning" (Nauman, Cygan & Abbeel, 2026)
+#   arXiv:2603.05066
 #
-# Key insight: conditioning the policy on the desired *return* transforms
-# reward maximisation into behavioral cloning on relabeled trajectories.
-# At inference time, conditioning on the maximum observed return elicits
-# near-optimal behavior without explicit policy optimisation.
+# Key insight: conditioning the policy and Q-function on a reward
+# parameterisation ψ — rather than on a fixed reward function — lets a
+# single agent learn to optimise a *family* of reward specifications while
+# only interacting with the environment under the nominal task.  Training
+# with diverse ψ sampled from PΨ = α·δ(ψ*) + (1−α)·pΨ improves sample
+# efficiency under ψ* and enables zero-shot adaptation to alternative
+# reward functions.
 
 # ------ Environment -------------------------------------------------------
 env:
@@ -28,16 +31,18 @@ mdp:
 # ------ Agent -------------------------------------------------------------
 agent:
   name: RewardConditionedAgent
-  n_return_bins: 10       # number of discrete return levels
-  alpha: 0.1              # soft behavioral-cloning learning rate
-  epsilon: 1.0            # initial ε for diverse data collection
+  n_psi_bins: 5           # discrete reward-parameterisation bins
+  psi_min: -0.1           # most negative step-cost weight (bin n_psi_bins-1)
+  psi_mix_alpha: 0.5      # fraction of nominal ψ* draws in the training mixture
+  alpha: 0.1              # Q-learning step size
+  epsilon: 1.0            # initial ε for ε-greedy exploration
   epsilon_min: 0.05       # minimum ε (used during exploitation phase)
   epsilon_decay: 0.995    # multiplicative decay per episode
 
 # ------ Training (two-phase) ----------------------------------------------
 training:
-  explore_episodes: 400   # Phase 1: collect diverse trajectories
-  exploit_episodes: 100   # Phase 2: evaluate return-conditioned policy
+  explore_episodes: 400   # Phase 1: Q-learning with diverse ψ sampling
+  exploit_episodes: 100   # Phase 2: greedy evaluation under ψ*
   seed: 42
 
 # ------ Logging -----------------------------------------------------------

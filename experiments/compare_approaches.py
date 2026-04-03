@@ -5,7 +5,7 @@ Side-by-side comparison of three RL approaches on the GridWorld environment:
 
     1. **Random Baseline**  — uniformly random action selection (no learning)
     2. **GCRL**             — Goal-Conditioned Q-Learning + Hindsight Experience Replay
-    3. **RCRL**             — Reward-Conditioned Behavioral Cloning (return-conditioned)
+    3. **RCRL**             — Reward-Conditioned Q-Learning (reward-parameterization-conditioned)
 
 The script runs all three approaches under the same GridWorld configuration,
 then prints a concise comparison table so you can immediately see the
@@ -153,7 +153,7 @@ def run_gcrl(
 def run_rcrl(
     height: int, width: int, goal_pos: tuple[int, int], max_steps: int,
     explore_episodes: int, exploit_episodes: int,
-    n_return_bins: int, alpha: float,
+    n_psi_bins: int, psi_min: float, psi_mix_alpha: float, alpha: float,
     epsilon: float, epsilon_min: float, epsilon_decay: float,
     gamma: float, seed: int, log_dir: str,
 ) -> ApproachResult:
@@ -161,7 +161,9 @@ def run_rcrl(
     agent = RewardConditionedAgent(
         n_states=env.n_states,
         n_actions=env.n_actions,
-        n_return_bins=n_return_bins,
+        n_psi_bins=n_psi_bins,
+        psi_min=psi_min,
+        psi_mix_alpha=psi_mix_alpha,
         gamma=gamma, alpha=alpha,
         epsilon=epsilon, epsilon_min=epsilon_min,
         epsilon_decay=epsilon_decay,
@@ -177,7 +179,7 @@ def run_rcrl(
     explore_metrics = [m for m in metrics if m.training]
     exploit_metrics = [m for m in metrics if not m.training]
     return ApproachResult(
-        name="RCRL (Return-Conditioned)",
+        name="RCRL (Reward-Conditioned)",
         all_rewards=[m.total_reward for m in explore_metrics],
         eval_rewards=[m.total_reward for m in exploit_metrics],
         total_steps=agent.total_steps,
@@ -258,7 +260,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--epsilon-min", type=float, default=0.05, help="Min ε.")
     parser.add_argument("--epsilon-decay", type=float, default=0.995, help="ε decay.")
     parser.add_argument("--her-k", type=int, default=4, help="HER substitutions (GCRL).")
-    parser.add_argument("--n-return-bins", type=int, default=10, help="Return bins (RCRL).")
+    parser.add_argument("--n-psi-bins", type=int, default=5, help="Reward-parameterisation bins (RCRL).")
+    parser.add_argument("--psi-min", type=float, default=-0.1, help="Most negative step-cost weight (RCRL, ≤ 0).")
+    parser.add_argument("--psi-mix-alpha", type=float, default=0.5, help="Fraction of nominal ψ* draws in training mixture (RCRL).")
     parser.add_argument("--eval-every", type=int, default=50, help="GCRL eval every N episodes.")
     parser.add_argument("--seed", type=int, default=42, help="Random seed.")
     parser.add_argument("--render", action="store_true", help="Show grid after each approach.")
@@ -329,13 +333,15 @@ def main(argv: list[str] | None = None) -> None:
     # --- 3. RCRL -----------------------------------------------------------
     print()
     print("─" * 40)
-    print("Running: RCRL (Return-Conditioned) …")
+    print("Running: RCRL (Reward-Conditioned) …")
     r_rcrl = run_rcrl(
         height=args.height, width=args.width,
         goal_pos=goal_pos, max_steps=args.max_steps,
         explore_episodes=rcrl_explore,
         exploit_episodes=rcrl_exploit,
-        n_return_bins=args.n_return_bins,
+        n_psi_bins=args.n_psi_bins,
+        psi_min=args.psi_min,
+        psi_mix_alpha=args.psi_mix_alpha,
         alpha=args.alpha,
         epsilon=args.epsilon, epsilon_min=args.epsilon_min,
         epsilon_decay=args.epsilon_decay,

@@ -1,33 +1,38 @@
 """
 run_rcrl.py
 ===========
-CLI entry-point: Reward-Conditioned (Return-Conditioned) RL on GridWorld.
+CLI entry-point: Reward-Conditioned RL on GridWorld.
 
 Background
 ----------
-Reward-conditioned RL treats the desired *return* as an additional input to the
-policy, transforming reward maximisation into a supervised learning problem:
+Reward-conditioned RL trains a single agent to optimise a *family* of reward
+specifications by conditioning the policy and value function on a reward
+parameterisation ψ:
 
-    π(a | s, g_return) — what action achieves desired return g?
+    Q(s, a, ψ)   π(a | s, ψ)
 
-This script implements the core ideas from:
-    "Reward Conditioned Policies" (Emmons et al., 2021)  arXiv:2112.13629
+This script implements the approach from:
+    "Reward-Conditioned Reinforcement Learning" (Nauman, Cygan & Abbeel, 2026)
+    arXiv:2603.05066
 
-The approach has two phases:
+The reward is decomposed into k components stored per transition.  During
+training each update draws ψ from a mixture
 
-1. **Exploration** (``--explore-episodes`` episodes):
-   Collect diverse (state, action, achieved-return) data using an ε-greedy
-   policy over the GridWorld.  The environment uses a fixed goal so that
-   reaching it gives a +1 reward.
+    PΨ = α · δ(ψ*) + (1−α) · pΨ
+
+and recomputes the scalar reward rψ = Σᵢ ψᵢ·cᵢ without additional environment
+interaction.  The agent always *acts* under the nominal ψ*, so sample
+efficiency under the target task is preserved while the conditioned
+representation gains robustness across reward variants.
+
+The script has two phases:
+
+1. **Training** (``--explore-episodes`` episodes):
+   ε-greedy exploration; at every step a ψ is sampled from PΨ and a
+   Q-learning TD update is applied to  Q[s, ψ-bin, a].
 
 2. **Exploitation** (``--exploit-episodes`` episodes):
-   Condition the return-conditioned policy on the *maximum observed return*
-   and evaluate its performance.  ε is kept at ``epsilon_min`` so the policy
-   acts nearly greedily.
-
-The conditional policy is tabular:
-    action_counts[s, bin(G_t), a] += α    (behavioral-cloning update)
-    π(a | s, g) ∝ action_counts[s, bin(g), a]
+   Greedy evaluation under ψ*.  ε is locked at ``epsilon_min``.
 
 Usage
 -----
@@ -63,18 +68,19 @@ from utils.metrics import EpisodeMetrics
 
 
 class RCRLExperiment(BaseExperiment):
-    """Reward-conditioned RL experiment in two phases.
+    """Reward-conditioned Q-learning experiment in two phases.
 
-    Exploration phase
-    -----------------
-    Run ``n_explore`` episodes with ε-greedy exploration.  After each episode
-    call ``agent.finish_episode()`` to update the return-conditioned policy
-    via behavioral cloning.
+    Training phase
+    --------------
+    Run ``n_explore`` episodes with ε-greedy exploration under the nominal ψ*.
+    At every step the agent samples ψ ~ PΨ, computes the parameterised reward
+    rψ, and performs a Q-learning update on Q[s, ψ-bin, a].
+    ε is decayed once per episode via ``agent.finish_episode()``.
 
     Exploitation phase
     ------------------
-    Run ``n_exploit`` episodes with ``desired_return = agent.max_observed_return``
-    and ``greedy=True`` to evaluate the learned policy.
+    Run ``n_exploit`` episodes with greedy action selection under ψ* to
+    evaluate the policy learned by training on diverse parameterisations.
     """
 
     def __init__(
@@ -107,8 +113,8 @@ class RCRLExperiment(BaseExperiment):
         """Two-phase training loop."""
         all_metrics: list[EpisodeMetrics] = []
 
-        # --- Phase 1: Exploration -------------------------------------------
-        print("Phase 1 — Exploration (collecting diverse trajectories) …")
+        # --- Phase 1: Training -------------------------------------------
+        print("Phase 1 — Training (Q-learning with diverse ψ sampling) …")
         for episode in range(1, self.n_explore + 1):
             metrics = self._run_episode(episode, training=True)
             all_metrics.append(metrics)
@@ -117,19 +123,19 @@ class RCRLExperiment(BaseExperiment):
             self.logger.log_episode(episode, metrics)
 
             if episode % max(1, self.n_explore // 5) == 0:
+                mean_td = metrics.mean_step_metric("td_error")
                 print(
-                    f"  [explore ep {episode:>4d}]  "
+                    f"  [train ep {episode:>4d}]  "
                     f"reward={metrics.total_reward:.2f}  "
                     f"length={metrics.length:>3d}  "
-                    f"G0={finish_info['episode_return']:.3f}  "
-                    f"max_G={self.agent.max_observed_return:.3f}  "
+                    f"mean_td={mean_td or 0.0:.4f}  "
                     f"ε={self.agent.epsilon:.3f}"
                 )
 
         # --- Phase 2: Exploitation -------------------------------------------
         print(
             f"\nPhase 2 — Exploitation "
-            f"(desired_return={self.agent.max_observed_return:.3f}) …"
+            f"(greedy under nominal ψ*, ε={self.agent.epsilon_min}) …"
         )
         # Lock ε at minimum for near-greedy behaviour
         self.agent.epsilon = self.agent.epsilon_min
@@ -137,9 +143,7 @@ class RCRLExperiment(BaseExperiment):
         exploit_rewards = []
         for ep_idx in range(1, self.n_exploit + 1):
             episode = self.n_explore + ep_idx
-            # Override select_action to use desired_return = max observed
-            desired = self.agent.max_observed_return
-            metrics = self._run_exploit_episode(episode, desired_return=desired)
+            metrics = self._run_exploit_episode(episode)
             all_metrics.append(metrics)
             exploit_rewards.append(metrics.total_reward)
 
@@ -156,10 +160,8 @@ class RCRLExperiment(BaseExperiment):
 
         return all_metrics
 
-    def _run_exploit_episode(
-        self, episode: int, desired_return: float
-    ) -> EpisodeMetrics:
-        """Run one episode with the return-conditioned policy."""
+    def _run_exploit_episode(self, episode: int) -> EpisodeMetrics:
+        """Run one episode with the nominal-ψ* greedy policy."""
         obs, info = self.env.reset(seed=int(self._rng.integers(0, 2**31)))
         self.agent.reset()
 
@@ -167,7 +169,7 @@ class RCRLExperiment(BaseExperiment):
         steps = 0
 
         while True:
-            action = self.agent.select_action(obs, desired_return=desired_return, greedy=True)
+            action = self.agent.select_action(obs, greedy=True)
             next_obs, reward, terminated, truncated, info = self.env.step(action)
             total_reward += float(reward)
             steps += 1
@@ -203,11 +205,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Goal state index. Defaults to bottom-right cell.",
     )
-    parser.add_argument("--explore-episodes", type=int, default=400, help="Exploration episodes.")
+    parser.add_argument("--explore-episodes", type=int, default=400, help="Training episodes.")
     parser.add_argument("--exploit-episodes", type=int, default=100, help="Exploitation episodes.")
     parser.add_argument("--max-steps", type=int, default=200, help="Max steps per episode.")
-    parser.add_argument("--n-return-bins", type=int, default=10, help="Number of return bins.")
-    parser.add_argument("--alpha", type=float, default=0.1, help="Behavioral-cloning learning rate.")
+    parser.add_argument("--n-psi-bins", type=int, default=5, help="Number of reward-parameterisation bins.")
+    parser.add_argument("--psi-min", type=float, default=-0.1, help="Most negative step-cost weight (≤ 0).")
+    parser.add_argument("--psi-mix-alpha", type=float, default=0.5, help="Fraction of nominal ψ* draws during training.")
+    parser.add_argument("--alpha", type=float, default=0.1, help="Q-learning step size.")
     parser.add_argument("--epsilon", type=float, default=1.0, help="Initial ε.")
     parser.add_argument("--epsilon-min", type=float, default=0.05, help="Minimum ε.")
     parser.add_argument("--epsilon-decay", type=float, default=0.995, help="ε decay per episode.")
@@ -239,7 +243,9 @@ def main(argv: list[str] | None = None) -> list[EpisodeMetrics]:
     agent = RewardConditionedAgent(
         n_states=env.n_states,
         n_actions=env.n_actions,
-        n_return_bins=args.n_return_bins,
+        n_psi_bins=args.n_psi_bins,
+        psi_min=args.psi_min,
+        psi_mix_alpha=args.psi_mix_alpha,
         gamma=args.gamma,
         alpha=args.alpha,
         epsilon=args.epsilon,
@@ -258,14 +264,16 @@ def main(argv: list[str] | None = None) -> list[EpisodeMetrics]:
     )
 
     print("=" * 60)
-    print("Reward-Conditioned RL (RCRL)")
+    print("Reward-Conditioned RL (RCRL) — Nauman et al. 2026")
     print("=" * 60)
     print(f"  Environment : {env!r}")
     print(f"  Agent       : {agent!r}")
     print(f"  Goal state  : {goal_pos_flat} ({goal_row}, {goal_col})")
-    print(f"  Explore eps : {args.explore_episodes}")
+    print(f"  Train eps   : {args.explore_episodes}")
     print(f"  Exploit eps : {args.exploit_episodes}")
     print(f"  Max steps   : {args.max_steps}")
+    print(f"  ψ bins      : {args.n_psi_bins}  (psi_min={args.psi_min})")
+    print(f"  ψ mix α     : {args.psi_mix_alpha}")
     print(f"  Seed        : {args.seed}")
     print()
 
@@ -284,10 +292,10 @@ def main(argv: list[str] | None = None) -> list[EpisodeMetrics]:
 
     print()
     print("Summary:")
-    print(f"  Max observed return      : {agent.max_observed_return:.4f}")
     print(f"  Explore mean reward      : {_mean(explore_rewards):.4f}")
     print(f"  Exploit mean reward      : {_mean(exploit_rewards):.4f}")
     print(f"  Exploit mean length      : {_mean(exploit_lengths):.1f}")
+    print(f"  Final ε                  : {agent.epsilon:.4f}")
     print(f"  Total env steps          : {agent.total_steps}")
 
     if args.render:
