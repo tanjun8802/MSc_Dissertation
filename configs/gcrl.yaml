@@ -1,13 +1,15 @@
 # configs/gcrl.yaml
 # =================
-# Configuration for Goal-Conditioned Q-Learning with Hindsight Experience Replay.
+# Configuration for Single-Goal Contrastive RL on GridWorld.
 #
 # Reference:
-#   "A Single Goal is All You Need: On the Elegance of Task-Conditioned RL"
-#   (Mezghani et al., 2023)
+#   "A Single Goal is All You Need: Skills and Exploration Emerge from
+#   Contrastive RL without Rewards, Demonstrations, or Subgoals"
+#   (Liu, Tang & Eysenbach, 2024)
 #
-# Key insight: even a single demonstration goal is sufficient to bootstrap
-# goal-conditioned learning when combined with Hindsight Experience Replay (HER).
+# Key insight: always conditioning on the single hard target goal s* during
+# data collection is sufficient for skills and exploration to emerge, without
+# any reward function, demonstrations, or subgoal curriculum.
 
 # ------ Environment -------------------------------------------------------
 env:
@@ -15,30 +17,30 @@ env:
   height: 5
   width: 5
   start_pos: [0, 0]
-  goal_pos: null          # null = goals are sampled randomly during training
+  goal_pos: null          # null = reward-free training env (no goal reward)
   walls: []
   max_steps: 200
 
 # ------ MDP ---------------------------------------------------------------
 mdp:
-  gamma: 0.99
+  gamma: 0.99             # also controls geometric future-state sampling
 
 # ------ Agent -------------------------------------------------------------
 agent:
   name: GoalConditionedAgent
-  # Q-learning hyperparameters
-  alpha: 0.1              # TD step size
-  epsilon: 1.0            # initial ε for ε-greedy exploration
-  epsilon_min: 0.05       # floor on ε after annealing
-  epsilon_decay: 0.995    # multiplicative decay per episode
-  # HER hyperparameters
-  her_k: 4                # number of hindsight goal substitutions per transition
-                          # (Andrychowicz et al., 2017 use k=4 as default)
+  # Contrastive critic hyperparameters
+  alpha: 0.1              # step size for infoNCE critic updates
+  temperature: 1.0        # softmax temperature τ for entropy-regularised policy
+  # infoNCE hyperparameters (Eq. 3 in paper)
+  n_negatives: 16         # number of negative future-state examples per update
+  logsumexp_reg: 0.01     # LogSumExp regularisation coefficient (paper default)
+  # Replay buffer
+  buffer_capacity: 10000  # max (s, a, sf) triples stored
 
 # ------ Training ----------------------------------------------------------
 training:
-  n_episodes: 500         # total goal-conditioned training episodes
-  eval_every: 50          # evaluate on fixed eval_goal every N episodes
+  n_episodes: 500         # total training episodes (always using single goal s*)
+  eval_every: 50          # evaluate on fixed target goal every N episodes
   seed: 42
 
 # ------ Logging -----------------------------------------------------------

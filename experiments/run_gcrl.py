@@ -1,24 +1,25 @@
 """
 run_gcrl.py
 ===========
-CLI entry-point: Goal-Conditioned Q-Learning with Hindsight Experience Replay
-on the GridWorld environment.
+CLI entry-point: Single-Goal Contrastive RL on the GridWorld environment.
 
 Background
 ----------
 Goal-conditioned RL (GCRL) extends standard RL by conditioning the policy on
-a desired goal g.  The Q-function becomes Q(s, g, a), capturing the value of
-taking action a from state s when the agent wants to reach g.
+a desired goal g.  The critic becomes C(s, a, sf), capturing the (log)
+likelihood that taking action a from state s will eventually reach state sf.
 
 This script implements the approach from:
-    "A Single Goal is All You Need: On the Elegance of Task-Conditioned RL"
-    (Mezghani et al., 2023)
+    "A Single Goal is All You Need: Skills and Exploration Emerge from
+    Contrastive RL without Rewards, Demonstrations, or Subgoals"
+    (Liu, Tang & Eysenbach, 2024)
 
-Key mechanism — **Hindsight Experience Replay (HER)**:
-After every training episode the agent retroactively relabels transitions with
-*achieved* future states as substitute goals.  This generates a dense learning
-signal even when the intended goal was never reached, dramatically improving
-sample efficiency.
+Key mechanism — **Single-Goal Contrastive RL** (Algorithm 1 in the paper):
+* The critic C(s, a, sf) is learned via an infoNCE contrastive objective
+  with LogSumExp regularisation (Eq. 3).  No reward function is used.
+* During data collection, the policy is ALWAYS conditioned on the single
+  hard target goal s*.  Skills and exploration emerge naturally without any
+  curriculum, dense rewards, or subgoal generation.
 
 Usage
 -----
@@ -53,26 +54,26 @@ from utils.metrics import EpisodeMetrics
 
 
 class GCRLExperiment(BaseExperiment):
-    """Goal-conditioned Q-learning with HER on GridWorld.
+    """Single-goal contrastive RL on GridWorld.
 
     Each training episode:
-    1. A goal state is sampled uniformly from all valid (non-wall) states.
-    2. The agent runs one episode conditioned on that goal.
-    3. After the episode, HER relabeling is applied to update Q(s, g', a) for
-       additional substitute goals sampled from the trajectory.
+    1. The policy is conditioned on the single hard target goal s* throughout.
+    2. The agent runs one episode always targeting s*.
+    3. After the episode, (s, a, sf) pairs are generated via geometric future
+       sampling and the contrastive critic is updated (Eq. 3 in the paper).
 
-    Evaluation episodes always use ``eval_goal`` (default: bottom-right cell).
-    A separate goal-enabled environment is used for evaluation so that reaching
-    the goal gives a +1 reward and terminates the episode.
+    Evaluation episodes run a greedy policy (argmax over C[s, :, s*]) using
+    a goal-embedded environment so that reaching s* gives a +1 reward.
     """
 
     def __init__(self, env: GridWorld, agent: GoalConditionedAgent, eval_goal: int, **kwargs) -> None:
         super().__init__(env=env, agent=agent, **kwargs)
         self.eval_goal = eval_goal
-        self._all_states = env.get_all_states()
 
-        # Build a separate evaluation env with the goal embedded so that
-        # reaching eval_goal terminates the episode with +1 reward.
+        # Set the single hard target goal on the agent once — it never changes
+        self.agent.set_goal(eval_goal)
+
+        # Separate evaluation env with goal embedded so success is measurable
         goal_row, goal_col = divmod(eval_goal, env.width)
         self._eval_env = GridWorld(
             height=env.height,
@@ -93,24 +94,22 @@ class GCRLExperiment(BaseExperiment):
         truncated: bool,
         info: dict,
     ) -> dict:
-        """Delegate to the agent's Q-learning update."""
+        """Delegate to the agent's (reward-free) update."""
         return self.agent.update(obs, action, reward, next_obs, terminated, truncated, info)
 
     def run(self) -> list[EpisodeMetrics]:
-        """Override run() to sample random goals and apply HER each episode."""
-        rng = np.random.default_rng(self.seed)
+        """Override run() to apply the contrastive update after each episode."""
         all_metrics: list[EpisodeMetrics] = []
 
         for episode in range(1, self.n_episodes + 1):
-            # Sample a random goal for this training episode
-            goal = int(rng.choice(self._all_states))
-            self.agent.set_goal(goal)
+            # Always use the single hard target goal (Algorithm 1 in paper)
+            self.agent.set_goal(self.eval_goal)
 
             metrics = self._run_episode(episode, training=True)
             all_metrics.append(metrics)
 
-            # Apply HER after episode completes
-            self.agent.finish_episode_with_her()
+            # Contrastive critic update after the episode
+            self.agent.finish_episode_with_contrastive_update()
 
             self.logger.log_episode(episode, metrics)
 
@@ -137,7 +136,8 @@ class GCRLExperiment(BaseExperiment):
 
         while True:
             state = int(np.asarray(obs).flat[0])
-            action = int(self.agent.Q[state, self.eval_goal].argmax())
+            # Greedy: argmax over the contrastive critic
+            action = int(np.argmax(self.agent.C[state, :, self.eval_goal]))
             next_obs, reward, terminated, truncated, info = self._eval_env.step(action)
             total_reward += float(reward)
             steps += 1
@@ -162,7 +162,7 @@ class GCRLExperiment(BaseExperiment):
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Goal-Conditioned Q-Learning with HER on GridWorld.",
+        description="Single-Goal Contrastive RL on GridWorld.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--height", type=int, default=5, help="Grid height.")
@@ -171,15 +171,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--goal",
         type=int,
         default=None,
-        help="Fixed evaluation goal (flat state index). Defaults to bottom-right cell.",
+        help="Target goal (flat state index). Defaults to bottom-right cell.",
     )
     parser.add_argument("--episodes", type=int, default=500, help="Training episodes.")
     parser.add_argument("--max-steps", type=int, default=200, help="Max steps per episode.")
-    parser.add_argument("--alpha", type=float, default=0.1, help="Q-learning step size.")
-    parser.add_argument("--epsilon", type=float, default=1.0, help="Initial ε.")
-    parser.add_argument("--epsilon-min", type=float, default=0.05, help="Minimum ε.")
-    parser.add_argument("--epsilon-decay", type=float, default=0.995, help="ε decay per episode.")
-    parser.add_argument("--her-k", type=int, default=4, help="HER substitutions per transition.")
+    parser.add_argument("--alpha", type=float, default=0.1, help="Contrastive critic step size.")
+    parser.add_argument("--temperature", type=float, default=1.0, help="Softmax temperature τ.")
+    parser.add_argument("--n-negatives", type=int, default=16, help="Negative examples per infoNCE update.")
+    parser.add_argument("--logsumexp-reg", type=float, default=0.01, help="LogSumExp regularisation coefficient.")
+    parser.add_argument("--buffer-capacity", type=int, default=10000, help="Replay buffer capacity.")
     parser.add_argument("--gamma", type=float, default=0.99, help="Discount factor.")
     parser.add_argument("--eval-every", type=int, default=50, help="Eval every N episodes.")
     parser.add_argument("--seed", type=int, default=42, help="Global random seed.")
@@ -196,6 +196,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> list[EpisodeMetrics]:
     args = parse_args(argv)
 
+    # Training env is reward-free (no goal_pos) — contrastive RL needs no reward
     env = GridWorld(
         height=args.height,
         width=args.width,
@@ -210,10 +211,10 @@ def main(argv: list[str] | None = None) -> list[EpisodeMetrics]:
         n_actions=env.n_actions,
         gamma=args.gamma,
         alpha=args.alpha,
-        epsilon=args.epsilon,
-        epsilon_min=args.epsilon_min,
-        epsilon_decay=args.epsilon_decay,
-        her_k=args.her_k,
+        temperature=args.temperature,
+        n_negatives=args.n_negatives,
+        logsumexp_reg=args.logsumexp_reg,
+        buffer_capacity=args.buffer_capacity,
         seed=args.seed,
     )
 
@@ -228,11 +229,11 @@ def main(argv: list[str] | None = None) -> list[EpisodeMetrics]:
     )
 
     print("=" * 60)
-    print("Goal-Conditioned RL (GCRL) with Hindsight Experience Replay")
+    print("Goal-Conditioned RL (GCRL) — Single-Goal Contrastive RL")
     print("=" * 60)
     print(f"  Environment : {env!r}")
     print(f"  Agent       : {agent!r}")
-    print(f"  Eval goal   : state {eval_goal}")
+    print(f"  Target goal : state {eval_goal}")
     print(f"  Episodes    : {args.episodes}")
     print(f"  Max steps   : {args.max_steps}")
     print(f"  Seed        : {args.seed}")
@@ -254,7 +255,6 @@ def main(argv: list[str] | None = None) -> list[EpisodeMetrics]:
     if eval_rewards:
         print(f"  Mean eval reward             : {sum(eval_rewards) / len(eval_rewards):.4f}")
     print(f"  Total env steps              : {agent.total_steps}")
-    print(f"  Final ε                      : {agent.epsilon:.4f}")
 
     if args.render:
         agent.set_goal(eval_goal)

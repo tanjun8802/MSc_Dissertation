@@ -4,7 +4,7 @@ compare_approaches.py
 Side-by-side comparison of three RL approaches on the GridWorld environment:
 
     1. **Random Baseline**  — uniformly random action selection (no learning)
-    2. **GCRL**             — Goal-Conditioned Q-Learning + Hindsight Experience Replay
+    2. **GCRL**             — Single-Goal Contrastive RL (Liu, Tang & Eysenbach, 2024)
     3. **RCRL**             — Reward-Conditioned Q-Learning (reward-parameterization-conditioned)
 
 The script runs all three approaches under the same GridWorld configuration,
@@ -120,8 +120,8 @@ def run_random_baseline(
 def run_gcrl(
     height: int, width: int, max_steps: int,
     episodes: int, eval_goal: int, seed: int,
-    alpha: float, epsilon: float, epsilon_min: float,
-    epsilon_decay: float, her_k: int, gamma: float,
+    alpha: float, temperature: float, n_negatives: int,
+    logsumexp_reg: float, buffer_capacity: int, gamma: float,
     eval_every: int, log_dir: str,
 ) -> ApproachResult:
     env = GridWorld(height=height, width=width, max_steps=max_steps)
@@ -129,9 +129,11 @@ def run_gcrl(
         n_states=env.n_states,
         n_actions=env.n_actions,
         gamma=gamma, alpha=alpha,
-        epsilon=epsilon, epsilon_min=epsilon_min,
-        epsilon_decay=epsilon_decay,
-        her_k=her_k, seed=seed,
+        temperature=temperature,
+        n_negatives=n_negatives,
+        logsumexp_reg=logsumexp_reg,
+        buffer_capacity=buffer_capacity,
+        seed=seed,
     )
     exp = GCRLExperiment(
         env=env, agent=agent, eval_goal=eval_goal,
@@ -142,7 +144,7 @@ def run_gcrl(
     train_metrics = [m for m in metrics if m.training]
     eval_metrics = [m for m in metrics if not m.training]
     return ApproachResult(
-        name="GCRL (Goal-Conditioned + HER)",
+        name="GCRL (Single-Goal Contrastive RL)",
         all_rewards=[m.total_reward for m in train_metrics],
         eval_rewards=[m.total_reward for m in eval_metrics],
         total_steps=agent.total_steps,
@@ -194,7 +196,7 @@ def run_rcrl(
 
 def _print_table(results: list[ApproachResult]) -> None:
     """Print a comparison table to stdout."""
-    col_w = 32
+    col_w = 36
     num_w = 14
 
     header = (
@@ -256,10 +258,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-steps", type=int, default=200, help="Max steps per episode.")
     parser.add_argument("--gamma", type=float, default=0.99, help="Discount factor.")
     parser.add_argument("--alpha", type=float, default=0.1, help="Learning rate.")
-    parser.add_argument("--epsilon", type=float, default=1.0, help="Initial ε.")
-    parser.add_argument("--epsilon-min", type=float, default=0.05, help="Min ε.")
-    parser.add_argument("--epsilon-decay", type=float, default=0.995, help="ε decay.")
-    parser.add_argument("--her-k", type=int, default=4, help="HER substitutions (GCRL).")
+    # GCRL (contrastive RL) hyperparameters
+    parser.add_argument("--temperature", type=float, default=1.0, help="Softmax temperature τ (GCRL).")
+    parser.add_argument("--n-negatives", type=int, default=16, help="Negative examples per infoNCE update (GCRL).")
+    parser.add_argument("--logsumexp-reg", type=float, default=0.01, help="LogSumExp regularisation coefficient (GCRL).")
+    parser.add_argument("--buffer-capacity", type=int, default=10000, help="Replay buffer capacity (GCRL).")
+    # RCRL hyperparameters
+    parser.add_argument("--epsilon", type=float, default=1.0, help="Initial ε (RCRL).")
+    parser.add_argument("--epsilon-min", type=float, default=0.05, help="Min ε (RCRL).")
+    parser.add_argument("--epsilon-decay", type=float, default=0.995, help="ε decay (RCRL).")
     parser.add_argument("--n-psi-bins", type=int, default=5, help="Reward-parameterisation bins (RCRL).")
     parser.add_argument("--psi-min", type=float, default=-0.1, help="Most negative step-cost weight (RCRL, ≤ 0).")
     parser.add_argument("--psi-mix-alpha", type=float, default=0.5, help="Fraction of nominal ψ* draws in training mixture (RCRL).")
@@ -315,15 +322,17 @@ def main(argv: list[str] | None = None) -> None:
     # --- 2. GCRL -----------------------------------------------------------
     print()
     print("─" * 40)
-    print("Running: GCRL (Goal-Conditioned + HER) …")
+    print("Running: GCRL (Single-Goal Contrastive RL) …")
     r_gcrl = run_gcrl(
         height=args.height, width=args.width,
         max_steps=args.max_steps,
         episodes=args.episodes, eval_goal=eval_goal,
         seed=args.seed, alpha=args.alpha,
-        epsilon=args.epsilon, epsilon_min=args.epsilon_min,
-        epsilon_decay=args.epsilon_decay,
-        her_k=args.her_k, gamma=args.gamma,
+        temperature=args.temperature,
+        n_negatives=args.n_negatives,
+        logsumexp_reg=args.logsumexp_reg,
+        buffer_capacity=args.buffer_capacity,
+        gamma=args.gamma,
         eval_every=args.eval_every,
         log_dir=args.log_dir,
     )
