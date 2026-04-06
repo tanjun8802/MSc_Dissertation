@@ -90,6 +90,7 @@ class GoalConditionedAgent(BaseAgent):
         n_states: int,
         n_actions: int,
         gamma: float = 0.99,
+        contrastive_gamma: float | None = None,
         alpha: float = 0.1,
         temperature: float = 1.0,
         n_negatives: int = 16,
@@ -104,6 +105,15 @@ class GoalConditionedAgent(BaseAgent):
         self.n_negatives = n_negatives
         self.logsumexp_reg = logsumexp_reg
         self.buffer_capacity = buffer_capacity
+        # contrastive_gamma controls geometric future-state sampling in the
+        # infoNCE objective (Δ ~ Geom(1-contrastive_gamma) - 1).  It should be
+        # chosen so that the mean offset E[Δ] = contrastive_gamma/(1-contrastive_gamma)
+        # is comparable to the typical episode length.  Using the MDP discount
+        # gamma=0.99 on short episodes (e.g. 5×5 grid, ~8 steps to goal) makes
+        # sf=goal for >95% of sampled pairs, causing positive and negative
+        # samples to be identical and the infoNCE gradient to cancel to zero.
+        # Default: falls back to gamma so existing callers are unaffected.
+        self._contrastive_gamma: float = contrastive_gamma if contrastive_gamma is not None else gamma
 
         # Contrastive critic: C[s, a, sf] — logit that (s, a) reaches sf
         self.C = np.zeros((n_states, n_actions, n_states), dtype=np.float64)
@@ -233,9 +243,13 @@ class GoalConditionedAgent(BaseAgent):
         for t in range(n_transitions):
             s = self._episode_states[t]
             a = self._episode_actions[t]
-            # Δ ~ Geom(1-γ): np.random.geometric returns number of trials ≥ 1,
-            # subtract 1 for a 0-indexed offset so Δ ∈ {0, 1, 2, …}
-            delta = int(self.np_random.geometric(1.0 - self.gamma)) - 1
+            # Δ ~ Geom(1-contrastive_gamma): np.random.geometric returns number of trials ≥ 1,
+            # subtract 1 for a 0-indexed offset so Δ ∈ {0, 1, 2, …}.
+            # Use _contrastive_gamma (not the MDP gamma) so the mean offset
+            # E[Δ] = cγ/(1-cγ) matches the typical episode length rather than
+            # being dominated by the MDP discount (which can be 0.99 → E[Δ]=99,
+            # far exceeding short episodes and collapsing all sf to the goal).
+            delta = int(self.np_random.geometric(1.0 - self._contrastive_gamma)) - 1
             future_t = min(t + delta, n_states - 1)
             sf = self._episode_states[future_t]
             new_pairs.append((s, a, sf))
@@ -306,5 +320,6 @@ class GoalConditionedAgent(BaseAgent):
             f"GoalConditionedAgent("
             f"n_states={self.n_states}, n_actions={self.n_actions}, "
             f"alpha={self.alpha}, temperature={self.temperature}, "
-            f"n_negatives={self.n_negatives})"
+            f"n_negatives={self.n_negatives}, "
+            f"contrastive_gamma={self._contrastive_gamma})"
         )

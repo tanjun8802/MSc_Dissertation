@@ -129,6 +129,7 @@ def run_gcrl(
     alpha: float, temperature: float, n_negatives: int,
     logsumexp_reg: float, buffer_capacity: int, gamma: float,
     eval_every: int, log_dir: str,
+    contrastive_gamma: float | None = None,
 ) -> ApproachResult:
     # Training env: goal_pos is set so episodes terminate at the goal.
     # Algorithm 1 of Liu et al. (2024) requires the single hard target goal
@@ -141,6 +142,7 @@ def run_gcrl(
         n_states=env.n_states,
         n_actions=env.n_actions,
         gamma=gamma, alpha=alpha,
+        contrastive_gamma=contrastive_gamma,
         temperature=temperature,
         n_negatives=n_negatives,
         logsumexp_reg=logsumexp_reg,
@@ -277,6 +279,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--n-negatives", type=int, default=16, help="Negative examples per infoNCE update (GCRL).")
     parser.add_argument("--logsumexp-reg", type=float, default=0.01, help="LogSumExp regularisation coefficient (GCRL).")
     parser.add_argument("--buffer-capacity", type=int, default=10000, help="Replay buffer capacity (GCRL).")
+    parser.add_argument(
+        "--contrastive-gamma",
+        type=float,
+        default=0.9,
+        help=(
+            "Geometric future-state sampling gamma for the GCRL contrastive "
+            "objective.  Must match episode length: use ~0.9 for short "
+            "episodes (5×5 grid) and ~0.99 for long episodes (15×15 grid).  "
+            "Defaults to 0.9 for the 5×5 comparison grid."
+        ),
+    )
     # RCRL hyperparameters
     parser.add_argument("--epsilon", type=float, default=1.0, help="Initial ε (RCRL).")
     parser.add_argument("--epsilon-min", type=float, default=0.05, help="Min ε (RCRL).")
@@ -389,6 +402,7 @@ def compare_all(args: argparse.Namespace) -> list[ApproachResult]:
         gamma=args.gamma,
         eval_every=args.eval_every,
         log_dir=args.log_dir,
+        contrastive_gamma=args.contrastive_gamma,
     )
     results.append(r_gcrl)
     print(f"Done.  Mean eval reward = {r_gcrl.mean_eval_reward:.4f}")

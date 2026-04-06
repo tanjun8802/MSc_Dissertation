@@ -200,6 +200,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--n-negatives", type=int, default=16, help="Negative examples per infoNCE update.")
     parser.add_argument("--logsumexp-reg", type=float, default=0.01, help="LogSumExp regularisation coefficient.")
     parser.add_argument("--buffer-capacity", type=int, default=10000, help="Replay buffer capacity.")
+    parser.add_argument(
+        "--contrastive-gamma",
+        type=float,
+        default=None,
+        help=(
+            "Geometric future-state sampling parameter for the contrastive "
+            "objective (Δ ~ Geom(1-cγ)-1, mean offset = cγ/(1-cγ)).  "
+            "Should be chosen so the mean offset matches typical episode length. "
+            "Defaults to --gamma if not set.  "
+            "Rule of thumb: use ~0.9 for short episodes (5×5 grid) "
+            "and ~0.99 for long episodes (15×15 grid)."
+        ),
+    )
     parser.add_argument("--gamma", type=float, default=0.99, help="Discount factor.")
     parser.add_argument("--eval-every", type=int, default=50, help="Eval every N episodes.")
     parser.add_argument("--seed", type=int, default=42, help="Global random seed.")
@@ -237,6 +250,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             yaml_defaults["max_steps"] = env_cfg["max_steps"]
         if "gamma" in mdp_cfg:
             yaml_defaults["gamma"] = mdp_cfg["gamma"]
+        if "contrastive_gamma" in agent_cfg:
+            yaml_defaults["contrastive_gamma"] = agent_cfg["contrastive_gamma"]
         if "alpha" in agent_cfg:
             yaml_defaults["alpha"] = agent_cfg["alpha"]
         if "epsilon" in agent_cfg:
@@ -288,6 +303,7 @@ def main(argv: list[str] | None = None) -> list[EpisodeMetrics]:
         n_states=n_states,
         n_actions=env.n_actions,
         gamma=args.gamma,
+        contrastive_gamma=args.contrastive_gamma,
         alpha=args.alpha,
         temperature=args.temperature,
         n_negatives=args.n_negatives,

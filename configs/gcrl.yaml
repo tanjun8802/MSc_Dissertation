@@ -31,6 +31,11 @@ agent:
   # Contrastive critic hyperparameters
   alpha: 0.1              # step size for infoNCE critic updates
   temperature: 1.0        # softmax temperature τ for entropy-regularised policy
+  # Geometric future-state sampling gamma (separate from the MDP discount).
+  # Rule of thumb: choose so that mean offset = cγ/(1-cγ) ≈ typical episode length.
+  # For the 15×15 grid (episodes ~100-500 steps), 0.99 gives mean offset=99 (good).
+  # For the 5×5 comparison grid (episodes ~8-20 steps), use 0.9 (mean offset=9).
+  contrastive_gamma: 0.99
   # infoNCE hyperparameters (Eq. 3 in paper)
   n_negatives: 16         # number of negative future-state examples per update
   logsumexp_reg: 0.01     # LogSumExp regularisation coefficient (paper default)
