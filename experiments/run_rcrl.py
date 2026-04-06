@@ -59,7 +59,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from agents.reward_conditioned_agent import RewardConditionedAgent
 from environments.gridworld import GridWorld
 from experiments.base_experiment import BaseExperiment
+from utils.config import load_config
 from utils.metrics import EpisodeMetrics
+
+# Path to the YAML config for this experiment (sibling configs/ directory)
+_CONFIG_PATH = os.path.join(os.path.dirname(__file__), "..", "configs", "rcrl.yaml")
 
 
 # ---------------------------------------------------------------------------
@@ -197,6 +201,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         description="Reward-Conditioned RL on GridWorld.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
+    parser.add_argument("--config", type=str, default=_CONFIG_PATH, help="Path to YAML config file.")
     parser.add_argument("--height", type=int, default=5, help="Grid height.")
     parser.add_argument("--width", type=int, default=5, help="Grid width.")
     parser.add_argument(
@@ -219,6 +224,58 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42, help="Global random seed.")
     parser.add_argument("--render", action="store_true", help="Print ASCII grid after run.")
     parser.add_argument("--log-dir", type=str, default="logs/rcrl", help="Log directory.")
+
+    # --- Apply YAML config as defaults (CLI args override YAML) ---
+    pre_p = argparse.ArgumentParser(add_help=False)
+    pre_p.add_argument("--config", default=_CONFIG_PATH)
+    cfg_path = pre_p.parse_known_args(argv)[0].config
+    cfg = load_config(cfg_path)
+    if cfg:
+        env_cfg = cfg.get("env", {})
+        agent_cfg = cfg.get("agent", {})
+        training_cfg = cfg.get("training", {})
+        mdp_cfg = cfg.get("mdp", {})
+        log_cfg = cfg.get("logging", {})
+        yaml_defaults: dict = {}
+        if "height" in env_cfg:
+            yaml_defaults["height"] = env_cfg["height"]
+        if "width" in env_cfg:
+            yaml_defaults["width"] = env_cfg["width"]
+        if "max_steps" in env_cfg:
+            yaml_defaults["max_steps"] = env_cfg["max_steps"]
+        # goal_pos in YAML is [row, col]; convert to flat index using the
+        # YAML width (which may be overridden on the CLI, but we use YAML
+        # width here as that's the grid width the goal was specified for).
+        goal_pos = env_cfg.get("goal_pos")
+        if goal_pos is not None:
+            w = env_cfg.get("width", 5)
+            yaml_defaults["goal"] = goal_pos[0] * w + goal_pos[1]
+        if "gamma" in mdp_cfg:
+            yaml_defaults["gamma"] = mdp_cfg["gamma"]
+        if "n_psi_bins" in agent_cfg:
+            yaml_defaults["n_psi_bins"] = agent_cfg["n_psi_bins"]
+        if "psi_min" in agent_cfg:
+            yaml_defaults["psi_min"] = agent_cfg["psi_min"]
+        if "psi_mix_alpha" in agent_cfg:
+            yaml_defaults["psi_mix_alpha"] = agent_cfg["psi_mix_alpha"]
+        if "alpha" in agent_cfg:
+            yaml_defaults["alpha"] = agent_cfg["alpha"]
+        if "epsilon" in agent_cfg:
+            yaml_defaults["epsilon"] = agent_cfg["epsilon"]
+        if "epsilon_min" in agent_cfg:
+            yaml_defaults["epsilon_min"] = agent_cfg["epsilon_min"]
+        if "epsilon_decay" in agent_cfg:
+            yaml_defaults["epsilon_decay"] = agent_cfg["epsilon_decay"]
+        if "explore_episodes" in training_cfg:
+            yaml_defaults["explore_episodes"] = training_cfg["explore_episodes"]
+        if "exploit_episodes" in training_cfg:
+            yaml_defaults["exploit_episodes"] = training_cfg["exploit_episodes"]
+        if "seed" in training_cfg:
+            yaml_defaults["seed"] = training_cfg["seed"]
+        if "log_dir" in log_cfg:
+            yaml_defaults["log_dir"] = log_cfg["log_dir"]
+        parser.set_defaults(**yaml_defaults)
+
     return parser.parse_args(argv)
 
 

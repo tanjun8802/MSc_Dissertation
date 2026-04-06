@@ -24,8 +24,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from agents.random_agent import RandomAgent
 from environments.gridworld import GridWorld
+from utils.config import load_config
 from experiments.base_experiment import BaseExperiment
 from utils.metrics import EpisodeMetrics
+
+
+_CONFIG_PATH = os.path.join(os.path.dirname(__file__), "..", "configs", "default.yaml")
+
 
 
 # ---------------------------------------------------------------------------
@@ -67,7 +72,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42, help="Global random seed.")
     parser.add_argument("--render", action="store_true", help="Print ASCII grid after each episode.")
     parser.add_argument("--log-dir", type=str, default="logs", help="Directory for logs.")
+
+
+    pre_p = argparse.ArgumentParser(add_help=False)
+    pre_p.add_argument("--config", default=_CONFIG_PATH)
+    cfg_path = pre_p.parse_known_args(argv)[0].config
+    cfg = load_config(cfg_path)
+    if cfg:
+        # Override defaults with config values.
+        parser.set_defaults(**cfg)
+
     return parser.parse_args(argv)
+
+
 
 
 # ---------------------------------------------------------------------------

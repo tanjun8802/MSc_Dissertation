@@ -38,7 +38,7 @@ from agents.random_agent import RandomAgent
 from agents.goal_conditioned_agent import GoalConditionedAgent
 from agents.reward_conditioned_agent import RewardConditionedAgent
 from environments.gridworld import GridWorld
-from experiments.base_experiment import BaseExperiment
+from experiments.run_baseline import BaseExperiment
 from experiments.run_gcrl import GCRLExperiment
 from experiments.run_rcrl import RCRLExperiment
 from utils.metrics import EpisodeMetrics
