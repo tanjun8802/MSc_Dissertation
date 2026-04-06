@@ -204,6 +204,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--config", type=str, default=_CONFIG_PATH, help="Path to YAML config file.")
     parser.add_argument("--height", type=int, default=5, help="Grid height.")
     parser.add_argument("--width", type=int, default=5, help="Grid width.")
+    parser.add_argument("--start-pos", nargs=2, type=int, metavar=("ROW", "COL"), default=None, help="Start position as: ROW COL")
+    parser.add_argument("--goal-pos", nargs=2, type=int, metavar=("ROW", "COL"), default=None, help="Goal position as: ROW COL")
+    parser.add_argument("--walls", nargs="*", type=int, default=None, help="Wall coordinates as flat list: r1 c1 r2 c2 ...")
     parser.add_argument(
         "--goal",
         type=int,
@@ -246,10 +249,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         # goal_pos in YAML is [row, col]; convert to flat index using the
         # YAML width (which may be overridden on the CLI, but we use YAML
         # width here as that's the grid width the goal was specified for).
-        goal_pos = env_cfg.get("goal_pos")
-        if goal_pos is not None:
-            w = env_cfg.get("width", 5)
-            yaml_defaults["goal"] = goal_pos[0] * w + goal_pos[1]
+        if "start_pos" in env_cfg and env_cfg["start_pos"] is not None:
+            yaml_defaults["start_pos"] = list(env_cfg["start_pos"])
+        if "goal_pos" in env_cfg and env_cfg["goal_pos"] is not None:
+            yaml_defaults["goal_pos"] = list(env_cfg["goal_pos"])
+        if "walls" in env_cfg:
+            yaml_defaults["walls"] = [x for pair in env_cfg["walls"] for x in pair]
         if "gamma" in mdp_cfg:
             yaml_defaults["gamma"] = mdp_cfg["gamma"]
         if "n_psi_bins" in agent_cfg:

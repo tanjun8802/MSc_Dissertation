@@ -16,6 +16,7 @@ agent and environment to run real experiments.
 from __future__ import annotations
 
 import argparse
+from email import parser
 import sys
 import os
 
@@ -68,6 +69,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--config", type=str, default=_CONFIG_PATH, help="Path to YAML config file.")
     parser.add_argument("--height", type=int, default=5, help="Grid height.")
     parser.add_argument("--width", type=int, default=5, help="Grid width.")
+    parser.add_argument("--start-pos", nargs=2, type=int, metavar=("ROW", "COL"), default=None, help="Start position as: ROW COL")
+    parser.add_argument("--goal-pos", nargs=2, type=int, metavar=("ROW", "COL"), default=None, help="Goal position as: ROW COL")
+    parser.add_argument("--walls", nargs="*", type=int, default=None, help="Wall coordinates as flat list: r1 c1 r2 c2 ...")
     parser.add_argument("--episodes", type=int, default=20, help="Number of training episodes.")
     parser.add_argument("--max-steps", type=int, default=100, help="Max steps per episode.")
     parser.add_argument("--seed", type=int, default=42, help="Global random seed.")
@@ -79,6 +83,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     pre_p.add_argument("--config", default=_CONFIG_PATH)
     cfg_path = pre_p.parse_known_args(argv)[0].config
     cfg = load_config(cfg_path)
+    print(_CONFIG_PATH) 
     if cfg:
         env_cfg = cfg.get("env", {})
         training_cfg = cfg.get("training", {})
@@ -88,6 +93,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             yaml_defaults["height"] = env_cfg["height"]
         if "width" in env_cfg:
             yaml_defaults["width"] = env_cfg["width"]
+        if "start_pos" in env_cfg and env_cfg["start_pos"] is not None:
+            yaml_defaults["start_pos"] = list(env_cfg["start_pos"])
+        if "goal_pos" in env_cfg and env_cfg["goal_pos"] is not None:
+            yaml_defaults["goal_pos"] = list(env_cfg["goal_pos"])
+        if "walls" in env_cfg:
+            yaml_defaults["walls"] = [x for pair in env_cfg["walls"] for x in pair]
         if "max_steps" in env_cfg:
             yaml_defaults["max_steps"] = env_cfg["max_steps"]
         if "n_episodes" in training_cfg:
@@ -107,14 +118,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 # Main
 # ---------------------------------------------------------------------------
 
-
 def main(argv: list[str] | None = None) -> list[EpisodeMetrics]:
     args = parse_args(argv)
+
+    start_pos = tuple(args.start_pos) if args.start_pos is not None else (0, 0)
+    goal_pos = tuple(args.goal_pos) if args.goal_pos is not None else None
 
     env = GridWorld(
         height=args.height,
         width=args.width,
         max_steps=args.max_steps,
+        start_pos=start_pos,
+        goal_pos=goal_pos,
     )
     agent = RandomAgent(n_actions=env.n_actions, seed=args.seed)
 
