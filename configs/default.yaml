@@ -8,12 +8,12 @@
 # ------ Environment -------------------------------------------------------
 env:
   name: GridWorld          # environment class name (see environments/)
-  height: 5
-  width: 5
+  height: 15
+  width: 15
   start_pos: [0, 0]        # [row, col]
-  goal_pos: null           # null = reward-free mode (no terminal goal)
+  goal_pos: [14, 14]       # null = reward-free mode (no terminal goal)
   walls: []                # list of [row, col] wall positions
-  max_steps: 200           # episode time limit (null = unlimited)
+  max_steps: 500          # episode time limit (null = unlimited)
 
 # ------ MDP ---------------------------------------------------------------
 mdp:
@@ -27,7 +27,7 @@ agent:
   alpha: 0.1               # learning rate
   epsilon: 1.0             # initial ε for ε-greedy exploration
   epsilon_min: 0.05        # minimum ε after decay
-  epsilon_decay: 0.995     # multiplicative decay per episode
+  epsilon_decay: 0.995    # multiplicative decay per episode
 
 # ------ Training ----------------------------------------------------------
 training:
