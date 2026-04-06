@@ -171,11 +171,17 @@ class GoalConditionedAgent(BaseAgent):
         truncated: bool,
         info: dict,
     ) -> dict:
-        """Record the current state in the episode buffer.
+        """Record the current state (and terminal next-state) in the episode buffer.
 
         Contrastive RL is reward-free, so the reward argument is
         intentionally ignored.  The critic update happens at episode end
         via :meth:`finish_episode_with_contrastive_update`.
+
+        When ``terminated`` is ``True`` the goal state (``next_observation``)
+        is appended as the final entry in ``_episode_states``.  This is
+        essential: without it, the goal state can never appear as a future
+        state ``sf`` in the geometric future-sampling step, so the contrastive
+        critic would receive no signal about goal reachability.
 
         Returns
         -------
@@ -185,6 +191,10 @@ class GoalConditionedAgent(BaseAgent):
         state = int(np.asarray(observation).flat[0])
         self._episode_states.append(state)
         self._episode_actions.append(int(action))
+        # Append the goal (terminal next-state) so sf=goal can appear in pairs.
+        if terminated:
+            next_state = int(np.asarray(next_observation).flat[0])
+            self._episode_states.append(next_state)
         return {}
 
     def reset(self) -> None:
@@ -202,27 +212,31 @@ class GoalConditionedAgent(BaseAgent):
 
         Steps
         -----
-        1. For each step t in the episode, sample Δ ~ Geom(1-γ) and set
-           sf = s_{t+Δ} (capped at the episode end).  This produces
-           geometrically-discounted future-state pairs as described in
-           Sec. 3.1 of the paper.
+        1. For each *transition* t in the episode, sample Δ ~ Geom(1-γ) and
+           set sf = s_{t+Δ} (capped at the end of ``_episode_states``).
+           When the episode terminated at the goal, ``_episode_states`` has
+           one extra entry beyond ``_episode_actions`` (the goal state appended
+           by :meth:`update`), so sf can equal the goal — providing the
+           essential reachability signal for the contrastive critic.
         2. Append new pairs to the circular replay buffer.
         3. Sample a mini-batch and apply the infoNCE + LogSumExp reg update
            (Eq. 3 in the paper) to the tabular critic C[s, a, sf].
         """
-        n = len(self._episode_states)
-        if n == 0:
+        n_transitions = len(self._episode_actions)
+        n_states = len(self._episode_states)   # may be n_transitions + 1 if goal appended
+        if n_transitions == 0:
             return
 
-        # Step 1: generate (s, a, sf) pairs using geometric future sampling
+        # Step 1: generate (s, a, sf) pairs using geometric future sampling.
+        # Loop over transitions only; future_t can reach the appended goal state.
         new_pairs: list[tuple[int, int, int]] = []
-        for t in range(n):
+        for t in range(n_transitions):
             s = self._episode_states[t]
             a = self._episode_actions[t]
             # Δ ~ Geom(1-γ): np.random.geometric returns number of trials ≥ 1,
             # subtract 1 for a 0-indexed offset so Δ ∈ {0, 1, 2, …}
             delta = int(self.np_random.geometric(1.0 - self.gamma)) - 1
-            future_t = min(t + delta, n - 1)
+            future_t = min(t + delta, n_states - 1)
             sf = self._episode_states[future_t]
             new_pairs.append((s, a, sf))
 

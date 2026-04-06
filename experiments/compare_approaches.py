@@ -128,7 +128,13 @@ def run_gcrl(
     logsumexp_reg: float, buffer_capacity: int, gamma: float,
     eval_every: int, log_dir: str,
 ) -> ApproachResult:
-    env = GridWorld(height=height, width=width, max_steps=max_steps)
+    # Training env: goal_pos is set so episodes terminate at the goal.
+    # Algorithm 1 of Liu et al. (2024) requires the single hard target goal
+    # to be a terminal state; without it the contrastive critic never receives
+    # (s, a, sf=goal) pairs and learns nothing about goal reachability.
+    goal_row, goal_col = divmod(eval_goal, width)
+    env = GridWorld(height=height, width=width,
+                    goal_pos=(goal_row, goal_col), max_steps=max_steps)
     agent = GoalConditionedAgent(
         n_states=env.n_states,
         n_actions=env.n_actions,

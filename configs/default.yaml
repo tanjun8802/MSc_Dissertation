@@ -4,16 +4,21 @@
 #
 # Override individual keys from the CLI or by loading a custom YAML file
 # and merging it with this default.
+#
+# NOTE: This config is shared by compare_approaches.py.  A 5×5 grid with
+# 300 episodes is the right size for the quick comparison; for a full-scale
+# run use the algorithm-specific configs (rcrl.yaml / gcrl.yaml) which target
+# a 15×15 grid with 1000 episodes.
 
 # ------ Environment -------------------------------------------------------
 env:
   name: GridWorld          # environment class name (see environments/)
-  height: 15
-  width: 15
+  height: 5
+  width: 5
   start_pos: [0, 0]        # [row, col]
-  goal_pos: [14, 14]       # null = reward-free mode (no terminal goal)
+  goal_pos: [4, 4]         # null = reward-free mode (no terminal goal)
   walls: []                # list of [row, col] wall positions
-  max_steps: 500          # episode time limit (null = unlimited)
+  max_steps: 200          # episode time limit (null = unlimited)
 
 # ------ MDP ---------------------------------------------------------------
 mdp:
@@ -31,8 +36,8 @@ agent:
 
 # ------ Training ----------------------------------------------------------
 training:
-  n_episodes: 1000         # total training episodes
-  eval_every: 100          # evaluate every N episodes (0 = disabled)
+  n_episodes: 300         # total training episodes
+  eval_every: 50          # evaluate every N episodes (0 = disabled)
   seed: 42
 
 # ------ Replay buffer -----------------------------------------------------

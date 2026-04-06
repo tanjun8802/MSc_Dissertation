@@ -268,15 +268,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> list[EpisodeMetrics]:
     args = parse_args(argv)
 
-    # Training env is reward-free (no goal_pos) — contrastive RL needs no reward
+    n_states = args.height * args.width
+    eval_goal = args.goal if args.goal is not None else n_states - 1
+    goal_row, goal_col = divmod(eval_goal, args.width)
+
+    # Training env: goal_pos is set so episodes terminate at the goal.
+    # This is required by Algorithm 1 of Liu et al. (2024) — the single hard
+    # target goal must be the terminal state so that the geometric future-state
+    # sampling produces (s, a, sf=goal) pairs with strong causal signal.
+    # No reward signal is used by the contrastive critic (reward-free learning).
     env = GridWorld(
         height=args.height,
         width=args.width,
+        goal_pos=(goal_row, goal_col),
         max_steps=args.max_steps,
     )
-
-    n_states = env.n_states
-    eval_goal = args.goal if args.goal is not None else n_states - 1
 
     agent = GoalConditionedAgent(
         n_states=n_states,
