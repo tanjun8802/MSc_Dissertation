@@ -322,32 +322,31 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 # ---------------------------------------------------------------------------
-# Main
+# compare_all — importable by the evaluation notebook
 # ---------------------------------------------------------------------------
 
 
-def main(argv: list[str] | None = None) -> None:
-    args = parse_args(argv)
+def compare_all(args: argparse.Namespace) -> list[ApproachResult]:
+    """Run all three RL approaches and return their results.
 
+    Parameters
+    ----------
+    args :
+        Parsed argument namespace produced by :func:`parse_args`.
+        All required fields (height, width, episodes, …) must be present.
+
+    Returns
+    -------
+    list[ApproachResult]
+        Results for Random Baseline, GCRL, and RCRL in that order.
+    """
     n_states = args.height * args.width
-    eval_goal = n_states - 1  # bottom-right cell
+    eval_goal = n_states - 1
     goal_row, goal_col = divmod(eval_goal, args.width)
     goal_pos = (goal_row, goal_col)
 
-    # Split episodes: use 80% for RCRL exploration, 20% for exploitation
     rcrl_explore = max(10, int(args.episodes * 0.8))
     rcrl_exploit = max(5, args.episodes - rcrl_explore)
-
-    print("=" * 60)
-    print("Comparing RL Approaches on GridWorld")
-    print("=" * 60)
-    print(f"  Grid          : {args.height}×{args.width}")
-    print(f"  Goal          : state {eval_goal} ({goal_row},{goal_col})")
-    print(f"  Max steps     : {args.max_steps}")
-    print(f"  Episodes      : {args.episodes} (per approach)")
-    print(f"  RCRL explore  : {rcrl_explore}  /  exploit: {rcrl_exploit}")
-    print(f"  Seed          : {args.seed}")
-    print()
 
     results: list[ApproachResult] = []
 
@@ -404,7 +403,37 @@ def main(argv: list[str] | None = None) -> None:
     results.append(r_rcrl)
     print(f"Done.  Mean exploit reward = {r_rcrl.mean_eval_reward:.4f}")
 
-    # --- Print comparison table -------------------------------------------
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = parse_args(argv)
+
+    n_states = args.height * args.width
+    eval_goal = n_states - 1
+    goal_row, goal_col = divmod(eval_goal, args.width)
+    goal_pos = (goal_row, goal_col)
+    rcrl_explore = max(10, int(args.episodes * 0.8))
+    rcrl_exploit = max(5, args.episodes - rcrl_explore)
+
+    print("=" * 60)
+    print("Comparing RL Approaches on GridWorld")
+    print("=" * 60)
+    print(f"  Grid          : {args.height}×{args.width}")
+    print(f"  Goal          : state {eval_goal} ({goal_row},{goal_col})")
+    print(f"  Max steps     : {args.max_steps}")
+    print(f"  Episodes      : {args.episodes} (per approach)")
+    print(f"  RCRL explore  : {rcrl_explore}  /  exploit: {rcrl_exploit}")
+    print(f"  Seed          : {args.seed}")
+    print()
+
+    results = compare_all(args)
+
     _print_table(results)
 
     if args.render:

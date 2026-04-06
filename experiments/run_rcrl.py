@@ -124,6 +124,7 @@ class RCRLExperiment(BaseExperiment):
             all_metrics.append(metrics)
 
             finish_info = self.agent.finish_episode()
+            metrics.epsilon = self.agent.epsilon  # record decayed ε before logging
             self.logger.log_episode(episode, metrics)
 
             if episode % max(1, self.n_explore // 5) == 0:
@@ -145,11 +146,13 @@ class RCRLExperiment(BaseExperiment):
         self.agent.epsilon = self.agent.epsilon_min
 
         exploit_rewards = []
+        last_exploit_metrics: EpisodeMetrics | None = None
         for ep_idx in range(1, self.n_exploit + 1):
             episode = self.n_explore + ep_idx
             metrics = self._run_exploit_episode(episode)
             all_metrics.append(metrics)
             exploit_rewards.append(metrics.total_reward)
+            last_exploit_metrics = metrics
 
             self.logger.log_eval(episode, metrics)
 
@@ -162,6 +165,12 @@ class RCRLExperiment(BaseExperiment):
                     f"mean_reward(recent)={sum(last)/len(last):.3f}"
                 )
 
+        # Save trajectory of the last exploitation episode for visualisation
+        if last_exploit_metrics is not None and last_exploit_metrics.trajectory:
+            self.logger.log_trajectory(
+                last_exploit_metrics.episode, last_exploit_metrics.trajectory
+            )
+
         return all_metrics
 
     def _run_exploit_episode(self, episode: int) -> EpisodeMetrics:
@@ -171,12 +180,15 @@ class RCRLExperiment(BaseExperiment):
 
         total_reward = 0.0
         steps = 0
+        trajectory: list[tuple[int, int, int, float]] = []
 
         while True:
+            state = int(np.asarray(obs).flat[0])
             action = self.agent.select_action(obs, greedy=True)
             next_obs, reward, terminated, truncated, info = self.env.step(action)
             total_reward += float(reward)
             steps += 1
+            trajectory.append((steps, state, int(action), float(reward)))
             obs = next_obs
 
             if terminated or truncated:
@@ -188,6 +200,7 @@ class RCRLExperiment(BaseExperiment):
             length=steps,
             training=False,
             step_metrics=[],
+            trajectory=trajectory,
         )
 
 

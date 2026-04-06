@@ -97,6 +97,7 @@ class BaseExperiment(ABC):
     def run(self) -> list[EpisodeMetrics]:
         """Run all training episodes and return per-episode metric records."""
         all_metrics: list[EpisodeMetrics] = []
+        last_eval_metrics: EpisodeMetrics | None = None
 
         for episode in range(1, self.n_episodes + 1):
             metrics = self._run_episode(episode, training=True)
@@ -105,7 +106,19 @@ class BaseExperiment(ABC):
 
             if self.eval_every > 0 and episode % self.eval_every == 0:
                 eval_metrics = self._run_episode(episode, training=False)
+                all_metrics.append(eval_metrics)
                 self.logger.log_eval(episode, eval_metrics)
+                last_eval_metrics = eval_metrics
+
+        # Save trajectory of last eval episode; fall back to last training episode
+        # when no eval episodes were run (e.g. eval_every=0 for the baseline).
+        final = (
+            last_eval_metrics
+            if last_eval_metrics is not None
+            else (all_metrics[-1] if all_metrics else None)
+        )
+        if final is not None and final.trajectory:
+            self.logger.log_trajectory(final.episode, final.trajectory)
 
         return all_metrics
 
@@ -117,8 +130,11 @@ class BaseExperiment(ABC):
         total_reward = 0.0
         steps = 0
         step_metrics_list: list[dict] = []
+        trajectory: list[tuple[int, int, int, float]] = []
 
         while True:
+            state = int(np.asarray(obs).flat[0])
+
             if training:
                 action = self.agent.select_action(obs)
             else:
@@ -127,6 +143,7 @@ class BaseExperiment(ABC):
             next_obs, reward, terminated, truncated, info = self.env.step(action)
             total_reward += float(reward)
             steps += 1
+            trajectory.append((steps, state, int(action), float(reward)))
 
             if training:
                 step_metrics = self.train_step(
@@ -145,4 +162,5 @@ class BaseExperiment(ABC):
             length=steps,
             training=training,
             step_metrics=step_metrics_list,
+            trajectory=trajectory,
         )

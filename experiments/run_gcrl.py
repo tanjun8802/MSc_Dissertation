@@ -105,6 +105,7 @@ class GCRLExperiment(BaseExperiment):
     def run(self) -> list[EpisodeMetrics]:
         """Override run() to apply the contrastive update after each episode."""
         all_metrics: list[EpisodeMetrics] = []
+        last_eval_metrics: EpisodeMetrics | None = None
 
         for episode in range(1, self.n_episodes + 1):
             # Always use the single hard target goal (Algorithm 1 in paper)
@@ -122,11 +123,18 @@ class GCRLExperiment(BaseExperiment):
                 eval_metrics = self._run_gcrl_eval(episode)
                 all_metrics.append(eval_metrics)
                 self.logger.log_eval(episode, eval_metrics)
+                last_eval_metrics = eval_metrics
                 print(
                     f"  [eval] goal={self.eval_goal}  "
                     f"reward={eval_metrics.total_reward:.2f}  "
                     f"length={eval_metrics.length}"
                 )
+
+        # Save trajectory of the last evaluation episode for visualisation
+        if last_eval_metrics is not None and last_eval_metrics.trajectory:
+            self.logger.log_trajectory(
+                last_eval_metrics.episode, last_eval_metrics.trajectory
+            )
 
         return all_metrics
 
@@ -138,6 +146,7 @@ class GCRLExperiment(BaseExperiment):
 
         total_reward = 0.0
         steps = 0
+        trajectory: list[tuple[int, int, int, float]] = []
 
         while True:
             state = int(np.asarray(obs).flat[0])
@@ -146,6 +155,7 @@ class GCRLExperiment(BaseExperiment):
             next_obs, reward, terminated, truncated, info = self._eval_env.step(action)
             total_reward += float(reward)
             steps += 1
+            trajectory.append((steps, state, action, float(reward)))
             obs = next_obs
 
             if terminated or truncated:
@@ -157,6 +167,7 @@ class GCRLExperiment(BaseExperiment):
             length=steps,
             training=False,
             step_metrics=[],
+            trajectory=trajectory,
         )
 
 

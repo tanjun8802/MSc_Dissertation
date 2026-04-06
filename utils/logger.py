@@ -42,6 +42,10 @@ class Logger:
         self._csv_path = os.path.join(log_dir, filename)
         self._csv_file = None
         self._csv_writer = None
+        # Trajectory log (written on demand via log_trajectory)
+        self._traj_path = os.path.join(log_dir, "trajectory.csv")
+        self._traj_file = None
+        self._traj_writer = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -61,11 +65,50 @@ class Logger:
             elapsed = time.time() - self._start_time
             print(f"[{elapsed:>7.1f}s] {metrics}  ← EVAL")
 
+    def log_trajectory(
+        self,
+        episode: int,
+        trajectory: list[tuple[int, int, int, float]],
+    ) -> None:
+        """Write a single episode's trajectory to ``trajectory.csv``.
+
+        Parameters
+        ----------
+        episode :
+            Episode index to associate with this trajectory.
+        trajectory :
+            List of ``(step, state, action, reward)`` tuples recorded during
+            the episode.
+        """
+        if not trajectory:
+            return
+        fieldnames = ["episode", "step", "state", "action", "reward"]
+        if self._traj_writer is None:
+            os.makedirs(self.log_dir, exist_ok=True)
+            self._traj_file = open(self._traj_path, "w", newline="")  # noqa: SIM115
+            self._traj_writer = csv.DictWriter(self._traj_file, fieldnames=fieldnames)
+            self._traj_writer.writeheader()
+        for step, state, action, reward in trajectory:
+            self._traj_writer.writerow(
+                {
+                    "episode": episode,
+                    "step": step,
+                    "state": state,
+                    "action": action,
+                    "reward": reward,
+                }
+            )
+        if self._traj_file is not None:
+            self._traj_file.flush()
+
     def close(self) -> None:
-        """Flush and close the CSV file."""
+        """Flush and close all open CSV files."""
         if self._csv_file is not None:
             self._csv_file.close()
             self._csv_file = None
+        if self._traj_file is not None:
+            self._traj_file.close()
+            self._traj_file = None
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -86,6 +129,7 @@ class Logger:
             "mode": mode,
             "total_reward": metrics.total_reward,
             "length": metrics.length,
+            "epsilon": metrics.epsilon if metrics.epsilon is not None else "",
             "elapsed_s": round(time.time() - self._start_time, 3),
         }
         self._ensure_csv_open(list(row.keys()))
