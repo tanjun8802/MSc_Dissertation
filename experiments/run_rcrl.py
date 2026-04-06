@@ -114,8 +114,19 @@ class RCRLExperiment(BaseExperiment):
         return self.agent.update(obs, action, reward, next_obs, terminated, truncated, info)
 
     def run(self) -> list[EpisodeMetrics]:
-        """Two-phase training loop."""
+        """Two-phase training loop with optional interleaved evaluation.
+
+        Phase 1 (explore): ``n_explore`` episodes of ε-greedy Q-learning with
+        diverse ψ sampling.  If ``eval_every > 0``, a greedy evaluation
+        episode (``ε = epsilon_min``, ``ψ = ψ*``) is inserted every
+        ``eval_every`` training episodes and logged with ``mode='eval'``.
+
+        Phase 2 (exploit): ``n_exploit`` additional greedy episodes under ψ*
+        (``ε = epsilon_min``).  These run only when ``n_exploit > 0`` and
+        appear after all training episodes on the timeline.
+        """
         all_metrics: list[EpisodeMetrics] = []
+        last_eval_metrics: EpisodeMetrics | None = None
 
         # --- Phase 1: Training -------------------------------------------
         print("Phase 1 — Training (Q-learning with diverse ψ sampling) …")
@@ -123,7 +134,7 @@ class RCRLExperiment(BaseExperiment):
             metrics = self._run_episode(episode, training=True)
             all_metrics.append(metrics)
 
-            finish_info = self.agent.finish_episode()
+            self.agent.finish_episode()
             metrics.epsilon = self.agent.epsilon  # record decayed ε before logging
             self.logger.log_episode(episode, metrics)
 
@@ -137,38 +148,50 @@ class RCRLExperiment(BaseExperiment):
                     f"ε={self.agent.epsilon:.3f}"
                 )
 
-        # --- Phase 2: Exploitation -------------------------------------------
-        print(
-            f"\nPhase 2 — Exploitation "
-            f"(greedy under nominal ψ*, ε={self.agent.epsilon_min}) …"
-        )
-        # Lock ε at minimum for near-greedy behaviour
-        self.agent.epsilon = self.agent.epsilon_min
-
-        exploit_rewards = []
-        last_exploit_metrics: EpisodeMetrics | None = None
-        for ep_idx in range(1, self.n_exploit + 1):
-            episode = self.n_explore + ep_idx
-            metrics = self._run_exploit_episode(episode)
-            all_metrics.append(metrics)
-            exploit_rewards.append(metrics.total_reward)
-            last_exploit_metrics = metrics
-
-            self.logger.log_eval(episode, metrics)
-
-            if ep_idx % max(1, self.n_exploit // 5) == 0:
-                last = exploit_rewards[-max(1, len(exploit_rewards) // 5):]
+            # Interleaved greedy eval (same protocol as exploit phase)
+            if self.eval_every > 0 and episode % self.eval_every == 0:
+                eval_metrics = self._run_exploit_episode(episode)
+                all_metrics.append(eval_metrics)
+                last_eval_metrics = eval_metrics
+                self.logger.log_eval(episode, eval_metrics)
                 print(
-                    f"  [exploit ep {ep_idx:>3d}]  "
-                    f"reward={metrics.total_reward:.2f}  "
-                    f"length={metrics.length:>3d}  "
-                    f"mean_reward(recent)={sum(last)/len(last):.3f}"
+                    f"  [eval ep {episode:>4d}]  "
+                    f"reward={eval_metrics.total_reward:.2f}  "
+                    f"length={eval_metrics.length:>3d}"
                 )
 
-        # Save trajectory of the last exploitation episode for visualisation
-        if last_exploit_metrics is not None and last_exploit_metrics.trajectory:
+        # --- Phase 2: Exploitation (optional terminal block) ----------------
+        if self.n_exploit > 0:
+            print(
+                f"\nPhase 2 — Exploitation "
+                f"(greedy under nominal ψ*, ε={self.agent.epsilon_min}) …"
+            )
+            # Lock ε at minimum for near-greedy behaviour
+            self.agent.epsilon = self.agent.epsilon_min
+
+            exploit_rewards: list[float] = []
+            for ep_idx in range(1, self.n_exploit + 1):
+                episode = self.n_explore + ep_idx
+                metrics = self._run_exploit_episode(episode)
+                all_metrics.append(metrics)
+                exploit_rewards.append(metrics.total_reward)
+                last_eval_metrics = metrics
+
+                self.logger.log_eval(episode, metrics)
+
+                if ep_idx % max(1, self.n_exploit // 5) == 0:
+                    last = exploit_rewards[-max(1, len(exploit_rewards) // 5):]
+                    print(
+                        f"  [exploit ep {ep_idx:>3d}]  "
+                        f"reward={metrics.total_reward:.2f}  "
+                        f"length={metrics.length:>3d}  "
+                        f"mean_reward(recent)={sum(last)/len(last):.3f}"
+                    )
+
+        # Save trajectory of the last evaluation / exploitation episode
+        if last_eval_metrics is not None and last_eval_metrics.trajectory:
             self.logger.log_trajectory(
-                last_exploit_metrics.episode, last_exploit_metrics.trajectory
+                last_eval_metrics.episode, last_eval_metrics.trajectory
             )
 
         return all_metrics

@@ -102,20 +102,22 @@ def _mean(vals: Sequence[float]) -> float:
 
 def run_random_baseline(
     height: int, width: int, goal_pos: tuple[int, int], max_steps: int,
-    episodes: int, seed: int, log_dir: str,
+    episodes: int, seed: int, log_dir: str, eval_every: int = 0,
 ) -> ApproachResult:
     env = GridWorld(height=height, width=width, goal_pos=goal_pos, max_steps=max_steps)
     agent = RandomAgent(n_actions=env.n_actions, seed=seed)
     exp = RandomBaselineExperiment(
         env=env, agent=agent, n_episodes=episodes,
-        eval_every=0, seed=seed,
+        eval_every=eval_every, seed=seed,
         log_dir=os.path.join(log_dir, "random"),
     )
     metrics = exp.run()
+    train_metrics = [m for m in metrics if m.training]
+    eval_metrics = [m for m in metrics if not m.training]
     return ApproachResult(
         name="Random Baseline",
-        all_rewards=[m.total_reward for m in metrics],
-        eval_rewards=[],
+        all_rewards=[m.total_reward for m in train_metrics],
+        eval_rewards=[m.total_reward for m in eval_metrics],
         total_steps=agent.total_steps,
         n_episodes=episodes,
     )
@@ -167,7 +169,7 @@ def run_rcrl(
     explore_episodes: int, exploit_episodes: int,
     n_psi_bins: int, psi_min: float, psi_mix_alpha: float, alpha: float,
     epsilon: float, epsilon_min: float, epsilon_decay: float,
-    gamma: float, seed: int, log_dir: str,
+    gamma: float, seed: int, log_dir: str, eval_every: int = 0,
 ) -> ApproachResult:
     env = GridWorld(height=height, width=width, goal_pos=goal_pos, max_steps=max_steps)
     agent = RewardConditionedAgent(
@@ -185,6 +187,7 @@ def run_rcrl(
         env=env, agent=agent,
         n_explore=explore_episodes,
         n_exploit=exploit_episodes,
+        eval_every=eval_every,
         seed=seed, log_dir=os.path.join(log_dir, "rcrl"),
     )
     metrics = exp.run()
@@ -335,6 +338,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def compare_all(args: argparse.Namespace) -> list[ApproachResult]:
     """Run all three RL approaches and return their results.
 
+    All three approaches train for ``args.episodes`` episodes and are
+    evaluated with the same greedy protocol every ``args.eval_every``
+    episodes so that the results are directly comparable.
+
     Parameters
     ----------
     args :
@@ -351,9 +358,6 @@ def compare_all(args: argparse.Namespace) -> list[ApproachResult]:
     goal_row, goal_col = divmod(eval_goal, args.width)
     goal_pos = (goal_row, goal_col)
 
-    rcrl_explore = max(10, int(args.episodes * 0.8))
-    rcrl_exploit = max(5, args.episodes - rcrl_explore)
-
     results: list[ApproachResult] = []
 
     # --- 1. Random baseline ------------------------------------------------
@@ -363,6 +367,7 @@ def compare_all(args: argparse.Namespace) -> list[ApproachResult]:
         height=args.height, width=args.width,
         goal_pos=goal_pos, max_steps=args.max_steps,
         episodes=args.episodes, seed=args.seed,
+        eval_every=args.eval_every,
         log_dir=args.log_dir,
     )
     results.append(r_random)
@@ -389,14 +394,17 @@ def compare_all(args: argparse.Namespace) -> list[ApproachResult]:
     print(f"Done.  Mean eval reward = {r_gcrl.mean_eval_reward:.4f}")
 
     # --- 3. RCRL -----------------------------------------------------------
+    # All episodes used for training (with interleaved eval every eval_every).
+    # No separate terminal exploitation block — keeps the episode budgets
+    # and x-axis positions consistent with Random and GCRL.
     print()
     print("─" * 40)
     print("Running: RCRL (Reward-Conditioned) …")
     r_rcrl = run_rcrl(
         height=args.height, width=args.width,
         goal_pos=goal_pos, max_steps=args.max_steps,
-        explore_episodes=rcrl_explore,
-        exploit_episodes=rcrl_exploit,
+        explore_episodes=args.episodes,
+        exploit_episodes=0,
         n_psi_bins=args.n_psi_bins,
         psi_min=args.psi_min,
         psi_mix_alpha=args.psi_mix_alpha,
@@ -404,10 +412,11 @@ def compare_all(args: argparse.Namespace) -> list[ApproachResult]:
         epsilon=args.epsilon, epsilon_min=args.epsilon_min,
         epsilon_decay=args.epsilon_decay,
         gamma=args.gamma, seed=args.seed,
+        eval_every=args.eval_every,
         log_dir=args.log_dir,
     )
     results.append(r_rcrl)
-    print(f"Done.  Mean exploit reward = {r_rcrl.mean_eval_reward:.4f}")
+    print(f"Done.  Mean eval reward = {r_rcrl.mean_eval_reward:.4f}")
 
     return results
 
@@ -424,8 +433,6 @@ def main(argv: list[str] | None = None) -> None:
     eval_goal = n_states - 1
     goal_row, goal_col = divmod(eval_goal, args.width)
     goal_pos = (goal_row, goal_col)
-    rcrl_explore = max(10, int(args.episodes * 0.8))
-    rcrl_exploit = max(5, args.episodes - rcrl_explore)
 
     print("=" * 60)
     print("Comparing RL Approaches on GridWorld")
@@ -433,8 +440,8 @@ def main(argv: list[str] | None = None) -> None:
     print(f"  Grid          : {args.height}×{args.width}")
     print(f"  Goal          : state {eval_goal} ({goal_row},{goal_col})")
     print(f"  Max steps     : {args.max_steps}")
-    print(f"  Episodes      : {args.episodes} (per approach)")
-    print(f"  RCRL explore  : {rcrl_explore}  /  exploit: {rcrl_exploit}")
+    print(f"  Episodes      : {args.episodes} (per approach, all training)")
+    print(f"  Eval every    : {args.eval_every} episodes")
     print(f"  Seed          : {args.seed}")
     print()
 
