@@ -65,6 +65,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         description="Random-agent baseline on GridWorld.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
+    parser.add_argument("--config", type=str, default=_CONFIG_PATH, help="Path to YAML config file.")
     parser.add_argument("--height", type=int, default=5, help="Grid height.")
     parser.add_argument("--width", type=int, default=5, help="Grid width.")
     parser.add_argument("--episodes", type=int, default=20, help="Number of training episodes.")
@@ -73,14 +74,29 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--render", action="store_true", help="Print ASCII grid after each episode.")
     parser.add_argument("--log-dir", type=str, default="logs", help="Directory for logs.")
 
-
+    # --- Apply YAML config as defaults (CLI args override YAML) ---
     pre_p = argparse.ArgumentParser(add_help=False)
     pre_p.add_argument("--config", default=_CONFIG_PATH)
     cfg_path = pre_p.parse_known_args(argv)[0].config
     cfg = load_config(cfg_path)
     if cfg:
-        # Override defaults with config values.
-        parser.set_defaults(**cfg)
+        env_cfg = cfg.get("env", {})
+        training_cfg = cfg.get("training", {})
+        log_cfg = cfg.get("logging", {})
+        yaml_defaults: dict = {}
+        if "height" in env_cfg:
+            yaml_defaults["height"] = env_cfg["height"]
+        if "width" in env_cfg:
+            yaml_defaults["width"] = env_cfg["width"]
+        if "max_steps" in env_cfg:
+            yaml_defaults["max_steps"] = env_cfg["max_steps"]
+        if "n_episodes" in training_cfg:
+            yaml_defaults["episodes"] = training_cfg["n_episodes"]
+        if "seed" in training_cfg:
+            yaml_defaults["seed"] = training_cfg["seed"]
+        if "log_dir" in log_cfg:
+            yaml_defaults["log_dir"] = log_cfg["log_dir"]
+        parser.set_defaults(**yaml_defaults)
 
     return parser.parse_args(argv)
 
