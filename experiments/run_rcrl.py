@@ -130,6 +130,13 @@ class RCRLExperiment(BaseExperiment):
 
         # --- Phase 1: Training -------------------------------------------
         print("Phase 1 — Training (Q-learning with diverse ψ sampling) …")
+        # Pre-compute stage milestones for Q-table snapshots (early/mid/late)
+        _n = self.n_explore
+        _q_milestones = {
+            max(1, _n // 3): "early",
+            max(1, 2 * _n // 3): "mid",
+            _n: "late",
+        }
         for episode in range(1, self.n_explore + 1):
             metrics = self._run_episode(episode, training=True)
             all_metrics.append(metrics)
@@ -148,7 +155,6 @@ class RCRLExperiment(BaseExperiment):
                     f"ε={self.agent.epsilon:.3f}"
                 )
 
-            # Interleaved greedy eval (same protocol as exploit phase)
             if self.eval_every > 0 and episode % self.eval_every == 0:
                 eval_metrics = self._run_exploit_episode(episode)
                 all_metrics.append(eval_metrics)
@@ -158,6 +164,15 @@ class RCRLExperiment(BaseExperiment):
                     f"  [eval ep {episode:>4d}]  "
                     f"reward={eval_metrics.total_reward:.2f}  "
                     f"length={eval_metrics.length:>3d}"
+                )
+
+            # Save Q-table snapshot at early / mid / late milestones
+            if episode in _q_milestones:
+                stage = _q_milestones[episode]
+                q_slice = self.agent.Q[:, self.agent.nominal_psi_bin, :].copy()
+                np.save(
+                    os.path.join(self.logger.log_dir, f"q_{stage}.npy"),
+                    q_slice,
                 )
 
         # --- Phase 2: Exploitation (optional terminal block) ----------------

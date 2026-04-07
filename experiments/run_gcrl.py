@@ -107,6 +107,14 @@ class GCRLExperiment(BaseExperiment):
         all_metrics: list[EpisodeMetrics] = []
         last_eval_metrics: EpisodeMetrics | None = None
 
+        # Pre-compute stage milestones for C-table snapshots (early/mid/late)
+        _n = self.n_episodes
+        _q_milestones = {
+            max(1, _n // 3): "early",
+            max(1, 2 * _n // 3): "mid",
+            _n: "late",
+        }
+
         for episode in range(1, self.n_episodes + 1):
             # Always use the single hard target goal (Algorithm 1 in paper)
             self.agent.set_goal(self.eval_goal)
@@ -128,6 +136,16 @@ class GCRLExperiment(BaseExperiment):
                     f"  [eval] goal={self.eval_goal}  "
                     f"reward={eval_metrics.total_reward:.2f}  "
                     f"length={eval_metrics.length}"
+                )
+
+            # Save C-table snapshot at early / mid / late milestones
+            # C[:, :, eval_goal] acts as Q[state, action] for goal-reaching
+            if episode in _q_milestones:
+                stage = _q_milestones[episode]
+                c_slice = self.agent.C[:, :, self.eval_goal].copy()
+                np.save(
+                    os.path.join(self.logger.log_dir, f"q_{stage}.npy"),
+                    c_slice,
                 )
 
         # Save trajectory of the last evaluation episode for visualisation

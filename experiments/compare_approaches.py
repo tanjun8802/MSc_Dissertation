@@ -101,10 +101,11 @@ def _mean(vals: Sequence[float]) -> float:
 
 
 def run_random_baseline(
-    height: int, width: int, goal_pos: tuple[int, int], max_steps: int,
-    episodes: int, seed: int, log_dir: str, eval_every: int = 0,
+    height: int, width: int, start_pos: tuple[int, int], goal_pos: tuple[int, int],
+    max_steps: int, episodes: int, seed: int, log_dir: str, eval_every: int = 0,
 ) -> ApproachResult:
-    env = GridWorld(height=height, width=width, goal_pos=goal_pos, max_steps=max_steps)
+    env = GridWorld(height=height, width=width, start_pos=start_pos,
+                    goal_pos=goal_pos, max_steps=max_steps)
     agent = RandomAgent(n_actions=env.n_actions, seed=seed)
     exp = RandomBaselineExperiment(
         env=env, agent=agent, n_episodes=episodes,
@@ -124,7 +125,7 @@ def run_random_baseline(
 
 
 def run_gcrl(
-    height: int, width: int, max_steps: int,
+    height: int, width: int, start_pos: tuple[int, int], max_steps: int,
     episodes: int, eval_goal: int, seed: int,
     alpha: float, temperature: float, n_negatives: int,
     logsumexp_reg: float, buffer_capacity: int, gamma: float,
@@ -136,7 +137,7 @@ def run_gcrl(
     # to be a terminal state; without it the contrastive critic never receives
     # (s, a, sf=goal) pairs and learns nothing about goal reachability.
     goal_row, goal_col = divmod(eval_goal, width)
-    env = GridWorld(height=height, width=width,
+    env = GridWorld(height=height, width=width, start_pos=start_pos,
                     goal_pos=(goal_row, goal_col), max_steps=max_steps)
     agent = GoalConditionedAgent(
         n_states=env.n_states,
@@ -167,13 +168,15 @@ def run_gcrl(
 
 
 def run_rcrl(
-    height: int, width: int, goal_pos: tuple[int, int], max_steps: int,
+    height: int, width: int, start_pos: tuple[int, int], goal_pos: tuple[int, int],
+    max_steps: int,
     explore_episodes: int, exploit_episodes: int,
     n_psi_bins: int, psi_min: float, psi_mix_alpha: float, alpha: float,
     epsilon: float, epsilon_min: float, epsilon_decay: float,
     gamma: float, seed: int, log_dir: str, eval_every: int = 0,
 ) -> ApproachResult:
-    env = GridWorld(height=height, width=width, goal_pos=goal_pos, max_steps=max_steps)
+    env = GridWorld(height=height, width=width, start_pos=start_pos,
+                    goal_pos=goal_pos, max_steps=max_steps)
     agent = RewardConditionedAgent(
         n_states=env.n_states,
         n_actions=env.n_actions,
@@ -301,6 +304,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42, help="Random seed.")
     parser.add_argument("--render", action="store_true", help="Show grid after each approach.")
     parser.add_argument("--log-dir", type=str, default="logs/compare", help="Log directory.")
+    parser.add_argument(
+        "--goal-state",
+        type=int,
+        default=None,
+        help=(
+            "Goal state as a flat index (row*width+col).  "
+            "Defaults to the bottom-right cell (height*width-1)."
+        ),
+    )
+    parser.add_argument(
+        "--start-state",
+        type=int,
+        default=0,
+        help=(
+            "Start state as a flat index (row*width+col).  "
+            "Defaults to 0 (top-left cell)."
+        ),
+    )
 
     # --- Apply YAML config as defaults (CLI args override YAML) ---
     pre_p = argparse.ArgumentParser(add_help=False)
@@ -367,9 +388,16 @@ def compare_all(args: argparse.Namespace) -> list[ApproachResult]:
         Results for Random Baseline, GCRL, and RCRL in that order.
     """
     n_states = args.height * args.width
-    eval_goal = n_states - 1
-    goal_row, goal_col = divmod(eval_goal, args.width)
+    goal_state = (
+        args.goal_state
+        if (hasattr(args, "goal_state") and args.goal_state is not None)
+        else n_states - 1
+    )
+    start_state = getattr(args, "start_state", 0) or 0
+    goal_row, goal_col = divmod(goal_state, args.width)
+    start_row, start_col = divmod(start_state, args.width)
     goal_pos = (goal_row, goal_col)
+    start_pos = (start_row, start_col)
 
     results: list[ApproachResult] = []
 
@@ -378,7 +406,7 @@ def compare_all(args: argparse.Namespace) -> list[ApproachResult]:
     print("Running: Random Baseline …")
     r_random = run_random_baseline(
         height=args.height, width=args.width,
-        goal_pos=goal_pos, max_steps=args.max_steps,
+        start_pos=start_pos, goal_pos=goal_pos, max_steps=args.max_steps,
         episodes=args.episodes, seed=args.seed,
         eval_every=args.eval_every,
         log_dir=args.log_dir,
@@ -392,8 +420,8 @@ def compare_all(args: argparse.Namespace) -> list[ApproachResult]:
     print("Running: GCRL (Single-Goal Contrastive RL) …")
     r_gcrl = run_gcrl(
         height=args.height, width=args.width,
-        max_steps=args.max_steps,
-        episodes=args.episodes, eval_goal=eval_goal,
+        start_pos=start_pos, max_steps=args.max_steps,
+        episodes=args.episodes, eval_goal=goal_state,
         seed=args.seed, alpha=args.alpha,
         temperature=args.temperature,
         n_negatives=args.n_negatives,
@@ -416,7 +444,7 @@ def compare_all(args: argparse.Namespace) -> list[ApproachResult]:
     print("Running: RCRL (Reward-Conditioned) …")
     r_rcrl = run_rcrl(
         height=args.height, width=args.width,
-        goal_pos=goal_pos, max_steps=args.max_steps,
+        start_pos=start_pos, goal_pos=goal_pos, max_steps=args.max_steps,
         explore_episodes=args.episodes,
         exploit_episodes=0,
         n_psi_bins=args.n_psi_bins,
@@ -444,15 +472,19 @@ def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
 
     n_states = args.height * args.width
-    eval_goal = n_states - 1
-    goal_row, goal_col = divmod(eval_goal, args.width)
+    goal_state = args.goal_state if args.goal_state is not None else n_states - 1
+    start_state = args.start_state if args.start_state is not None else 0
+    goal_row, goal_col = divmod(goal_state, args.width)
+    start_row, start_col = divmod(start_state, args.width)
     goal_pos = (goal_row, goal_col)
+    start_pos = (start_row, start_col)
 
     print("=" * 60)
     print("Comparing RL Approaches on GridWorld")
     print("=" * 60)
     print(f"  Grid          : {args.height}×{args.width}")
-    print(f"  Goal          : state {eval_goal} ({goal_row},{goal_col})")
+    print(f"  Start         : state {start_state} ({start_row},{start_col})")
+    print(f"  Goal          : state {goal_state} ({goal_row},{goal_col})")
     print(f"  Max steps     : {args.max_steps}")
     print(f"  Episodes      : {args.episodes} (per approach, all training)")
     print(f"  Eval every    : {args.eval_every} episodes")
@@ -466,7 +498,7 @@ def main(argv: list[str] | None = None) -> None:
     if args.render:
         env = GridWorld(
             height=args.height, width=args.width,
-            goal_pos=goal_pos, max_steps=args.max_steps,
+            start_pos=start_pos, goal_pos=goal_pos, max_steps=args.max_steps,
         )
         env.reset()
         print("Final grid layout (G = goal, . = free):")
