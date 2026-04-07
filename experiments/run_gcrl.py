@@ -148,6 +148,14 @@ class GCRLExperiment(BaseExperiment):
                     c_slice,
                 )
 
+        # Save the full C-table (shape: n_states × n_actions × n_states) so
+        # that the evaluation notebook can use C[:, :, any_goal] for
+        # zero-shot transfer-goal evaluation without retraining.
+        np.save(
+            os.path.join(self.logger.log_dir, "c_table.npy"),
+            self.agent.C.copy(),
+        )
+
         # Save trajectory of the last evaluation episode for visualisation
         if last_eval_metrics is not None and last_eval_metrics.trajectory:
             self.logger.log_trajectory(
@@ -157,7 +165,15 @@ class GCRLExperiment(BaseExperiment):
         return all_metrics
 
     def _run_gcrl_eval(self, episode: int) -> EpisodeMetrics:
-        """Run one greedy evaluation episode using the goal-enabled eval env."""
+        """Run one evaluation episode using the softmax policy conditioned on eval_goal.
+
+        The paper (Liu et al., 2024) uses the SAME softmax policy for both
+        training and evaluation: π(a|s,g) ∝ exp(C[s,a,g]/τ).  Using hard
+        argmax instead can cause the agent to get permanently stuck on
+        blocked actions (wall NOPs) whose C-values are numerically similar to
+        good-direction actions early in training — the softmax naturally
+        recovers by exploring alternatives.
+        """
         self.agent.set_goal(self.eval_goal)
         obs, info = self._eval_env.reset(seed=int(self._rng.integers(0, 2**31)))
         self.agent.reset()
@@ -168,8 +184,8 @@ class GCRLExperiment(BaseExperiment):
 
         while True:
             state = int(np.asarray(obs).flat[0])
-            # Greedy: argmax over the contrastive critic
-            action = int(np.argmax(self.agent.C[state, :, self.eval_goal]))
+            # Softmax policy — consistent with training and the paper.
+            action = self.agent.select_action(obs)
             next_obs, reward, terminated, truncated, info = self._eval_env.step(action)
             total_reward += float(reward)
             steps += 1

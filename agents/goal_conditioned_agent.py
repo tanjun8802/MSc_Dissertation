@@ -96,6 +96,7 @@ class GoalConditionedAgent(BaseAgent):
         n_negatives: int = 16,
         logsumexp_reg: float = 0.01,
         buffer_capacity: int = 10000,
+        n_critic_updates: int = 10,
         seed: int | None = None,
     ) -> None:
         super().__init__(n_actions=n_actions, gamma=gamma, seed=seed)
@@ -105,6 +106,7 @@ class GoalConditionedAgent(BaseAgent):
         self.n_negatives = n_negatives
         self.logsumexp_reg = logsumexp_reg
         self.buffer_capacity = buffer_capacity
+        self.n_critic_updates = n_critic_updates
         # contrastive_gamma controls geometric future-state sampling in the
         # infoNCE objective (Δ ~ Geom(1-contrastive_gamma) - 1).  It should be
         # chosen so that the mean offset E[Δ] = contrastive_gamma/(1-contrastive_gamma)
@@ -115,8 +117,11 @@ class GoalConditionedAgent(BaseAgent):
         # Default: falls back to gamma so existing callers are unaffected.
         self._contrastive_gamma: float = contrastive_gamma if contrastive_gamma is not None else gamma
 
-        # Contrastive critic: C[s, a, sf] — logit that (s, a) reaches sf
-        self.C = np.zeros((n_states, n_actions, n_states), dtype=np.float64)
+        # Contrastive critic: C[s, a, sf] — logit that (s, a) reaches sf.
+        # Initialised to zero (the natural "no information" state for a
+        # log-ratio estimator where P(sf|s,a) = P_marginal(sf) initially).
+        c_init = -float(np.log(max(1, n_negatives)))
+        self.C = np.full((n_states, n_actions, n_states), fill_value=c_init, dtype=np.float64)
 
         # Replay buffer of (s, a, sf) triples — no rewards stored
         self._replay: list[tuple[int, int, int]] = []
@@ -242,6 +247,16 @@ class GoalConditionedAgent(BaseAgent):
         new_pairs: list[tuple[int, int, int]] = []
         for t in range(n_transitions):
             s = self._episode_states[t]
+            # Skip NOP transitions — when the action had no effect (e.g. the
+            # agent hit a wall) the agent stays in the same state.  Including
+            # (s, a_blocked, sf) as a positive pair creates a spurious
+            # association: the blocked action "looks" as informative about future
+            # states as the action that actually moved the agent.  This corrupts
+            # the greedy policy, which may then prefer a perpetually-blocked
+            # action over a productive one (keeping the agent stuck forever).
+            next_s = self._episode_states[t + 1] if t + 1 < n_states else s
+            if next_s == s:
+                continue
             a = self._episode_actions[t]
             # Δ ~ Geom(1-contrastive_gamma): np.random.geometric returns number of trials ≥ 1,
             # subtract 1 for a 0-indexed offset so Δ ∈ {0, 1, 2, …}.
@@ -260,9 +275,11 @@ class GoalConditionedAgent(BaseAgent):
                 self._replay.pop(0)
             self._replay.append(pair)
 
-        # Step 3: contrastive update if enough data
+        # Step 3: run n_critic_updates mini-batches of infoNCE updates so that
+        # the critic converges reliably within the episode budget.
         if len(self._replay) >= self.n_negatives + 1:
-            self._contrastive_update()
+            for _ in range(self.n_critic_updates):
+                self._contrastive_update()
 
         self._episode_states = []
         self._episode_actions = []

@@ -209,6 +209,13 @@ class RCRLExperiment(BaseExperiment):
                 last_eval_metrics.episode, last_eval_metrics.trajectory
             )
 
+        # Save the full Q-table (shape: n_states × n_psi_bins × n_actions)
+        # for transfer-goal evaluation in the notebook.
+        np.save(
+            os.path.join(self.logger.log_dir, "q_table.npy"),
+            self.agent.Q.copy(),
+        )
+
         return all_metrics
 
     def _run_exploit_episode(self, episode: int) -> EpisodeMetrics:

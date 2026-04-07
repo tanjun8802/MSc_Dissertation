@@ -131,6 +131,7 @@ def run_gcrl(
     logsumexp_reg: float, buffer_capacity: int, gamma: float,
     eval_every: int, log_dir: str,
     contrastive_gamma: float | None = None,
+    n_critic_updates: int = 10,
 ) -> ApproachResult:
     # Training env: goal_pos is set so episodes terminate at the goal.
     # Algorithm 1 of Liu et al. (2024) requires the single hard target goal
@@ -148,6 +149,7 @@ def run_gcrl(
         n_negatives=n_negatives,
         logsumexp_reg=logsumexp_reg,
         buffer_capacity=buffer_capacity,
+        n_critic_updates=n_critic_updates,
         seed=seed,
     )
     exp = GCRLExperiment(
@@ -283,14 +285,29 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--logsumexp-reg", type=float, default=0.01, help="LogSumExp regularisation coefficient (GCRL).")
     parser.add_argument("--buffer-capacity", type=int, default=10000, help="Replay buffer capacity (GCRL).")
     parser.add_argument(
+        "--n-critic-updates",
+        type=int,
+        default=10,
+        help=(
+            "Number of infoNCE mini-batch updates per episode (GCRL).  "
+            "More updates per episode accelerates convergence of the "
+            "contrastive critic without changing the total episode budget.  "
+            "Default: 10 (empirically sufficient for grids up to 10×10)."
+        ),
+    )
+    parser.add_argument(
         "--contrastive-gamma",
         type=float,
-        default=0.9,
+        default=None,
         help=(
             "Geometric future-state sampling gamma for the GCRL contrastive "
-            "objective.  Must match episode length: use ~0.9 for short "
-            "episodes (5×5 grid) and ~0.99 for long episodes (15×15 grid).  "
-            "Defaults to 0.9 for the 5×5 comparison grid."
+            "objective.  Controls the mean lookahead E[Δ] = cγ/(1-cγ); must "
+            "satisfy E[Δ] ≥ minimum Manhattan distance from start to goal.  "
+            "Defaults to (H+W-2)/(H+W-1) which exactly equals the minimum "
+            "path length for a grid of height H and width W "
+            "(e.g. 8/9≈0.89 for 5×5, 18/19≈0.947 for 10×10).  "
+            "Override explicitly to fine-tune for grids with walls or "
+            "non-corner start/goal positions."
         ),
     )
     # RCRL hyperparameters
@@ -403,6 +420,22 @@ def compare_all(args: argparse.Namespace) -> list[ApproachResult]:
     goal_pos = (goal_row, goal_col)
     start_pos = (start_row, start_col)
 
+    # Auto-scale contrastive_gamma so that E[Δ] = cγ/(1-cγ) ≥ minimum
+    # Manhattan distance from start to goal.  For an H×W grid the minimum
+    # path between opposite corners is (H-1)+(W-1) = H+W-2 steps, giving
+    # the safe default cγ = (H+W-2)/(H+W-1).  The user can override by
+    # passing --contrastive-gamma explicitly.
+    _cg = getattr(args, "contrastive_gamma", None)
+    if _cg is None:
+        _min_path = (args.height - 1) + (args.width - 1)
+        _cg = _min_path / (_min_path + 1)
+        print(
+            f"[GCRL] contrastive_gamma not set — "
+            f"auto-computed {_cg:.4f} for {args.height}×{args.width} grid "
+            f"(min-path={_min_path}, E[Δ]={_cg/(1-_cg):.1f})"
+        )
+    contrastive_gamma = _cg
+
     results: list[ApproachResult] = []
 
     # --- 1. Random baseline ------------------------------------------------
@@ -434,7 +467,8 @@ def compare_all(args: argparse.Namespace) -> list[ApproachResult]:
         gamma=args.gamma,
         eval_every=args.eval_every,
         log_dir=args.log_dir,
-        contrastive_gamma=args.contrastive_gamma,
+        contrastive_gamma=contrastive_gamma,
+        n_critic_updates=args.n_critic_updates,
     )
     results.append(r_gcrl)
     print(f"Done.  Mean eval reward = {r_gcrl.mean_eval_reward:.4f}")
