@@ -1,38 +1,49 @@
 """
 transfer_eval.py
 ================
-Zero-shot transfer-goal evaluation utilities.
+Transfer-goal evaluation utilities — zero-shot and fine-tuning modes.
 
 After training, both the GCRL C-table and the RCRL Q-table are persisted to
-disk.  This module provides lightweight helpers to load those artefacts and
-run a **single greedy episode** in an environment with a *new* goal state —
-no additional training.
+disk.  This module provides helpers to load those artefacts and evaluate a
+**new goal state** using one of two strategies:
 
-The key contrast this exposes in the dissertation:
+Zero-shot
+~~~~~~~~~
+The saved policy is applied directly to a new-goal environment without any
+additional training.  GCRL can often succeed here because the C-table
+``C[s, a, sf]`` covers *all* future states sf visited during training.  RCRL
+almost always fails because its Q-table was optimised for the original goal.
 
-* **RCRL** (reward-conditioned): the Q-table Q[s, ψ*, a] was trained to
-  maximise reward at the *original* goal.  When evaluated against a *new*
-  goal the policy still navigates toward the original goal → 0 reward.
+Fine-tuning (downstream training)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+The learned policy (Q-table or C-table) is used as a **warm start** and a
+short burst of further training episodes is run in an environment whose
+terminal state is the *new* goal.  Both RCRL and GCRL benefit here:
 
-* **GCRL** (contrastive RL): the C-table C[s, a, sf] captures reachability
-  for *all* future states sf, not just the training goal.  By querying
-  C[s, :, new_goal] at eval time the agent can zero-shot navigate to any
-  goal that appeared as a future state during training.
+* **RCRL**: Q-learning quickly adapts the conditioned Q-table to the new
+  reward signal because the ψ-conditioned representation already encodes
+  diverse reward shapes; only a few episodes are needed to re-point the
+  nominal Q[s, ψ*, a] slice at the new goal.
+
+* **GCRL**: The contrastive critic is updated to reinforce paths that reach
+  the new goal.  Because the C-table already encodes reachability structure
+  from training, convergence is much faster than training from scratch.
 
 Public API
 ----------
-* :func:`run_greedy_episode` — shared episode runner given a callable
+* :class:`TransferResult`  — dataclass holding per-episode metrics.
+* :func:`run_greedy_episode` — shared episode runner given
   ``action_fn(state_int) -> action_int``.
-* :func:`rcrl_action_fn`     — wraps the saved RCRL Q slice.
-* :func:`gcrl_action_fn`     — wraps the saved GCRL C table for a given goal.
-* :func:`TransferResult`     — lightweight dataclass holding episode metrics
-  and the recorded trajectory.
+* :func:`rcrl_action_fn`   — builds a greedy fn from a Q-slice.
+* :func:`gcrl_action_fn`   — builds a greedy fn from a C-table + goal.
+* :func:`rcrl_finetune`    — warm-start Q-table fine-tuning for a new goal.
+* :func:`gcrl_finetune`    — warm-start C-table fine-tuning for a new goal.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import Callable, Tuple
 
 import numpy as np
 
@@ -43,7 +54,7 @@ import numpy as np
 
 @dataclass
 class TransferResult:
-    """Metrics from one zero-shot transfer evaluation episode.
+    """Metrics from one transfer evaluation episode.
 
     Attributes
     ----------
@@ -117,6 +128,221 @@ def gcrl_action_fn(c_table: np.ndarray, goal: int) -> Callable[[int], int]:
         return int(np.argmax(c_table[state, :, goal]))
 
     return _fn
+
+
+# ---------------------------------------------------------------------------
+# Fine-tuning helpers
+# ---------------------------------------------------------------------------
+
+
+def rcrl_finetune(
+    q_table: np.ndarray,
+    new_goal_env,
+    *,
+    nominal_psi_bin: int = 0,
+    n_episodes: int = 20,
+    alpha: float = 0.1,
+    gamma: float = 0.99,
+    psi_min: float = -0.1,
+    psi_mix_alpha: float = 0.5,
+    epsilon: float = 0.2,
+    epsilon_min: float = 0.05,
+    epsilon_decay: float = 0.85,
+    seed: int | None = None,
+) -> Tuple[Callable[[int], int], np.ndarray]:
+    """Warm-start fine-tuning of the RCRL Q-table for a new goal.
+
+    Starting from the pre-trained ``q_table``, runs ``n_episodes`` of
+    Q-learning in ``new_goal_env`` (whose terminal state is the new goal).
+    Because the ψ-conditioned representation was trained on diverse reward
+    shapes, only a small number of episodes are typically needed for the
+    nominal Q-slice to redirect toward the new goal.
+
+    Parameters
+    ----------
+    q_table :
+        Full pre-trained Q-table.  Shape ``(n_states, n_psi_bins, n_actions)``
+        — the ``q_table.npy`` artefact saved by
+        :class:`experiments.run_rcrl.RCRLExperiment`.
+    new_goal_env :
+        A :class:`environments.gridworld.GridWorld` instance configured with
+        the *new* goal position (``terminated=True`` when that goal is reached).
+    nominal_psi_bin :
+        Index of the nominal ψ* bin inside the Q-table (default 0).
+    n_episodes :
+        Number of fine-tuning episodes to run.
+    alpha :
+        Q-learning step size for fine-tuning.
+    gamma :
+        Discount factor.
+    psi_min :
+        Most negative ψ₂ value for the sampled reward parameterisations.
+        Should match the value used during the original training.
+    psi_mix_alpha :
+        Fraction of nominal ψ* draws in the fine-tuning mixture PΨ.
+    epsilon :
+        Initial ε for ε-greedy exploration during fine-tuning.  Set lower
+        than the original training epsilon to exploit the warm-started policy.
+    epsilon_min :
+        Minimum ε.
+    epsilon_decay :
+        Multiplicative ε decay applied once per episode.  A steeper decay
+        (e.g. 0.85) speeds up exploitation during the short fine-tuning run.
+    seed :
+        Optional random seed.
+
+    Returns
+    -------
+    action_fn :
+        Greedy callable ``action_fn(state: int) -> int`` using the updated
+        nominal Q-slice after fine-tuning.
+    updated_q_table :
+        The full Q-table after fine-tuning (shape unchanged).
+    """
+    from agents.reward_conditioned_agent import RewardConditionedAgent
+
+    n_states, n_psi_bins, n_actions = q_table.shape
+
+    agent = RewardConditionedAgent(
+        n_states=n_states,
+        n_actions=n_actions,
+        n_psi_bins=n_psi_bins,
+        psi_min=psi_min,
+        psi_mix_alpha=psi_mix_alpha,
+        gamma=gamma,
+        alpha=alpha,
+        epsilon=epsilon,
+        epsilon_min=epsilon_min,
+        epsilon_decay=epsilon_decay,
+        seed=seed,
+    )
+    # Warm-start from the pre-trained Q-table
+    agent.Q = q_table.copy()
+
+    rng = np.random.default_rng(seed)
+    for _ in range(n_episodes):
+        obs, _ = new_goal_env.reset(seed=int(rng.integers(0, 2**31)))
+        agent.reset()
+        while True:
+            action = agent.select_action(obs)
+            next_obs, reward, terminated, truncated, info = new_goal_env.step(action)
+            agent.update(obs, action, reward, next_obs, terminated, truncated, info)
+            obs = next_obs
+            if terminated or truncated:
+                break
+        agent.finish_episode()
+
+    updated_q = agent.Q.copy()
+    q_nominal = updated_q[:, nominal_psi_bin, :]
+    return rcrl_action_fn(q_nominal), updated_q
+
+
+def gcrl_finetune(
+    c_table: np.ndarray,
+    new_goal: int,
+    new_goal_env,
+    *,
+    n_episodes: int = 20,
+    alpha: float = 0.1,
+    gamma: float = 0.99,
+    contrastive_gamma: float | None = None,
+    temperature: float = 1.0,
+    n_negatives: int = 16,
+    logsumexp_reg: float = 0.01,
+    n_critic_updates: int = 10,
+    seed: int | None = None,
+) -> Tuple[Callable[[int], int], np.ndarray]:
+    """Warm-start fine-tuning of the GCRL C-table for a new goal.
+
+    Starting from the pre-trained ``c_table``, runs ``n_episodes`` of
+    contrastive-RL episodes always targeting ``new_goal``.  The contrastive
+    objective reinforces paths that reach the new goal, and because the full
+    reachability structure is already encoded in the C-table, convergence is
+    much faster than training from scratch.
+
+    Parameters
+    ----------
+    c_table :
+        Full pre-trained contrastive critic.  Shape
+        ``(n_states, n_actions, n_states)`` — the ``c_table.npy`` artefact
+        saved by :class:`experiments.run_gcrl.GCRLExperiment`.
+    new_goal :
+        Flat state index of the new target goal.
+    new_goal_env :
+        A :class:`environments.gridworld.GridWorld` instance configured with
+        the new goal as its terminal state so that episodes naturally end at
+        ``new_goal`` and (s, a, sf=new_goal) pairs are generated.
+    n_episodes :
+        Number of fine-tuning episodes to run.
+    alpha :
+        Contrastive critic step size for fine-tuning.
+    gamma :
+        MDP discount factor.
+    contrastive_gamma :
+        Geometric future-state sampling parameter (Δ ~ Geom(1-cγ)-1).
+        If ``None``, auto-scales to ``min_path / (min_path + 1)`` using the
+        grid dimensions inferred from ``n_states``.
+    temperature :
+        Softmax temperature τ for action selection.
+    n_negatives :
+        Number of negative examples per infoNCE mini-batch update.
+    logsumexp_reg :
+        Coefficient of the LogSumExp regularisation term.
+    n_critic_updates :
+        Number of infoNCE mini-batch passes per episode.
+    seed :
+        Optional random seed.
+
+    Returns
+    -------
+    action_fn :
+        Callable ``action_fn(state: int) -> int`` using the fine-tuned
+        C-table conditioned on ``new_goal``.
+    updated_c_table :
+        The full C-table after fine-tuning (shape unchanged).
+    """
+    from agents.goal_conditioned_agent import GoalConditionedAgent
+
+    n_states, n_actions, _ = c_table.shape
+
+    # Auto-scale contrastive_gamma if not provided.
+    # Infer grid side length assuming a square(-ish) grid via sqrt(n_states).
+    if contrastive_gamma is None:
+        side = int(round(np.sqrt(n_states)))
+        _min_path = (side - 1) * 2  # minimum corner-to-corner Manhattan distance
+        contrastive_gamma = _min_path / (_min_path + 1) if _min_path > 0 else 0.9
+
+    agent = GoalConditionedAgent(
+        n_states=n_states,
+        n_actions=n_actions,
+        gamma=gamma,
+        contrastive_gamma=contrastive_gamma,
+        alpha=alpha,
+        temperature=temperature,
+        n_negatives=n_negatives,
+        logsumexp_reg=logsumexp_reg,
+        n_critic_updates=n_critic_updates,
+        seed=seed,
+    )
+    # Warm-start from the pre-trained C-table
+    agent.C = c_table.copy()
+    agent.set_goal(new_goal)
+
+    rng = np.random.default_rng(seed)
+    for _ in range(n_episodes):
+        obs, _ = new_goal_env.reset(seed=int(rng.integers(0, 2**31)))
+        agent.reset()
+        while True:
+            action = agent.select_action(obs)
+            next_obs, reward, terminated, truncated, info = new_goal_env.step(action)
+            agent.update(obs, action, reward, next_obs, terminated, truncated, info)
+            obs = next_obs
+            if terminated or truncated:
+                break
+        agent.finish_episode_with_contrastive_update()
+
+    updated_c = agent.C.copy()
+    return gcrl_action_fn(updated_c, new_goal), updated_c
 
 
 # ---------------------------------------------------------------------------
