@@ -326,6 +326,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     # --- Apply YAML config as defaults (CLI args override YAML) ---
     pre_p = argparse.ArgumentParser(add_help=False)
     pre_p.add_argument("--config", default=_CONFIG_PATH)
+
+    if argv is None:
+        argv = []
+        
     cfg_path = pre_p.parse_known_args(argv)[0].config
     cfg = load_config(cfg_path)
     if cfg:

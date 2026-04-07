@@ -13,12 +13,12 @@
 # ------ Environment -------------------------------------------------------
 env:
   name: GridWorld          # environment class name (see environments/)
-  height: 5
-  width: 5
+  height: 10
+  width: 10
   start_pos: [0, 0]        # [row, col]
-  goal_pos: [4, 4]         # null = reward-free mode (no terminal goal)
+  goal_pos: [9, 9]         # null = reward-free mode (no terminal goal)
   walls: []                # list of [row, col] wall positions
-  max_steps: 200          # episode time limit (null = unlimited)
+  max_steps: 800          # episode time limit (null = unlimited)
 
 # ------ MDP ---------------------------------------------------------------
 mdp:
