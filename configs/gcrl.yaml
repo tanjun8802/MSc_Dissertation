@@ -14,12 +14,12 @@
 # ------ Environment -------------------------------------------------------
 env:
   name: GridWorld
-  height: 15
-  width: 15
+  height: 5
+  width: 5
   start_pos: [0, 0]
-  goal_pos: [14, 14]       # null = reward-free training env (no goal reward)
+  goal_pos: [4, 4]       # null = reward-free training env (no goal reward)
   walls: []
-  max_steps: 1000
+  max_steps: 200
 
 # ------ MDP ---------------------------------------------------------------
 mdp:
