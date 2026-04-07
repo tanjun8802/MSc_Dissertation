@@ -159,6 +159,11 @@ class GCRLExperiment(BaseExperiment):
             obs = next_obs
 
             if terminated or truncated:
+                # Append the arrival state so the final arrow in trajectory
+                # visualisations reaches the goal cell (action=-1 = terminal marker).
+                if terminated:
+                    next_state = int(np.asarray(next_obs).flat[0])
+                    trajectory.append((steps + 1, next_state, -1, 0.0))
                 break
 
         return EpisodeMetrics(
