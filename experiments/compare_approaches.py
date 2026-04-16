@@ -81,6 +81,7 @@ class ApproachResult:
     eval_rewards: list[float]   # rewards from evaluation episodes (if any)
     total_steps: int
     n_episodes: int
+    visited_states: int = 0     # cumulative unique states visited across all training episodes
 
     @property
     def mean_reward(self) -> float:
@@ -105,6 +106,68 @@ def _mean(vals: Sequence[float]) -> float:
 
 
 # ---------------------------------------------------------------------------
+# State-coverage helpers
+# ---------------------------------------------------------------------------
+
+
+def _compute_and_save_coverage(
+    metrics: list,
+    n_states: int,
+    log_dir: str,
+) -> int:
+    """Compute cumulative unique-state coverage and save a ``coverage.csv``.
+
+    Iterates through every episode's trajectory (training episodes only) and
+    tracks the running set of unique states visited.  The result is saved to
+    ``<log_dir>/coverage.csv`` and the final unique-state count is returned.
+
+    Parameters
+    ----------
+    metrics :
+        List of :class:`~utils.metrics.EpisodeMetrics` objects returned by
+        an experiment's ``run()`` method.
+    n_states :
+        Total number of states in the environment.
+    log_dir :
+        Directory where ``coverage.csv`` will be written.
+
+    Returns
+    -------
+    int
+        Number of unique states visited across all training episodes.
+    """
+    import csv as _csv
+
+    os.makedirs(log_dir, exist_ok=True)
+    cov_path = os.path.join(log_dir, "coverage.csv")
+
+    visited: set[int] = set()
+    rows = []
+    for m in metrics:
+        if not m.training:
+            continue
+        if m.trajectory:
+            for _, state, action, _ in m.trajectory:
+                if action != -1:   # -1 is the terminal-arrival marker
+                    visited.add(int(state))
+        rows.append({
+            "episode": m.episode,
+            "unique_states_cumulative": len(visited),
+            "total_states": n_states,
+            "coverage_ratio": len(visited) / n_states if n_states > 0 else 0.0,
+        })
+
+    with open(cov_path, "w", newline="") as f:
+        writer = _csv.DictWriter(
+            f, fieldnames=["episode", "unique_states_cumulative", "total_states", "coverage_ratio"]
+        )
+        writer.writeheader()
+        writer.writerows(rows)
+
+    return len(visited)
+
+
+# ---------------------------------------------------------------------------
 # Environment factory helpers
 # ---------------------------------------------------------------------------
 
@@ -115,6 +178,7 @@ def _build_env(
     width: int,
     max_steps: int,
     goal_pos=None,
+    start_pos=None,
 ) -> GridWorld:
     """Build a GridWorld-compatible environment from the given parameters.
 
@@ -129,14 +193,13 @@ def _build_env(
     goal_pos :
         Terminal goal ``(row, col)`` tuple, or ``None`` for reward-free mode
         (used by GCRL which trains without a terminal signal).
+    start_pos :
+        Start ``(row, col)`` tuple, or ``None`` for default (top-left cell).
     """
-    return make_env(
-        env_name,
-        height=height,
-        width=width,
-        goal_pos=goal_pos,
-        max_steps=max_steps,
-    )
+    kwargs = dict(height=height, width=width, goal_pos=goal_pos, max_steps=max_steps)
+    if start_pos is not None:
+        kwargs["start_pos"] = start_pos
+    return make_env(env_name, **kwargs)
 
 
 
@@ -148,8 +211,10 @@ def _build_env(
 def run_random_baseline(
     env_name: str, height: int, width: int, goal_pos: tuple[int, int], max_steps: int,
     episodes: int, seed: int, log_dir: str,
+    eval_every: int = 0,
+    start_pos: tuple[int, int] | None = None,
 ) -> ApproachResult:
-    env = _build_env(env_name, height, width, max_steps, goal_pos=goal_pos)
+    env = _build_env(env_name, height, width, max_steps, goal_pos=goal_pos, start_pos=start_pos)
     agent = RandomAgent(n_actions=env.n_actions, seed=seed)
     exp = RandomBaselineExperiment(
         env=env, agent=agent, n_episodes=episodes,
@@ -159,12 +224,14 @@ def run_random_baseline(
     metrics = exp.run()
     train_metrics = [m for m in metrics if m.training]
     eval_metrics = [m for m in metrics if not m.training]
+    visited = _compute_and_save_coverage(metrics, env.n_states, os.path.join(log_dir, "random"))
     return ApproachResult(
         name="Random Baseline",
         all_rewards=[m.total_reward for m in train_metrics],
         eval_rewards=[m.total_reward for m in eval_metrics],
         total_steps=agent.total_steps,
         n_episodes=episodes,
+        visited_states=visited,
     )
 
 
@@ -176,8 +243,9 @@ def run_gcrl(
     eval_every: int, log_dir: str,
     contrastive_gamma: float | None = None,
     n_critic_updates: int = 10,
+    start_pos: tuple[int, int] | None = None,
 ) -> ApproachResult:
-    env = _build_env(env_name, height, width, max_steps, goal_pos=None)
+    env = _build_env(env_name, height, width, max_steps, goal_pos=None, start_pos=start_pos)
     agent = GoalConditionedAgent(
         n_states=env.n_states,
         n_actions=env.n_actions,
@@ -198,12 +266,14 @@ def run_gcrl(
     metrics = exp.run()
     train_metrics = [m for m in metrics if m.training]
     eval_metrics = [m for m in metrics if not m.training]
+    visited = _compute_and_save_coverage(metrics, env.n_states, os.path.join(log_dir, "gcrl"))
     return ApproachResult(
         name="GCRL (Single-Goal Contrastive RL)",
         all_rewards=[m.total_reward for m in train_metrics],
         eval_rewards=[m.total_reward for m in eval_metrics],
         total_steps=agent.total_steps,
         n_episodes=episodes,
+        visited_states=visited,
     )
 
 
@@ -213,8 +283,9 @@ def run_rcrl(
     n_psi_bins: int, psi_min: float, psi_mix_alpha: float, alpha: float,
     epsilon: float, epsilon_min: float, epsilon_decay: float,
     gamma: float, seed: int, log_dir: str, eval_every: int = 0,
+    start_pos: tuple[int, int] | None = None,
 ) -> ApproachResult:
-    env = _build_env(env_name, height, width, max_steps, goal_pos=goal_pos)
+    env = _build_env(env_name, height, width, max_steps, goal_pos=goal_pos, start_pos=start_pos)
     agent = RewardConditionedAgent(
         n_states=env.n_states,
         n_actions=env.n_actions,
@@ -236,12 +307,14 @@ def run_rcrl(
     metrics = exp.run()
     explore_metrics = [m for m in metrics if m.training]
     exploit_metrics = [m for m in metrics if not m.training]
+    visited = _compute_and_save_coverage(metrics, env.n_states, os.path.join(log_dir, "rcrl"))
     return ApproachResult(
         name="RCRL (Reward-Conditioned)",
         all_rewards=[m.total_reward for m in explore_metrics],
         eval_rewards=[m.total_reward for m in exploit_metrics],
         total_steps=agent.total_steps,
         n_episodes=explore_episodes + exploit_episodes,
+        visited_states=visited,
     )
 
 
@@ -517,6 +590,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--psi-mix-alpha", type=float, default=0.5, help="Fraction of nominal ψ* draws in training mixture (RCRL).")
     parser.add_argument("--eval-every", type=int, default=50, help="GCRL eval every N episodes.")
     parser.add_argument("--seed", type=int, default=42, help="Random seed.")
+    parser.add_argument(
+        "--goal-state",
+        type=int,
+        default=None,
+        help="Target goal as a flat state index. Defaults to the bottom-right cell (height*width-1).",
+    )
+    parser.add_argument(
+        "--start-state",
+        type=int,
+        default=None,
+        help="Start state as a flat state index. Defaults to the top-left cell (0).",
+    )
     parser.add_argument("--render", action="store_true", help="Show grid after each approach.")
     parser.add_argument("--log-dir", type=str, default="logs/compare", help="Log directory.")
     parser.add_argument(
@@ -601,15 +686,33 @@ def compare_all(args) -> list[ApproachResult]:
         Results for [Random, GCRL, RCRL, Optimal] in that order.
     """
     n_states = args.height * args.width
-    eval_goal = n_states - 1  # bottom-right cell
-    goal_row, goal_col = divmod(eval_goal, args.width)
+
+    # Support --goal-state (flat index) or fall back to bottom-right cell
+    goal_state = getattr(args, "goal_state", None)
+    if goal_state is None:
+        goal_state = n_states - 1
+    goal_row, goal_col = divmod(goal_state, args.width)
     goal_pos = (goal_row, goal_col)
+
+    # Support --start-state (flat index) or fall back to top-left cell
+    start_state = getattr(args, "start_state", None) or 0
+    start_row, start_col = divmod(start_state, args.width)
+    start_pos = (start_row, start_col)
 
     # Override goal for environments that set their own default goal
     env_name = getattr(args, "env", "gridworld")
 
-    rcrl_explore = max(10, int(args.episodes * 0.8))
-    rcrl_exploit = max(5, args.episodes - rcrl_explore)
+    # Auto-scale contrastive_gamma if not supplied
+    contrastive_gamma = getattr(args, "contrastive_gamma", None)
+    if contrastive_gamma is None:
+        min_path = (args.height - 1) + (args.width - 1)
+        contrastive_gamma = min_path / (min_path + 1) if min_path > 0 else 0.9
+
+    n_critic_updates = getattr(args, "n_critic_updates", 10)
+    eval_every = getattr(args, "eval_every", 0)
+
+    rcrl_explore = args.episodes
+    rcrl_exploit = 0
 
     results: list[ApproachResult] = []
 
@@ -619,6 +722,8 @@ def compare_all(args) -> list[ApproachResult]:
         goal_pos=goal_pos, max_steps=args.max_steps,
         episodes=args.episodes, seed=args.seed,
         log_dir=args.log_dir,
+        eval_every=eval_every,
+        start_pos=start_pos,
     )
     results.append(r_random)
 
@@ -626,15 +731,18 @@ def compare_all(args) -> list[ApproachResult]:
         env_name=env_name,
         height=args.height, width=args.width,
         max_steps=args.max_steps,
-        episodes=args.episodes, eval_goal=eval_goal,
+        episodes=args.episodes, eval_goal=goal_state,
         seed=args.seed, alpha=args.alpha,
         temperature=args.temperature,
         n_negatives=args.n_negatives,
         logsumexp_reg=args.logsumexp_reg,
         buffer_capacity=args.buffer_capacity,
         gamma=args.gamma,
-        eval_every=args.eval_every,
+        eval_every=eval_every,
         log_dir=args.log_dir,
+        contrastive_gamma=contrastive_gamma,
+        n_critic_updates=n_critic_updates,
+        start_pos=start_pos,
     )
     results.append(r_gcrl)
 
@@ -652,6 +760,8 @@ def compare_all(args) -> list[ApproachResult]:
         epsilon_decay=args.epsilon_decay,
         gamma=args.gamma, seed=args.seed,
         log_dir=args.log_dir,
+        eval_every=eval_every,
+        start_pos=start_pos,
     )
     results.append(r_rcrl)
 
@@ -677,19 +787,12 @@ def main(argv: list[str] | None = None) -> None:
     env_name = args.env
 
     n_states = args.height * args.width
-    goal_state = (
-        args.goal_state
-        if (hasattr(args, "goal_state") and args.goal_state is not None)
-        else n_states - 1
-    )
-    start_state = getattr(args, "start_state", 0) or 0
+    goal_state = args.goal_state if args.goal_state is not None else n_states - 1
+    start_state = args.start_state if args.start_state is not None else 0
     goal_row, goal_col = divmod(goal_state, args.width)
     start_row, start_col = divmod(start_state, args.width)
     goal_pos = (goal_row, goal_col)
-
-    # Split episodes: use 80% for RCRL exploration, 20% for exploitation
-    rcrl_explore = max(10, int(args.episodes * 0.8))
-    rcrl_exploit = max(5, args.episodes - rcrl_explore)
+    start_pos = (start_row, start_col)
 
     env_labels: dict[str, str] = {
         "gridworld": "Open GridWorld",
@@ -703,116 +806,6 @@ def main(argv: list[str] | None = None) -> None:
 
     print("=" * 60)
     print(f"Comparing RL Approaches on {env_label}")
-    print("=" * 60)
-    print(f"  Environment   : {env_label}")
-    print(f"  Grid          : {args.height}×{args.width}")
-    print(f"  Goal          : state {eval_goal} ({goal_row},{goal_col})")
-    print(f"  Max steps     : {args.max_steps}")
-    print(f"  Episodes      : {args.episodes} (per approach)")
-    print(f"  RCRL explore  : {rcrl_explore}  /  exploit: {rcrl_exploit}")
-    print(f"  Seed          : {args.seed}")
-    print()
-
-    results: list[ApproachResult] = []
-
-    # --- 1. Random baseline ------------------------------------------------
-    print("─" * 40)
-    print("Running: Random Baseline …")
-    r_random = run_random_baseline(
-        env_name=env_name,
-        height=args.height, width=args.width,
-        start_pos=start_pos, goal_pos=goal_pos, max_steps=args.max_steps,
-        episodes=args.episodes, seed=args.seed,
-        eval_every=args.eval_every,
-        log_dir=args.log_dir,
-    )
-    results.append(r_random)
-    print(f"Done.  Mean reward = {r_random.mean_reward:.4f}")
-
-    # --- 2. GCRL -----------------------------------------------------------
-    print()
-    print("─" * 40)
-    print("Running: GCRL (Single-Goal Contrastive RL) …")
-    r_gcrl = run_gcrl(
-        env_name=env_name,
-        height=args.height, width=args.width,
-        start_pos=start_pos, max_steps=args.max_steps,
-        episodes=args.episodes, eval_goal=goal_state,
-        seed=args.seed, alpha=args.alpha,
-        temperature=args.temperature,
-        n_negatives=args.n_negatives,
-        logsumexp_reg=args.logsumexp_reg,
-        buffer_capacity=args.buffer_capacity,
-        gamma=args.gamma,
-        eval_every=args.eval_every,
-        log_dir=args.log_dir,
-        contrastive_gamma=contrastive_gamma,
-        n_critic_updates=args.n_critic_updates,
-    )
-    results.append(r_gcrl)
-    print(f"Done.  Mean eval reward = {r_gcrl.mean_eval_reward:.4f}")
-
-    # --- 3. RCRL -----------------------------------------------------------
-    # All episodes used for training (with interleaved eval every eval_every).
-    # No separate terminal exploitation block — keeps the episode budgets
-    # and x-axis positions consistent with Random and GCRL.
-    print()
-    print("─" * 40)
-    print("Running: RCRL (Reward-Conditioned) …")
-    r_rcrl = run_rcrl(
-        env_name=env_name,
-        height=args.height, width=args.width,
-        start_pos=start_pos, goal_pos=goal_pos, max_steps=args.max_steps,
-        explore_episodes=args.episodes,
-        exploit_episodes=0,
-        n_psi_bins=args.n_psi_bins,
-        psi_min=args.psi_min,
-        psi_mix_alpha=args.psi_mix_alpha,
-        alpha=args.alpha,
-        epsilon=args.epsilon, epsilon_min=args.epsilon_min,
-        epsilon_decay=args.epsilon_decay,
-        gamma=args.gamma, seed=args.seed,
-        eval_every=args.eval_every,
-        log_dir=args.log_dir,
-    )
-    results.append(r_rcrl)
-    print(f"Done.  Mean exploit reward = {r_rcrl.mean_eval_reward:.4f}")
-
-    # --- 4. Optimal BFS baseline -------------------------------------------
-    print()
-    print("─" * 40)
-    print("Running: Optimal Baseline (BFS Shortest Path) …")
-    r_optimal = run_optimal_baseline(
-        env_name=env_name,
-        height=args.height, width=args.width,
-        goal_pos=goal_pos, max_steps=args.max_steps,
-        episodes=args.episodes, gamma=args.gamma,
-        seed=args.seed,
-    )
-    results.append(r_optimal)
-    print(f"Done.  Mean reward = {r_optimal.mean_reward:.4f}")
-
-    return results
-
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
-
-
-def main(argv: list[str] | None = None) -> None:
-    args = parse_args(argv)
-
-    n_states = args.height * args.width
-    goal_state = args.goal_state if args.goal_state is not None else n_states - 1
-    start_state = args.start_state if args.start_state is not None else 0
-    goal_row, goal_col = divmod(goal_state, args.width)
-    start_row, start_col = divmod(start_state, args.width)
-    goal_pos = (goal_row, goal_col)
-    start_pos = (start_row, start_col)
-
-    print("=" * 60)
-    print("Comparing RL Approaches on GridWorld")
     print("=" * 60)
     print(f"  Grid          : {args.height}×{args.width}")
     print(f"  Start         : state {start_state} ({start_row},{start_col})")
@@ -829,6 +822,7 @@ def main(argv: list[str] | None = None) -> None:
 
     # --- Plot (optional) ---------------------------------------------------
     if args.plot:
+        r_optimal = next((r for r in results if "Optimal" in r.name), None)
         plot_comparison(
             results=[r for r in results if "Optimal" not in r.name],
             optimal_result=r_optimal,
