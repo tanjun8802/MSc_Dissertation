@@ -13,6 +13,7 @@ algorithm.  No prior knowledge of the repository internals is required.
    - 2.1 [Random Baseline](#21-random-baseline)
    - 2.2 [GCRL — Contrastive RL](#22-gcrl--contrastive-rl)
    - 2.3 [RCRL — Reward-Conditioned RL](#23-rcrl--reward-conditioned-rl)
+   - 2.4 [ExDM — Exploratory Diffusion Model](#24-exdm--exploratory-diffusion-model)
 3. [Comparing All Approaches at Once](#3-comparing-all-approaches-at-once)
 4. [Using the Evaluation Notebook](#4-using-the-evaluation-notebook)
 5. [Changing Environments](#5-changing-environments)
@@ -25,7 +26,8 @@ algorithm.  No prior knowledge of the repository internals is required.
    - 7.1 [Random Baseline — no equations](#71-random-baseline--no-equations)
    - 7.2 [GCRL — infoNCE Contrastive Objective](#72-gcrl--infonce-contrastive-objective)
    - 7.3 [RCRL — Q-Learning with Diverse ψ Sampling](#73-rcrl--q-learning-with-diverse-ψ-sampling)
-   - 7.4 [Shared Equations (Bellman, Returns, GAE)](#74-shared-equations-bellman-returns-gae)
+   - 7.4 [ExDM — Score-Based Diffusion Intrinsic Reward](#74-exdm--score-based-diffusion-intrinsic-reward)
+   - 7.5 [Shared Equations (Bellman, Returns, GAE)](#75-shared-equations-bellman-returns-gae)
 8. [Project Structure Reference](#8-project-structure-reference)
 
 ---
@@ -141,9 +143,44 @@ Key flags:
 
 ---
 
-## 3. Comparing All Approaches at Once
+### 2.4 ExDM — Exploratory Diffusion Model
 
-`experiments/compare_approaches.py` runs **Random, GCRL, and RCRL** in sequence
+ExDM (Ying et al., 2025) drives reward-free exploration by maintaining a
+**state diffusion score model** that fits the empirical distribution of visited
+states.  The score-prediction error is used as an intrinsic reward — states
+that are rarely visited are poorly modelled and therefore receive high reward.
+
+```bash
+python experiments/run_exdm.py \
+    --episodes 500 \
+    --height 10 --width 10 \
+    --goal 99 \
+    --seed 42 \
+    --log-dir logs/exdm
+```
+
+Key flags:
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--episodes` | 500 | Training episodes |
+| `--goal` | `n_states - 1` | Flat state index of the evaluation goal |
+| `--alpha` | 0.1 | Q-learning step size (behaviour policy) |
+| `--model-lr` | 0.01 | SGD learning rate for the score model W[t] |
+| `--n-diffusion-steps` | 10 | DDPM diffusion timesteps T |
+| `--epsilon` | 1.0 | Initial ε for ε-greedy exploration |
+| `--epsilon-min` | 0.05 | Minimum ε after decay |
+| `--epsilon-decay` | 0.995 | Multiplicative ε decay per episode |
+| `--buffer-capacity` | 10000 | Replay buffer for the score model |
+| `--batch-size` | 32 | Mini-batch size for score model updates |
+| `--n-model-updates` | 5 | Score model gradient steps per environment step |
+| `--reward-samples` | 10 | (ε, t) samples used to estimate R_score(s) |
+| `--eval-every` | 50 | Evaluate every N episodes |
+| `--log-dir` | `logs/exdm` | Output directory |
+
+---
+
+`experiments/compare_approaches.py` runs **Random, GCRL, RCRL, ExDM, and Optimal (BFS)** in sequence
 on the same environment and saves structured logs for the evaluation notebook.
 
 ```bash
@@ -167,7 +204,7 @@ Supported `--env` values:
 | `four_rooms` | Four-Rooms GridWorld |
 | `windy` | Windy GridWorld (stochastic) |
 
-Logs are written to `<log-dir>/random/`, `<log-dir>/gcrl/`, `<log-dir>/rcrl/`.
+Logs are written to `<log-dir>/random/`, `<log-dir>/gcrl/`, `<log-dir>/rcrl/`, `<log-dir>/exdm/`.
 Each subdirectory contains:
 
 | File | Contents |
@@ -176,7 +213,8 @@ Each subdirectory contains:
 | `coverage.csv` | Cumulative unique-state counts per episode |
 | `visit_counts.npy` | Per-cell visit totals for the heatmap |
 | `trajectory.csv` | Last evaluation episode trajectory |
-| `q_early/mid/late.npy` | Q-value snapshots (RCRL) |
+| `q_early/mid/late.npy` | Q-value snapshots (RCRL / ExDM) |
+| `q_table.npy` | Full Q-table (RCRL / ExDM) |
 | `c_table.npy` | Full contrastive critic table (GCRL) |
 
 ---
@@ -309,6 +347,7 @@ Each algorithm has a YAML config file in `configs/`:
 | `configs/default.yaml` | Shared defaults / Random baseline |
 | `configs/gcrl.yaml` | GCRL (Contrastive RL) |
 | `configs/rcrl.yaml` | RCRL (Reward-Conditioned) |
+| `configs/exdm.yaml` | ExDM (Exploratory Diffusion Model) |
 
 Edit the relevant YAML file and re-run — **CLI flags always override YAML
 values**, so you can also override any field on the command line without
@@ -435,7 +474,86 @@ else:
 
 ---
 
-### 7.4 Shared Equations (Bellman, Returns, GAE)
+### 7.4 ExDM — Score-Based Diffusion Intrinsic Reward
+
+**What it does:** trains a state diffusion model online on the empirical
+distribution of visited states.  Its reconstruction MSE serves as an intrinsic
+reward that steers the agent toward less-explored regions of the grid.
+
+**Reference:** Ying et al. (2025), arXiv:2502.07279.
+
+**Where to find it:**
+```
+agents/exdm_agent.py
+```
+
+**Forward diffusion (DDPM, linear noise schedule):**
+
+```
+s_t = √ᾱ_t · s_onehot + √(1−ᾱ_t) · ε,   ε ~ N(0, I)
+
+where  ᾱ_t = Π_{k=1}^{t} (1 − β_k),  β_k = linspace(β_start, β_end, T)[k]
+```
+
+**Score model:**
+```
+# agents/exdm_agent.py → _score_model_update()
+# One weight matrix W[t] ∈ R^{n_states × n_states} per diffusion timestep.
+
+ε̂  =  W[t] @ s_t                          # predicted noise
+Loss = ‖W[t] @ s_t − ε‖²                  # MSE
+W[t] -= model_lr · (ε̂ − ε) ⊗ s_t         # SGD update (outer product)
+```
+
+**Score-based intrinsic reward (Eq. 8 in the paper):**
+```
+# agents/exdm_agent.py → _compute_intrinsic_reward()
+
+R_score(s) = (1/K) Σ_{k=1}^{K} ‖W[t_k] @ s_{t_k} − ε_k‖²
+```
+
+A poorly visited state s has not been stored in the replay buffer often,
+so W fits it poorly and MSE is high → high R_score → agent is rewarded for
+exploring s.
+
+**Behaviour policy:**
+```
+# agents/exdm_agent.py → update()
+
+# Q-learning TD update with intrinsic reward (extrinsic reward ignored):
+Q[s, a] += α · (R_score(s) + γ · max_{a'} Q[s', a'] − Q[s, a])
+```
+
+**Key parameters:**
+- `model_lr` — SGD step size for the score model weight matrices W[t]
+- `n_diffusion_steps` (T) — number of DDPM forward diffusion steps; more steps
+  give a richer noise schedule but increase the size of W (T × n_states²)
+- `beta_start`, `beta_end` — linear noise schedule endpoints (DDPM defaults)
+- `reward_samples` (K) — Monte Carlo samples for the intrinsic reward estimate;
+  more samples → lower variance but slower per-step cost
+- `n_model_updates` — gradient steps per environment step; increase for faster
+  score model convergence
+- `alpha` — Q-learning step size for the behaviour policy
+
+**To modify the noise schedule**, edit `_linear_beta_schedule()`:
+```python
+# agents/exdm_agent.py → _linear_beta_schedule()
+# Current: linear β from beta_start → beta_end
+# To use a cosine schedule (Ho et al., 2020):
+#   t_arr = np.arange(n_steps) / n_steps
+#   betas = 1 - np.cos((t_arr + 0.008) / 1.008 * np.pi / 2) ** 2 / ...
+```
+
+**To use a shared weight matrix instead of per-step matrices**, edit `__init__`:
+```python
+# Replace:  self.W = np.zeros((n_diffusion_steps, n_states, n_states))
+# With:     self.W_shared = np.zeros((n_states, n_states + 1))
+# And embed t as an additional scalar input: [s_t; t/T]
+```
+
+---
+
+### 7.5 Shared Equations (Bellman, Returns, GAE)
 
 Pure-NumPy reference implementations live in `equations/`:
 
@@ -471,7 +589,8 @@ MSc_Dissertation/
 │   ├── base_agent.py           #   Abstract agent interface
 │   ├── random_agent.py         #   Uniform-random exploration
 │   ├── goal_conditioned_agent.py   # GCRL: infoNCE contrastive critic
-│   └── reward_conditioned_agent.py # RCRL: Q[s, ψ, a] with diverse ψ sampling
+│   ├── reward_conditioned_agent.py # RCRL: Q[s, ψ, a] with diverse ψ sampling
+│   └── exdm_agent.py           #   ExDM: state diffusion score model + intrinsic reward
 │
 ├── environments/               # Grid environments
 │   ├── base_env.py             #   Gymnasium-compatible abstract base
@@ -485,7 +604,8 @@ MSc_Dissertation/
 │   ├── run_baseline.py         #   Random baseline CLI
 │   ├── run_gcrl.py             #   GCRL CLI
 │   ├── run_rcrl.py             #   RCRL CLI
-│   └── compare_approaches.py  #   Side-by-side comparison of all three
+│   ├── run_exdm.py             #   ExDM CLI
+│   └── compare_approaches.py  #   Side-by-side comparison of all four methods
 │
 ├── equations/                  # Pure-NumPy RL equation reference
 │   ├── bellman.py              #   Bellman expectation & optimality
@@ -507,7 +627,8 @@ MSc_Dissertation/
 ├── configs/                    # YAML hyperparameter files
 │   ├── default.yaml            #   Shared defaults
 │   ├── gcrl.yaml               #   GCRL hyperparameters
-│   └── rcrl.yaml               #   RCRL hyperparameters
+│   ├── rcrl.yaml               #   RCRL hyperparameters
+│   └── exdm.yaml               #   ExDM hyperparameters
 │
 ├── notebooks/
 │   └── evaluation.ipynb        #   Interactive evaluation & visualisation
@@ -528,3 +649,5 @@ MSc_Dissertation/
 | Heatmap shows wrong walls | Make sure `ENV_NAME` in the notebook matches the `--env` used to generate logs |
 | GCRL never reaches goal | Try reducing `--contrastive-gamma` (e.g. `0.9` for small grids) |
 | RCRL slow to converge | Increase `--explore-episodes` or reduce `--epsilon-decay` |
+| ExDM intrinsic reward stops changing | Buffer is full of the same states — increase `--buffer-capacity` or reduce `--n-model-updates` |
+| ExDM very slow per step | Reduce `--n-model-updates` (default 5) or `--n-diffusion-steps` (default 10) |

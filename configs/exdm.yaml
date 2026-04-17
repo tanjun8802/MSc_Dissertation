@@ -1,0 +1,66 @@
+# configs/exdm.yaml
+# =================
+# Configuration for the Exploratory Diffusion Model (ExDM) on GridWorld.
+#
+# Reference:
+#   Ying, C., Chen, H., Hao, Z., Zhou, X., Su, H., & Zhu, J. (2025).
+#   "Exploratory Diffusion Model for Unsupervised Reinforcement Learning."
+#   arXiv:2502.07279
+#
+# Key idea:
+#   A state diffusion model is trained online on the empirical state
+#   distribution in the replay buffer.  Its score-prediction MSE is used
+#   as an intrinsic reward (R_score), encouraging the agent to explore
+#   less-visited regions of the state space.
+
+# ------ Environment -------------------------------------------------------
+env:
+  name: GridWorld
+  height: 10
+  width: 10
+  start_pos: [0, 0]
+  goal_pos: [9, 9]   # used for final evaluation; training is reward-free
+  walls: []
+  max_steps: 800
+
+# ------ MDP ---------------------------------------------------------------
+mdp:
+  gamma: 0.99
+
+# ------ Agent -------------------------------------------------------------
+agent:
+  name: ExDMAgent
+
+  # Q-learning (behaviour policy)
+  alpha: 0.1               # Q-learning step size
+  epsilon: 1.0             # initial ε for ε-greedy exploration
+  epsilon_min: 0.05        # minimum ε after decay
+  epsilon_decay: 0.995     # multiplicative decay per episode
+
+  # State diffusion model (score model ε_θ')
+  model_lr: 1.0e-2         # SGD learning rate for the score model W[t]
+  n_diffusion_steps: 10    # DDPM timesteps T (forward diffusion steps)
+  # Linear noise schedule endpoints (DDPM defaults)
+  # β_t is linearly interpolated from beta_start to beta_end over T steps.
+  # These match the default DDPM paper values and work well for T=10.
+  beta_start: 1.0e-4
+  beta_end: 0.02
+
+  # Intrinsic reward
+  reward_samples: 10       # K samples of (ε, t) used to estimate R_score(s)
+
+  # Score model training
+  batch_size: 32           # mini-batch size for each score model update
+  n_model_updates: 5       # gradient steps applied to the score model per env step
+  buffer_capacity: 10000   # max states stored in the replay buffer
+
+# ------ Training ----------------------------------------------------------
+training:
+  n_episodes: 500          # total pre-training episodes (reward-free)
+  eval_every: 50           # evaluate against the hard goal every N episodes
+  seed: 42
+
+# ------ Logging -----------------------------------------------------------
+logging:
+  log_dir: logs/exdm
+  verbose: true

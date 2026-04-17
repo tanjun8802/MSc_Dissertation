@@ -7,7 +7,8 @@ environments:
     1. **Random Baseline**  — uniformly random action selection (no learning)
     2. **GCRL**             — Single-Goal Contrastive RL (Liu, Tang & Eysenbach, 2024)
     3. **RCRL**             — Reward-Conditioned Q-Learning (reward-parameterization-conditioned)
-    4. **Optimal (BFS)**    — Shortest-path policy; serves as the theoretical upper bound
+    4. **ExDM**             — Exploratory Diffusion Model (Ying et al., 2025)
+    5. **Optimal (BFS)**    — Shortest-path policy; serves as the theoretical upper bound
 
 The script runs all approaches under the same environment configuration,
 prints a concise comparison table, and (optionally) saves a cumulative-reward
@@ -45,6 +46,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from agents.random_agent import RandomAgent
 from agents.goal_conditioned_agent import GoalConditionedAgent
 from agents.reward_conditioned_agent import RewardConditionedAgent
+from agents.exdm_agent import ExDMAgent
+from experiments.run_exdm import ExDMExperiment
 from environments import make_env
 from environments.gridworld import GridWorld
 from experiments.run_baseline import BaseExperiment
@@ -331,6 +334,71 @@ def run_rcrl(
     )
 
 
+def run_exdm(
+    env_name: str, height: int, width: int, goal_pos: tuple[int, int], max_steps: int,
+    episodes: int, seed: int, log_dir: str,
+    alpha: float = 0.1,
+    model_lr: float = 1e-2,
+    n_diffusion_steps: int = 10,
+    epsilon: float = 1.0,
+    epsilon_min: float = 0.05,
+    epsilon_decay: float = 0.995,
+    buffer_capacity: int = 10000,
+    batch_size: int = 32,
+    n_model_updates: int = 5,
+    reward_samples: int = 10,
+    eval_every: int = 0,
+    start_pos: tuple[int, int] | None = None,
+) -> ApproachResult:
+    """Run ExDM (Exploratory Diffusion Model) and return an ApproachResult.
+
+    ExDM trains a state diffusion score model online and uses its prediction
+    error as an intrinsic reward (R_score) to guide ε-greedy Q-learning
+    toward under-explored regions of the state space.
+
+    Reference: Ying et al. (2025), arXiv:2502.07279.
+    """
+    env = _build_env(env_name, height, width, max_steps, goal_pos=goal_pos, start_pos=start_pos)
+    goal_state = goal_pos[0] * width + goal_pos[1]
+    agent = ExDMAgent(
+        n_states=env.n_states,
+        n_actions=env.n_actions,
+        gamma=0.99,
+        alpha=alpha,
+        model_lr=model_lr,
+        n_diffusion_steps=n_diffusion_steps,
+        epsilon=epsilon,
+        epsilon_min=epsilon_min,
+        epsilon_decay=epsilon_decay,
+        buffer_capacity=buffer_capacity,
+        batch_size=batch_size,
+        n_model_updates=n_model_updates,
+        reward_samples=reward_samples,
+        seed=seed,
+    )
+    exp = ExDMExperiment(
+        env=env,
+        agent=agent,
+        eval_goal=goal_state,
+        n_episodes=episodes,
+        eval_every=eval_every,
+        seed=seed,
+        log_dir=os.path.join(log_dir, "exdm"),
+    )
+    metrics = exp.run()
+    train_metrics = [m for m in metrics if m.training]
+    eval_metrics  = [m for m in metrics if not m.training]
+    visited = _compute_and_save_coverage(metrics, env.n_states, os.path.join(log_dir, "exdm"))
+    return ApproachResult(
+        name="ExDM (Exploratory Diffusion Model)",
+        all_rewards=[m.total_reward for m in train_metrics],
+        eval_rewards=[m.total_reward for m in eval_metrics],
+        total_steps=agent.total_steps,
+        n_episodes=episodes,
+        visited_states=visited,
+    )
+
+
 def run_optimal_baseline(
     env_name: str, height: int, width: int, goal_pos: tuple[int, int],
     max_steps: int, episodes: int, gamma: float, seed: int,
@@ -471,8 +539,9 @@ def plot_comparison(
 
     # Colour / style cycle (skip optimal and random for distinct colours)
     _STYLES: list[dict] = [
-        {"color": "#2196F3", "lw": 2},   # blue  — GCRL
+        {"color": "#2196F3", "lw": 2},   # blue   — GCRL
         {"color": "#FF5722", "lw": 2},   # orange — RCRL
+        {"color": "#9C27B0", "lw": 2},   # purple — ExDM
         {"color": "#9E9E9E", "lw": 1.5, "linestyle": "--"},  # grey — random
     ]
 
@@ -602,6 +671,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--psi-min", type=float, default=-0.1, help="Most negative step-cost weight (RCRL, ≤ 0).")
     parser.add_argument("--psi-mix-alpha", type=float, default=0.5, help="Fraction of nominal ψ* draws in training mixture (RCRL).")
     parser.add_argument("--eval-every", type=int, default=50, help="GCRL eval every N episodes.")
+    # ExDM hyperparameters
+    parser.add_argument("--model-lr", type=float, default=1e-2,
+                        help="Score model SGD learning rate (ExDM).")
+    parser.add_argument("--n-diffusion-steps", type=int, default=10,
+                        help="DDPM diffusion timesteps T (ExDM).")
+    parser.add_argument("--n-model-updates", type=int, default=5,
+                        help="Score model gradient steps per env step (ExDM).")
+    parser.add_argument("--reward-samples", type=int, default=10,
+                        help="(ε,t) samples for intrinsic reward estimate (ExDM).")
+    parser.add_argument("--exdm-batch-size", type=int, default=32,
+                        help="Mini-batch size for score model updates (ExDM).")
+    parser.add_argument("--exdm-buffer-capacity", type=int, default=10000,
+                        help="Replay buffer capacity for the score model (ExDM).")
     parser.add_argument("--seed", type=int, default=42, help="Random seed.")
     parser.add_argument(
         "--goal-state",
@@ -777,6 +859,26 @@ def compare_all(args) -> list[ApproachResult]:
         start_pos=start_pos,
     )
     results.append(r_rcrl)
+
+    r_exdm = run_exdm(
+        env_name=env_name,
+        height=args.height, width=args.width,
+        goal_pos=goal_pos, max_steps=args.max_steps,
+        episodes=args.episodes, seed=args.seed,
+        alpha=args.alpha,
+        model_lr=getattr(args, "model_lr", 1e-2),
+        n_diffusion_steps=getattr(args, "n_diffusion_steps", 10),
+        epsilon=args.epsilon, epsilon_min=args.epsilon_min,
+        epsilon_decay=args.epsilon_decay,
+        buffer_capacity=getattr(args, "exdm_buffer_capacity", 10000),
+        batch_size=getattr(args, "exdm_batch_size", 32),
+        n_model_updates=getattr(args, "n_model_updates", 5),
+        reward_samples=getattr(args, "reward_samples", 10),
+        log_dir=args.log_dir,
+        eval_every=eval_every,
+        start_pos=start_pos,
+    )
+    results.append(r_exdm)
 
     r_optimal = run_optimal_baseline(
         env_name=env_name,
