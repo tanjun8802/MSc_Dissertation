@@ -34,6 +34,7 @@ Usage
 from __future__ import annotations
 
 import argparse
+import numpy as np
 import sys
 import os
 from dataclasses import dataclass
@@ -115,11 +116,16 @@ def _compute_and_save_coverage(
     n_states: int,
     log_dir: str,
 ) -> int:
-    """Compute cumulative unique-state coverage and save a ``coverage.csv``.
+    """Compute cumulative unique-state coverage and save analysis artefacts.
 
-    Iterates through every episode's trajectory (training episodes only) and
-    tracks the running set of unique states visited.  The result is saved to
-    ``<log_dir>/coverage.csv`` and the final unique-state count is returned.
+    Iterates through every episode's trajectory (training episodes only) and:
+    * tracks the running set of unique states visited → saved as ``coverage.csv``
+    * accumulates per-state visit counts across all training episodes →
+      saved as ``visit_counts.npy`` (shape ``(n_states,)`` int32 array).
+
+    The ``visit_counts.npy`` file is read by the notebook heatmap cell to build
+    per-cell frequency maps that are robust to arbitrary grid layouts (walls,
+    four-rooms, windy, etc.).
 
     Parameters
     ----------
@@ -129,7 +135,7 @@ def _compute_and_save_coverage(
     n_states :
         Total number of states in the environment.
     log_dir :
-        Directory where ``coverage.csv`` will be written.
+        Directory where ``coverage.csv`` and ``visit_counts.npy`` are written.
 
     Returns
     -------
@@ -140,8 +146,10 @@ def _compute_and_save_coverage(
 
     os.makedirs(log_dir, exist_ok=True)
     cov_path = os.path.join(log_dir, "coverage.csv")
+    vc_path = os.path.join(log_dir, "visit_counts.npy")
 
     visited: set[int] = set()
+    visit_counts = np.zeros(n_states, dtype=np.int32)
     rows = []
     for m in metrics:
         if not m.training:
@@ -149,7 +157,10 @@ def _compute_and_save_coverage(
         if m.trajectory:
             for _, state, action, _ in m.trajectory:
                 if action != -1:   # -1 is the terminal-arrival marker
-                    visited.add(int(state))
+                    s = int(state)
+                    visited.add(s)
+                    if 0 <= s < n_states:
+                        visit_counts[s] += 1
         rows.append({
             "episode": m.episode,
             "unique_states_cumulative": len(visited),
@@ -163,6 +174,8 @@ def _compute_and_save_coverage(
         )
         writer.writeheader()
         writer.writerows(rows)
+
+    np.save(vc_path, visit_counts)
 
     return len(visited)
 
