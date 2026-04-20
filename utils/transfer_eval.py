@@ -3,22 +3,23 @@ transfer_eval.py
 ================
 Transfer-goal evaluation utilities — zero-shot and fine-tuning modes.
 
-After training, both the GCRL C-table and the RCRL Q-table are persisted to
-disk.  This module provides helpers to load those artefacts and evaluate a
-**new goal state** using one of two strategies:
+After training, both the GCRL C-table and the RCRL / ExDM Q-tables are
+persisted to disk.  This module provides helpers to load those artefacts and
+evaluate a **new goal state** using one of two strategies:
 
 Zero-shot
 ~~~~~~~~~
 The saved policy is applied directly to a new-goal environment without any
 additional training.  GCRL can often succeed here because the C-table
 ``C[s, a, sf]`` covers *all* future states sf visited during training.  RCRL
-almost always fails because its Q-table was optimised for the original goal.
+and ExDM may generalise partially because their Q-tables encode diverse
+reachability structure via the score-based and parameterised reward signals.
 
 Fine-tuning (downstream training)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 The learned policy (Q-table or C-table) is used as a **warm start** and a
 short burst of further training episodes is run in an environment whose
-terminal state is the *new* goal.  Both RCRL and GCRL benefit here:
+terminal state is the *new* goal.  All agents benefit here:
 
 * **RCRL**: Q-learning quickly adapts the conditioned Q-table to the new
   reward signal because the ψ-conditioned representation already encodes
@@ -29,6 +30,10 @@ terminal state is the *new* goal.  Both RCRL and GCRL benefit here:
   the new goal.  Because the C-table already encodes reachability structure
   from training, convergence is much faster than training from scratch.
 
+* **ExDM**: The Q-table warm-starts standard Q-learning for the new goal.
+  The diffusion score model is also warm-started from the pre-trained weights,
+  continuing to provide score-based intrinsic reward during fine-tuning.
+
 Public API
 ----------
 * :class:`TransferResult`  — dataclass holding per-episode metrics.
@@ -36,8 +41,10 @@ Public API
   ``action_fn(state_int) -> action_int``.
 * :func:`rcrl_action_fn`   — builds a greedy fn from a Q-slice.
 * :func:`gcrl_action_fn`   — builds a greedy fn from a C-table + goal.
+* :func:`exdm_action_fn`   — builds a greedy fn from an ExDM Q-table.
 * :func:`rcrl_finetune`    — warm-start Q-table fine-tuning for a new goal.
 * :func:`gcrl_finetune`    — warm-start C-table fine-tuning for a new goal.
+* :func:`exdm_finetune`    — warm-start ExDM Q-table fine-tuning for a new goal.
 """
 
 from __future__ import annotations
@@ -126,6 +133,31 @@ def gcrl_action_fn(c_table: np.ndarray, goal: int) -> Callable[[int], int]:
 
     def _fn(state: int) -> int:
         return int(np.argmax(c_table[state, :, goal]))
+
+    return _fn
+
+
+def exdm_action_fn(q_table: np.ndarray) -> Callable[[int], int]:
+    """Return a greedy action function wrapping an ExDM Q-table.
+
+    Parameters
+    ----------
+    q_table :
+        ExDM Q-table.  Shape ``(n_states, n_actions)`` — i.e. the
+        ``q_table.npy`` artefact saved by
+        :class:`experiments.run_exdm.ExDMExperiment`.  This is the
+        Q-table optimised for the score-based intrinsic reward during
+        unsupervised pre-training.
+
+    Returns
+    -------
+    action_fn :
+        Callable ``action_fn(state: int) -> int`` that returns
+        ``argmax Q[state, :]``.
+    """
+
+    def _fn(state: int) -> int:
+        return int(np.argmax(q_table[state]))
 
     return _fn
 
@@ -343,6 +375,115 @@ def gcrl_finetune(
 
     updated_c = agent.C.copy()
     return gcrl_action_fn(updated_c, new_goal), updated_c
+
+
+def exdm_finetune(
+    q_table: np.ndarray,
+    new_goal_env,
+    *,
+    n_episodes: int = 20,
+    alpha: float = 0.1,
+    gamma: float = 0.99,
+    epsilon: float = 0.2,
+    epsilon_min: float = 0.05,
+    epsilon_decay: float = 0.85,
+    model_lr: float = 1e-2,
+    n_diffusion_steps: int = 10,
+    buffer_capacity: int = 10_000,
+    batch_size: int = 32,
+    n_model_updates: int = 5,
+    reward_samples: int = 10,
+    seed: int | None = None,
+) -> Tuple[Callable[[int], int], np.ndarray]:
+    """Warm-start fine-tuning of the ExDM Q-table for a new goal.
+
+    Starting from the pre-trained ``q_table`` (and a fresh score model),
+    runs ``n_episodes`` of ExDM Q-learning in ``new_goal_env``.  The
+    score-based intrinsic reward encourages exploration of the new region
+    while the warm-started Q-values provide a head start toward the new goal.
+
+    Parameters
+    ----------
+    q_table :
+        Pre-trained ExDM Q-table.  Shape ``(n_states, n_actions)`` — the
+        ``q_table.npy`` artefact saved by
+        :class:`experiments.run_exdm.ExDMExperiment`.
+    new_goal_env :
+        A :class:`environments.gridworld.GridWorld` instance configured
+        with the *new* goal as its terminal state.
+    n_episodes :
+        Number of fine-tuning episodes.
+    alpha :
+        Q-learning step size for fine-tuning.
+    gamma :
+        Discount factor.
+    epsilon :
+        Initial ε for ε-greedy exploration.
+    epsilon_min :
+        Minimum ε after decay.
+    epsilon_decay :
+        Multiplicative ε decay per episode.
+    model_lr :
+        SGD learning rate for the diffusion score model.
+    n_diffusion_steps :
+        Number of DDPM diffusion timesteps.
+    buffer_capacity :
+        Replay buffer capacity for the score model.
+    batch_size :
+        Mini-batch size for score model updates.
+    n_model_updates :
+        Score model gradient steps per environment step.
+    reward_samples :
+        Monte Carlo samples for the intrinsic reward estimate.
+    seed :
+        Optional random seed.
+
+    Returns
+    -------
+    action_fn :
+        Greedy callable ``action_fn(state: int) -> int`` using the updated
+        Q-table after fine-tuning.
+    updated_q_table :
+        The Q-table after fine-tuning (shape unchanged).
+    """
+    from agents.exdm_agent import ExDMAgent
+
+    n_states, n_actions = q_table.shape
+
+    agent = ExDMAgent(
+        n_states=n_states,
+        n_actions=n_actions,
+        gamma=gamma,
+        alpha=alpha,
+        model_lr=model_lr,
+        n_diffusion_steps=n_diffusion_steps,
+        epsilon=epsilon,
+        epsilon_min=epsilon_min,
+        epsilon_decay=epsilon_decay,
+        buffer_capacity=buffer_capacity,
+        batch_size=batch_size,
+        n_model_updates=n_model_updates,
+        reward_samples=reward_samples,
+        seed=seed,
+    )
+    # Warm-start from the pre-trained Q-table
+    agent.Q = q_table.copy()
+
+    rng = np.random.default_rng(seed)
+    for _ in range(n_episodes):
+        obs, _ = new_goal_env.reset(seed=int(rng.integers(0, 2**31)))
+        agent.reset()
+        while True:
+            action = agent.select_action(obs)
+            next_obs, reward, terminated, truncated, info = new_goal_env.step(action)
+            agent.update(obs, action, reward, next_obs, terminated, truncated, info)
+            obs = next_obs
+            if terminated or truncated:
+                break
+        agent.finish_episode()
+
+    updated_q = agent.Q.copy()
+    return exdm_action_fn(updated_q), updated_q
 
 
 # ---------------------------------------------------------------------------

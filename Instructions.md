@@ -28,7 +28,8 @@ algorithm.  No prior knowledge of the repository internals is required.
    - 7.3 [RCRL — Q-Learning with Diverse ψ Sampling](#73-rcrl--q-learning-with-diverse-ψ-sampling)
    - 7.4 [ExDM — Score-Based Diffusion Intrinsic Reward](#74-exdm--score-based-diffusion-intrinsic-reward)
    - 7.5 [Shared Equations (Bellman, Returns, GAE)](#75-shared-equations-bellman-returns-gae)
-8. [Project Structure Reference](#8-project-structure-reference)
+8. [PyTorch and Deep RL](#8-pytorch-and-deep-rl)
+9. [Project Structure Reference](#9-project-structure-reference)
 
 ---
 
@@ -580,7 +581,96 @@ or use them as ground-truth checks.
 
 ---
 
-## 8. Project Structure Reference
+## 8. PyTorch and Deep RL
+
+### 8.1 Installing PyTorch
+
+PyTorch is now listed as a dependency in `pyproject.toml`:
+
+```bash
+pip install torch            # CPU-only (default, works everywhere)
+# or — for NVIDIA GPU:
+pip install torch --index-url https://download.pytorch.org/whl/cu121
+```
+
+### 8.2 Device helper and MLP backbone (`utils/torch_utils.py`)
+
+```python
+from utils.torch_utils import get_device, MLP
+
+device = get_device()          # auto: CUDA > MPS > CPU
+net = MLP(in_dim=4, out_dim=2, hidden_sizes=[128, 128]).to(device)
+```
+
+`get_device()` automatically picks the best hardware.  All future deep agents
+should call this in `__init__` and store `self.device`.
+
+### 8.3 Abstract deep agent (`BaseDeepAgent`)
+
+`utils/torch_utils.py` also provides `BaseDeepAgent`, an extension of
+`BaseAgent` that adds `self.device`, `self.network`, and `self.optimizer`.
+Subclass it for any neural network agent:
+
+```python
+from utils.torch_utils import BaseDeepAgent, MLP
+
+class DQNAgent(BaseDeepAgent):
+    def __init__(self, n_obs, n_actions, **kw):
+        super().__init__(n_obs, n_actions, **kw)
+        self.network = MLP(n_obs, n_actions).to(self.device)
+        self.target  = MLP(n_obs, n_actions).to(self.device)
+        self.optimizer = torch.optim.Adam(self.network.parameters(), lr=self.lr)
+```
+
+### 8.4 How Deep RL networks work
+
+A Deep RL network maps from **observation → useful quantities**:
+
+| Algorithm | Input shape | Output shape | What the output means |
+|---|---|---|---|
+| **DQN / DDQN** | `(B, n_obs)` | `(B, n_actions)` | Q(s, a) for every action |
+| **Actor (discrete PPO)** | `(B, n_obs)` | `(B, n_actions)` | logits → softmax → π(a\|s) |
+| **Actor (continuous SAC)** | `(B, n_obs)` | `(B, 2·n_act)` | μ and log σ for Gaussian policy |
+| **Critic / value head** | `(B, n_obs)` | `(B, 1)` | V(s) or Q(s, a) |
+
+Typical training loop:
+1. Collect `(obs, action, reward, next_obs, done)` with the current policy.
+2. Store in a **replay buffer** (off-policy) or rollout buffer (on-policy).
+3. Sample a mini-batch, compute `Q_target = r + γ · max Q_target(s')`.
+4. `loss = MSE(Q_pred, Q_target)` → `loss.backward()` → `optimizer.step()`.
+5. Soft-update target network: `θ_target ← τ·θ + (1-τ)·θ_target`.
+
+### 8.5 How to extend this repo for Deep RL
+
+Recommended layout (keep tabular agents untouched):
+
+```
+agents/
+  dqn_agent.py          # subclasses BaseDeepAgent; uses MLP Q-network
+  ppo_agent.py          # actor-critic using two MLP heads
+  sac_agent.py          # SAC; uses separate actor / two critics
+environments/
+  gym_wrapper.py        # wraps any Gymnasium env to match BaseEnv interface
+configs/
+  dqn.yaml              # lr, batch_size, replay_buffer_size, target_update_freq
+  ppo.yaml
+experiments/
+  run_dqn.py            # analogous to run_rcrl.py
+```
+
+Concrete steps:
+1. Write `agents/dqn_agent.py` inheriting `BaseDeepAgent`.  Implement
+   `select_action` (ε-greedy over the Q-network) and `update` (sample
+   from replay buffer, TD loss, backward).
+2. Write `environments/gym_wrapper.py` to adapt Gymnasium's `step()` /
+   `reset()` to the `BaseEnv` interface.
+3. Write `experiments/run_dqn.py` (CLI runner, similar to existing runners).
+4. Add the new agent to `experiments/compare_approaches.py`.
+5. Add `configs/dqn.yaml` and document in `Instructions.md`.
+
+---
+
+## 9. Project Structure Reference
 
 ```
 MSc_Dissertation/
@@ -622,7 +712,8 @@ MSc_Dissertation/
 │   ├── logger.py               #   CSV + stdout logger
 │   ├── metrics.py              #   EpisodeMetrics dataclass
 │   ├── replay_buffer.py        #   Fixed-capacity circular buffer
-│   └── transfer_eval.py        #   Zero-shot / fine-tuning transfer helpers
+│   ├── transfer_eval.py        #   Zero-shot / fine-tuning transfer helpers (RCRL, GCRL, ExDM)
+│   └── torch_utils.py          #   PyTorch device helper, MLP backbone, BaseDeepAgent
 │
 ├── configs/                    # YAML hyperparameter files
 │   ├── default.yaml            #   Shared defaults
@@ -651,3 +742,6 @@ MSc_Dissertation/
 | RCRL slow to converge | Increase `--explore-episodes` or reduce `--epsilon-decay` |
 | ExDM intrinsic reward stops changing | Buffer is full of the same states — increase `--buffer-capacity` or reduce `--n-model-updates` |
 | ExDM very slow per step | Reduce `--n-model-updates` (default 5) or `--n-diffusion-steps` (default 10) |
+| Transfer Section 5 `NameError: display` | Old notebook — re-pull this branch; `plot_trajectory` was fixed |
+| Transfer Section 5 ExDM missing | Old notebook — re-pull this branch; ExDM is now included in all transfer cells |
+| `ImportError: PyTorch not installed` | `pip install torch` (see Section 8.1) |
