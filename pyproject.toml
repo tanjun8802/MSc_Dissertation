@@ -8,11 +8,7 @@ dependencies = [
   "PyYAML>=6.0",
   "matplotlib>=3.8",
   "pandas>=2.2",
-  # Deep RL / GPU acceleration
-  # CPU-only PyTorch wheel is small (~200 MB) and works everywhere.
-  # For GPU training, replace with the appropriate CUDA wheel, e.g.:
-  #   pip install torch --index-url https://download.pytorch.org/whl/cu121
-  "torch>=2.2",
+  "torch>=2.7",
 ]
 
 [tool.uv]
