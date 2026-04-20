@@ -156,6 +156,14 @@ class GCRLExperiment(BaseExperiment):
             self.agent.C.copy(),
         )
 
+        # Save V(s) = max_a C[s, a, eval_goal] — state value under the
+        # greedy contrastive policy for the training goal.  Shape: (n_states,).
+        v_function = self.agent.C[:, :, self.eval_goal].max(axis=1)
+        np.save(
+            os.path.join(self.logger.log_dir, "v_function.npy"),
+            v_function,
+        )
+
         # Save trajectory of the last evaluation episode for visualisation
         if last_eval_metrics is not None and last_eval_metrics.trajectory:
             self.logger.log_trajectory(

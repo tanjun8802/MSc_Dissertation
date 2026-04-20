@@ -216,6 +216,14 @@ class RCRLExperiment(BaseExperiment):
             self.agent.Q.copy(),
         )
 
+        # Save V(s) = max_a Q[s, ψ*, a] — state value under the greedy
+        # nominal policy.  Shape: (n_states,).
+        v_function = self.agent.Q[:, self.agent.nominal_psi_bin, :].max(axis=1)
+        np.save(
+            os.path.join(self.logger.log_dir, "v_function.npy"),
+            v_function,
+        )
+
         return all_metrics
 
     def _run_exploit_episode(self, episode: int) -> EpisodeMetrics:

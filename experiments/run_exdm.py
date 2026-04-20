@@ -196,6 +196,15 @@ class ExDMExperiment(BaseExperiment):
             self.agent.Q.copy(),
         )
 
+        # Save V(s) = max_a Q[s, a] — exploration value function.
+        # High values → state is frequently under-explored (score model error
+        # is high there).  Shape: (n_states,).
+        v_function = self.agent.Q.max(axis=1)
+        np.save(
+            os.path.join(self.logger.log_dir, "v_function.npy"),
+            v_function,
+        )
+
         # Save trajectory of the last evaluation episode for visualisation
         if last_eval_metrics is not None and last_eval_metrics.trajectory:
             self.logger.log_trajectory(
