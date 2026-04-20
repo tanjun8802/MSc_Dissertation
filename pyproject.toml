@@ -1,0 +1,15 @@
+[project]
+name = "MSc_Dissertation"
+version = "0.2.0"
+description = "Dependency summary for the MSc dissertation RL codebase."
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "numpy>=1.26",       # used by all agents including ExDM (tabular diffusion model)
+  "PyYAML>=6.0",
+  "matplotlib>=3.8",
+  "pandas>=2.2",
+  "torch>=2.7",
+]
+
+[tool.uv]
+dev-dependencies = []
