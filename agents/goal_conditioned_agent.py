@@ -91,6 +91,8 @@ class GoalConditionedAgent(BaseAgent):
     min_temperature :
         Lower bound for the softmax temperature.  This plays the same
         stabilising role as a minimum actor std in continuous-control actors.
+    critic_batch_size :
+        Mini-batch size for each contrastive critic update.
     seed :
         Random seed.
     """
@@ -110,6 +112,7 @@ class GoalConditionedAgent(BaseAgent):
         n_critic_updates: int = 10,
         target_entropy: float = 0.0,
         min_temperature: float = 1e-6,
+        critic_batch_size: int = 64,
         seed: int | None = None,
     ) -> None:
         super().__init__(n_actions=n_actions, gamma=gamma, seed=seed)
@@ -118,6 +121,7 @@ class GoalConditionedAgent(BaseAgent):
         self.temperature = temperature
         self.target_entropy = float(target_entropy)
         self.min_temperature = float(min_temperature)
+        self.critic_batch_size = int(critic_batch_size)
         self.n_negatives = n_negatives
         self.logsumexp_reg = logsumexp_reg
         self.buffer_capacity = buffer_capacity
@@ -186,8 +190,8 @@ class GoalConditionedAgent(BaseAgent):
     def _anneal_temperature(self) -> None:
         """Move the actor temperature toward the requested entropy target."""
         current_entropy = self._mean_policy_entropy()
-        entropy_gap = self.target_entropy - current_entropy
-        updated_temperature = self.temperature * math.exp(entropy_gap)
+        entropy_gap = float(np.clip(self.target_entropy - current_entropy, -2.0, 2.0))
+        updated_temperature = self.temperature * math.exp(0.1 * entropy_gap)
         self.temperature = max(self.min_temperature, updated_temperature)
 
     # ------------------------------------------------------------------
@@ -316,7 +320,7 @@ class GoalConditionedAgent(BaseAgent):
         # samples-per-insert ratio, while preserving any legacy minimum batch
         # count from n_critic_updates.
         if len(self._replay) >= self.n_negatives + 1:
-            batch_size = min(64, len(self._replay))
+            batch_size = min(self.critic_batch_size, len(self._replay))
             replay_updates = 0
             if new_pairs and self.samples_per_insert > 0:
                 replay_updates = math.ceil(
@@ -340,7 +344,7 @@ class GoalConditionedAgent(BaseAgent):
         bound (as shown to be necessary in prior CRL analysis).
         """
         n_buf = len(self._replay)
-        batch_size = min(64, n_buf)
+        batch_size = min(self.critic_batch_size, n_buf)
         pos_indices = self.np_random.integers(0, n_buf, size=batch_size)
 
         for pos_idx in pos_indices:
