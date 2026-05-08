@@ -98,6 +98,8 @@ class GoalConditionedAgent(BaseAgent):
     """
 
     _ENTROPY_GAP_CLIP = 2.0
+    _MIN_PROB_FOR_LOG = 1e-12
+    _TEMPERATURE_UPDATE_RATE = 0.1
 
     def __init__(
         self,
@@ -185,11 +187,17 @@ class GoalConditionedAgent(BaseAgent):
         goal = self._target_goal
         tracked_states = {s for s, _, _ in self._replay}
         tracked_states.update(self._episode_states)
-        states = tracked_states if tracked_states else range(self.n_states)
         entropies = []
-        for state in states:
+        for state in tracked_states:
             probs = self._policy_probs(state, goal)
-            entropies.append(-float(np.sum(probs * np.log(np.clip(probs, 1e-12, 1.0)))))
+            entropies.append(
+                -float(
+                    np.sum(
+                        probs
+                        * np.log(np.clip(probs, self._MIN_PROB_FOR_LOG, 1.0))
+                    )
+                )
+            )
         return float(np.mean(entropies)) if entropies else 0.0
 
     def _anneal_temperature(self) -> None:
@@ -205,7 +213,9 @@ class GoalConditionedAgent(BaseAgent):
                 self._ENTROPY_GAP_CLIP,
             )
         )
-        updated_temperature = self.temperature * math.exp(0.1 * entropy_gap)
+        updated_temperature = self.temperature * math.exp(
+            self._TEMPERATURE_UPDATE_RATE * entropy_gap
+        )
         self.temperature = max(self.min_temperature, updated_temperature)
 
     # ------------------------------------------------------------------

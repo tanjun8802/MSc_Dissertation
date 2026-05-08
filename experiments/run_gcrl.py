@@ -333,6 +333,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             yaml_defaults["samples_per_insert"] = agent_cfg["samples_per_insert"]
         if "n_critic_updates" in agent_cfg:
             yaml_defaults["n_critic_updates"] = agent_cfg["n_critic_updates"]
+        if "epsilon" in agent_cfg:
+            yaml_defaults["epsilon"] = agent_cfg["epsilon"]
+        if "epsilon_min" in agent_cfg:
+            yaml_defaults["epsilon_min"] = agent_cfg["epsilon_min"]
+        if "epsilon_decay" in agent_cfg:
+            yaml_defaults["epsilon_decay"] = agent_cfg["epsilon_decay"]
+        if "her_k" in agent_cfg:
+            yaml_defaults["her_k"] = agent_cfg["her_k"]
         if "n_episodes" in training_cfg:
             yaml_defaults["episodes"] = training_cfg["n_episodes"]
         if "eval_every" in training_cfg:
