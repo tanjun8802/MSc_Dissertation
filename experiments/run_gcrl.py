@@ -236,33 +236,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-steps", type=int, default=200, help="Max steps per episode.")
     parser.add_argument("--alpha", type=float, default=0.1, help="Contrastive critic step size.")
     parser.add_argument("--temperature", type=float, default=1.0, help="Softmax temperature τ.")
-    parser.add_argument(
-        "--target-entropy",
-        type=float,
-        default=0.0,
-        help="Average actor entropy target; 0 anneals the softmax policy toward greedy.",
-    )
-    parser.add_argument(
-        "--min-temperature",
-        type=float,
-        default=1e-6,
-        help="Lower bound for the softmax temperature.",
-    )
     parser.add_argument("--n-negatives", type=int, default=16, help="Negative examples per infoNCE update.")
     parser.add_argument("--logsumexp-reg", type=float, default=0.01, help="LogSumExp regularisation coefficient.")
     parser.add_argument("--buffer-capacity", type=int, default=10000, help="Replay buffer capacity.")
-    parser.add_argument(
-        "--samples-per-insert",
-        type=int,
-        default=256,
-        help="Replay ratio: positive critic samples drawn per newly inserted transition.",
-    )
-    parser.add_argument(
-        "--n-critic-updates",
-        type=int,
-        default=10,
-        help="Legacy minimum number of critic mini-batches per episode.",
-    )
     parser.add_argument(
         "--contrastive-gamma",
         type=float,
@@ -317,22 +293,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             yaml_defaults["contrastive_gamma"] = agent_cfg["contrastive_gamma"]
         if "alpha" in agent_cfg:
             yaml_defaults["alpha"] = agent_cfg["alpha"]
-        if "temperature" in agent_cfg:
-            yaml_defaults["temperature"] = agent_cfg["temperature"]
-        if "target_entropy" in agent_cfg:
-            yaml_defaults["target_entropy"] = agent_cfg["target_entropy"]
-        if "min_temperature" in agent_cfg:
-            yaml_defaults["min_temperature"] = agent_cfg["min_temperature"]
-        if "n_negatives" in agent_cfg:
-            yaml_defaults["n_negatives"] = agent_cfg["n_negatives"]
-        if "logsumexp_reg" in agent_cfg:
-            yaml_defaults["logsumexp_reg"] = agent_cfg["logsumexp_reg"]
-        if "buffer_capacity" in agent_cfg:
-            yaml_defaults["buffer_capacity"] = agent_cfg["buffer_capacity"]
-        if "samples_per_insert" in agent_cfg:
-            yaml_defaults["samples_per_insert"] = agent_cfg["samples_per_insert"]
-        if "n_critic_updates" in agent_cfg:
-            yaml_defaults["n_critic_updates"] = agent_cfg["n_critic_updates"]
         if "epsilon" in agent_cfg:
             yaml_defaults["epsilon"] = agent_cfg["epsilon"]
         if "epsilon_min" in agent_cfg:
@@ -385,13 +345,9 @@ def main(argv: list[str] | None = None) -> list[EpisodeMetrics]:
         contrastive_gamma=args.contrastive_gamma,
         alpha=args.alpha,
         temperature=args.temperature,
-        target_entropy=args.target_entropy,
-        min_temperature=args.min_temperature,
         n_negatives=args.n_negatives,
         logsumexp_reg=args.logsumexp_reg,
         buffer_capacity=args.buffer_capacity,
-        samples_per_insert=args.samples_per_insert,
-        n_critic_updates=args.n_critic_updates,
         seed=args.seed,
     )
 

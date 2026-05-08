@@ -49,7 +49,6 @@ Usage (tabular GridWorld)
 
 from __future__ import annotations
 
-import math
 from typing import Any
 
 import numpy as np
@@ -82,24 +81,9 @@ class GoalConditionedAgent(BaseAgent):
         paper).
     buffer_capacity :
         Maximum number of (s, a, sf) triples stored in the replay buffer.
-    samples_per_insert :
-        Target replay ratio: how many positive samples to draw for critic
-        updates per newly inserted transition.
-    target_entropy :
-        Desired average action entropy for the softmax actor.  Setting this to
-        0 anneals the policy toward a nearly deterministic actor over time.
-    min_temperature :
-        Lower bound for the softmax temperature.  This plays the same
-        stabilising role as a minimum actor std in continuous-control actors.
-    critic_batch_size :
-        Mini-batch size for each contrastive critic update.
     seed :
         Random seed.
     """
-
-    _ENTROPY_GAP_CLIP = 2.0
-    _MIN_PROB_FOR_LOG = 1e-12
-    _TEMPERATURE_UPDATE_RATE = 0.1
 
     def __init__(
         self,
@@ -112,24 +96,16 @@ class GoalConditionedAgent(BaseAgent):
         n_negatives: int = 16,
         logsumexp_reg: float = 0.01,
         buffer_capacity: int = 10000,
-        samples_per_insert: int = 256,
         n_critic_updates: int = 10,
-        target_entropy: float = 0.0,
-        min_temperature: float = 1e-6,
-        critic_batch_size: int = 64,
         seed: int | None = None,
     ) -> None:
         super().__init__(n_actions=n_actions, gamma=gamma, seed=seed)
         self.n_states = n_states
         self.alpha = alpha
         self.temperature = temperature
-        self.target_entropy = float(target_entropy)
-        self.min_temperature = float(min_temperature)
-        self.critic_batch_size = int(critic_batch_size)
         self.n_negatives = n_negatives
         self.logsumexp_reg = logsumexp_reg
         self.buffer_capacity = buffer_capacity
-        self.samples_per_insert = int(samples_per_insert)
         self.n_critic_updates = n_critic_updates
         # contrastive_gamma controls geometric future-state sampling in the
         # infoNCE objective (Δ ~ Geom(1-contrastive_gamma) - 1).  It should be
@@ -173,51 +149,6 @@ class GoalConditionedAgent(BaseAgent):
         self._episode_states = []
         self._episode_actions = []
 
-    def _policy_probs(self, state: int, goal: int) -> np.ndarray:
-        """Return the softmax policy π(. | state, goal)."""
-        logits = self.C[state, :, goal]
-        logits_shifted = logits - logits.max()
-        temperature = max(self.temperature, self.min_temperature)
-        probs = np.exp(logits_shifted / temperature)
-        probs /= probs.sum()
-        return probs
-
-    def _mean_policy_entropy(self) -> float:
-        """Return the mean action entropy under the current target goal."""
-        goal = self._target_goal
-        tracked_states = {s for s, _, _ in self._replay}
-        tracked_states.update(self._episode_states)
-        entropies = []
-        for state in tracked_states:
-            probs = self._policy_probs(state, goal)
-            entropies.append(
-                -float(
-                    np.sum(
-                        probs
-                        * np.log(np.clip(probs, self._MIN_PROB_FOR_LOG, 1.0))
-                    )
-                )
-            )
-        return float(np.mean(entropies)) if entropies else 0.0
-
-    def _anneal_temperature(self) -> None:
-        """Move the actor temperature toward the requested entropy target."""
-        current_entropy = self._mean_policy_entropy()
-        # Clip the entropy gap to keep each temperature update bounded: a ±2.0
-        # entropy mismatch already implies a very strong correction for our
-        # small tabular action spaces, so larger gaps only destabilise annealing.
-        entropy_gap = float(
-            np.clip(
-                self.target_entropy - current_entropy,
-                -self._ENTROPY_GAP_CLIP,
-                self._ENTROPY_GAP_CLIP,
-            )
-        )
-        updated_temperature = self.temperature * math.exp(
-            self._TEMPERATURE_UPDATE_RATE * entropy_gap
-        )
-        self.temperature = max(self.min_temperature, updated_temperature)
-
     # ------------------------------------------------------------------
     # BaseAgent interface
     # ------------------------------------------------------------------
@@ -238,7 +169,11 @@ class GoalConditionedAgent(BaseAgent):
         state = int(np.asarray(observation).flat[0])
         g = self._target_goal
 
-        probs = self._policy_probs(state, g)
+        logits = self.C[state, :, g]
+        # Numerically stable softmax
+        logits_shifted = logits - logits.max()
+        probs = np.exp(logits_shifted / self.temperature)
+        probs /= probs.sum()
         return int(self.np_random.choice(self.n_actions, p=probs))
 
     def update(
@@ -340,20 +275,11 @@ class GoalConditionedAgent(BaseAgent):
                 self._replay.pop(0)
             self._replay.append(pair)
 
-        # Step 3: sample enough replay batches to approximate the requested
-        # samples-per-insert ratio, while preserving any legacy minimum batch
-        # count from n_critic_updates.
+        # Step 3: run n_critic_updates mini-batches of infoNCE updates so that
+        # the critic converges reliably within the episode budget.
         if len(self._replay) >= self.n_negatives + 1:
-            batch_size = min(self.critic_batch_size, len(self._replay))
-            replay_updates = 0
-            if new_pairs and self.samples_per_insert > 0:
-                replay_updates = math.ceil(
-                    (len(new_pairs) * self.samples_per_insert) / batch_size
-                )
-            n_updates = max(self.n_critic_updates, replay_updates)
-            for _ in range(n_updates):
+            for _ in range(self.n_critic_updates):
                 self._contrastive_update()
-            self._anneal_temperature()
 
         self._episode_states = []
         self._episode_actions = []
@@ -368,7 +294,7 @@ class GoalConditionedAgent(BaseAgent):
         bound (as shown to be necessary in prior CRL analysis).
         """
         n_buf = len(self._replay)
-        batch_size = min(self.critic_batch_size, n_buf)
+        batch_size = min(64, n_buf)
         pos_indices = self.np_random.integers(0, n_buf, size=batch_size)
 
         for pos_idx in pos_indices:
@@ -411,7 +337,6 @@ class GoalConditionedAgent(BaseAgent):
             f"GoalConditionedAgent("
             f"n_states={self.n_states}, n_actions={self.n_actions}, "
             f"alpha={self.alpha}, temperature={self.temperature}, "
-            f"target_entropy={self.target_entropy}, "
             f"n_negatives={self.n_negatives}, "
             f"contrastive_gamma={self._contrastive_gamma})"
         )

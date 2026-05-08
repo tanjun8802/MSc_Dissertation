@@ -31,8 +31,6 @@ agent:
   # Contrastive critic hyperparameters
   alpha: 0.1              # step size for infoNCE critic updates
   temperature: 1.0        # softmax temperature τ for entropy-regularised policy
-  target_entropy: 0.0     # anneal the actor toward a deterministic policy
-  min_temperature: 1.0e-6 # softmax analogue of a minimum actor std
   # Geometric future-state sampling gamma (separate from the MDP discount).
   # Rule of thumb: choose so that mean offset = cγ/(1-cγ) ≈ typical episode length.
   # For the 15×15 grid (episodes ~100-500 steps), 0.99 gives mean offset=99 (good).
@@ -43,8 +41,6 @@ agent:
   logsumexp_reg: 0.01     # LogSumExp regularisation coefficient (paper default)
   # Replay buffer
   buffer_capacity: 10000  # max (s, a, sf) triples stored
-  samples_per_insert: 256 # replay ratio from the paper
-  n_critic_updates: 10    # legacy minimum; samples_per_insert can increase this
 
 # ------ Training ----------------------------------------------------------
 training:
