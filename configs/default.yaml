@@ -30,6 +30,14 @@ agent:
   name: RandomAgent        # agent class name (see agents/)
   # Q-learning / TD hyperparameters (used by concrete agents)
   alpha: 0.1               # learning rate
+  temperature: 1.0         # softmax temperature for GCRL
+  target_entropy: 0.0      # anneal the GCRL actor toward deterministic actions
+  min_temperature: 1.0e-6  # softmax analogue of a minimum actor std
+  n_negatives: 16          # negative future-state examples per GCRL update
+  logsumexp_reg: 0.01      # GCRL LogSumExp regularisation coefficient
+  buffer_capacity: 10000   # replay capacity for GCRL
+  samples_per_insert: 256  # replay ratio for GCRL
+  n_critic_updates: 10     # legacy minimum number of GCRL critic batches
   epsilon: 1.0             # initial ε for ε-greedy exploration
   epsilon_min: 0.05        # minimum ε after decay
   epsilon_decay: 0.995    # multiplicative decay per episode

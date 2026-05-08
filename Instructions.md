@@ -100,9 +100,12 @@ Key flags:
 | `--goal` | `n_states - 1` | Target goal (flat state index) |
 | `--alpha` | 0.1 | Critic step size |
 | `--temperature` | 1.0 | Softmax temperature τ |
+| `--target-entropy` | 0.0 | Entropy target for annealing the GCRL actor |
+| `--min-temperature` | 1e-6 | Lower bound for the GCRL softmax temperature |
 | `--contrastive-gamma` | auto | Geometric future-state sampling γ_c |
 | `--n-negatives` | 10 | Negative samples per infoNCE update |
 | `--logsumexp-reg` | 0.01 | LogSumExp regularisation coefficient |
+| `--samples-per-insert` | 256 | Replay ratio: critic samples per inserted transition |
 | `--eval-every` | 100 | Evaluate every N episodes |
 | `--log-dir` | `logs/gcrl` | Output directory |
 
