@@ -97,6 +97,8 @@ class GoalConditionedAgent(BaseAgent):
         Random seed.
     """
 
+    _ENTROPY_GAP_CLIP = 2.0
+
     def __init__(
         self,
         n_states: int,
@@ -181,8 +183,11 @@ class GoalConditionedAgent(BaseAgent):
     def _mean_policy_entropy(self) -> float:
         """Return the mean action entropy under the current target goal."""
         goal = self._target_goal
+        tracked_states = {s for s, _, _ in self._replay}
+        tracked_states.update(self._episode_states)
+        states = tracked_states if tracked_states else range(self.n_states)
         entropies = []
-        for state in range(self.n_states):
+        for state in states:
             probs = self._policy_probs(state, goal)
             entropies.append(-float(np.sum(probs * np.log(np.clip(probs, 1e-12, 1.0)))))
         return float(np.mean(entropies)) if entropies else 0.0
@@ -190,7 +195,16 @@ class GoalConditionedAgent(BaseAgent):
     def _anneal_temperature(self) -> None:
         """Move the actor temperature toward the requested entropy target."""
         current_entropy = self._mean_policy_entropy()
-        entropy_gap = float(np.clip(self.target_entropy - current_entropy, -2.0, 2.0))
+        # Clip the entropy gap to keep each temperature update bounded: a ±2.0
+        # entropy mismatch already implies a very strong correction for our
+        # small tabular action spaces, so larger gaps only destabilise annealing.
+        entropy_gap = float(
+            np.clip(
+                self.target_entropy - current_entropy,
+                -self._ENTROPY_GAP_CLIP,
+                self._ENTROPY_GAP_CLIP,
+            )
+        )
         updated_temperature = self.temperature * math.exp(0.1 * entropy_gap)
         self.temperature = max(self.min_temperature, updated_temperature)
 
