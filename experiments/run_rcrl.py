@@ -114,16 +114,35 @@ class RCRLExperiment(BaseExperiment):
         return self.agent.update(obs, action, reward, next_obs, terminated, truncated, info)
 
     def run(self) -> list[EpisodeMetrics]:
-        """Two-phase training loop."""
+        """Two-phase training loop with optional interleaved evaluation.
+
+        Phase 1 (explore): ``n_explore`` episodes of ε-greedy Q-learning with
+        diverse ψ sampling.  If ``eval_every > 0``, a greedy evaluation
+        episode (``ε = epsilon_min``, ``ψ = ψ*``) is inserted every
+        ``eval_every`` training episodes and logged with ``mode='eval'``.
+
+        Phase 2 (exploit): ``n_exploit`` additional greedy episodes under ψ*
+        (``ε = epsilon_min``).  These run only when ``n_exploit > 0`` and
+        appear after all training episodes on the timeline.
+        """
         all_metrics: list[EpisodeMetrics] = []
+        last_eval_metrics: EpisodeMetrics | None = None
 
         # --- Phase 1: Training -------------------------------------------
         print("Phase 1 — Training (Q-learning with diverse ψ sampling) …")
+        # Pre-compute stage milestones for Q-table snapshots (early/mid/late)
+        _n = self.n_explore
+        _q_milestones = {
+            max(1, _n // 3): "early",
+            max(1, 2 * _n // 3): "mid",
+            _n: "late",
+        }
         for episode in range(1, self.n_explore + 1):
             metrics = self._run_episode(episode, training=True)
             all_metrics.append(metrics)
 
-            finish_info = self.agent.finish_episode()
+            self.agent.finish_episode()
+            metrics.epsilon = self.agent.epsilon  # record decayed ε before logging
             self.logger.log_episode(episode, metrics)
 
             if episode % max(1, self.n_explore // 5) == 0:
@@ -136,31 +155,66 @@ class RCRLExperiment(BaseExperiment):
                     f"ε={self.agent.epsilon:.3f}"
                 )
 
-        # --- Phase 2: Exploitation -------------------------------------------
-        print(
-            f"\nPhase 2 — Exploitation "
-            f"(greedy under nominal ψ*, ε={self.agent.epsilon_min}) …"
-        )
-        # Lock ε at minimum for near-greedy behaviour
-        self.agent.epsilon = self.agent.epsilon_min
-
-        exploit_rewards = []
-        for ep_idx in range(1, self.n_exploit + 1):
-            episode = self.n_explore + ep_idx
-            metrics = self._run_exploit_episode(episode)
-            all_metrics.append(metrics)
-            exploit_rewards.append(metrics.total_reward)
-
-            self.logger.log_eval(episode, metrics)
-
-            if ep_idx % max(1, self.n_exploit // 5) == 0:
-                last = exploit_rewards[-max(1, len(exploit_rewards) // 5):]
+            if self.eval_every > 0 and episode % self.eval_every == 0:
+                eval_metrics = self._run_exploit_episode(episode)
+                all_metrics.append(eval_metrics)
+                last_eval_metrics = eval_metrics
+                self.logger.log_eval(episode, eval_metrics)
                 print(
-                    f"  [exploit ep {ep_idx:>3d}]  "
-                    f"reward={metrics.total_reward:.2f}  "
-                    f"length={metrics.length:>3d}  "
-                    f"mean_reward(recent)={sum(last)/len(last):.3f}"
+                    f"  [eval ep {episode:>4d}]  "
+                    f"reward={eval_metrics.total_reward:.2f}  "
+                    f"length={eval_metrics.length:>3d}"
                 )
+
+            # Save Q-table snapshot at early / mid / late milestones
+            if episode in _q_milestones:
+                stage = _q_milestones[episode]
+                q_slice = self.agent.Q[:, self.agent.nominal_psi_bin, :].copy()
+                np.save(
+                    os.path.join(self.logger.log_dir, f"q_{stage}.npy"),
+                    q_slice,
+                )
+
+        # --- Phase 2: Exploitation (optional terminal block) ----------------
+        if self.n_exploit > 0:
+            print(
+                f"\nPhase 2 — Exploitation "
+                f"(greedy under nominal ψ*, ε={self.agent.epsilon_min}) …"
+            )
+            # Lock ε at minimum for near-greedy behaviour
+            self.agent.epsilon = self.agent.epsilon_min
+
+            exploit_rewards: list[float] = []
+            for ep_idx in range(1, self.n_exploit + 1):
+                episode = self.n_explore + ep_idx
+                metrics = self._run_exploit_episode(episode)
+                all_metrics.append(metrics)
+                exploit_rewards.append(metrics.total_reward)
+                last_eval_metrics = metrics
+
+                self.logger.log_eval(episode, metrics)
+
+                if ep_idx % max(1, self.n_exploit // 5) == 0:
+                    last = exploit_rewards[-max(1, len(exploit_rewards) // 5):]
+                    print(
+                        f"  [exploit ep {ep_idx:>3d}]  "
+                        f"reward={metrics.total_reward:.2f}  "
+                        f"length={metrics.length:>3d}  "
+                        f"mean_reward(recent)={sum(last)/len(last):.3f}"
+                    )
+
+        # Save trajectory of the last evaluation / exploitation episode
+        if last_eval_metrics is not None and last_eval_metrics.trajectory:
+            self.logger.log_trajectory(
+                last_eval_metrics.episode, last_eval_metrics.trajectory
+            )
+
+        # Save the full Q-table (shape: n_states × n_psi_bins × n_actions)
+        # for transfer-goal evaluation in the notebook.
+        np.save(
+            os.path.join(self.logger.log_dir, "q_table.npy"),
+            self.agent.Q.copy(),
+        )
 
         return all_metrics
 
@@ -171,16 +225,25 @@ class RCRLExperiment(BaseExperiment):
 
         total_reward = 0.0
         steps = 0
+        trajectory: list[tuple[int, int, int, float]] = []
 
         while True:
+            state = int(np.asarray(obs).flat[0])
             action = self.agent.select_action(obs, greedy=True)
             next_obs, reward, terminated, truncated, info = self.env.step(action)
             total_reward += float(reward)
             steps += 1
+            trajectory.append((steps, state, int(action), float(reward)))
             obs = next_obs
 
             if terminated or truncated:
+                # Append the arrival state so the final arrow in trajectory
+                # visualisations reaches the goal cell (action=-1 = terminal marker).
+                if terminated:
+                    next_state = int(np.asarray(next_obs).flat[0])
+                    trajectory.append((steps + 1, next_state, -1, 0.0))
                 break
+
 
         return EpisodeMetrics(
             episode=episode,
@@ -188,6 +251,7 @@ class RCRLExperiment(BaseExperiment):
             length=steps,
             training=False,
             step_metrics=[],
+            trajectory=trajectory,
         )
 
 

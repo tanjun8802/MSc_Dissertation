@@ -105,6 +105,15 @@ class GCRLExperiment(BaseExperiment):
     def run(self) -> list[EpisodeMetrics]:
         """Override run() to apply the contrastive update after each episode."""
         all_metrics: list[EpisodeMetrics] = []
+        last_eval_metrics: EpisodeMetrics | None = None
+
+        # Pre-compute stage milestones for C-table snapshots (early/mid/late)
+        _n = self.n_episodes
+        _q_milestones = {
+            max(1, _n // 3): "early",
+            max(1, 2 * _n // 3): "mid",
+            _n: "late",
+        }
 
         for episode in range(1, self.n_episodes + 1):
             # Always use the single hard target goal (Algorithm 1 in paper)
@@ -122,33 +131,73 @@ class GCRLExperiment(BaseExperiment):
                 eval_metrics = self._run_gcrl_eval(episode)
                 all_metrics.append(eval_metrics)
                 self.logger.log_eval(episode, eval_metrics)
+                last_eval_metrics = eval_metrics
                 print(
                     f"  [eval] goal={self.eval_goal}  "
                     f"reward={eval_metrics.total_reward:.2f}  "
                     f"length={eval_metrics.length}"
                 )
 
+            # Save C-table snapshot at early / mid / late milestones
+            # C[:, :, eval_goal] acts as Q[state, action] for goal-reaching
+            if episode in _q_milestones:
+                stage = _q_milestones[episode]
+                c_slice = self.agent.C[:, :, self.eval_goal].copy()
+                np.save(
+                    os.path.join(self.logger.log_dir, f"q_{stage}.npy"),
+                    c_slice,
+                )
+
+        # Save the full C-table (shape: n_states × n_actions × n_states) so
+        # that the evaluation notebook can use C[:, :, any_goal] for
+        # zero-shot transfer-goal evaluation without retraining.
+        np.save(
+            os.path.join(self.logger.log_dir, "c_table.npy"),
+            self.agent.C.copy(),
+        )
+
+        # Save trajectory of the last evaluation episode for visualisation
+        if last_eval_metrics is not None and last_eval_metrics.trajectory:
+            self.logger.log_trajectory(
+                last_eval_metrics.episode, last_eval_metrics.trajectory
+            )
+
         return all_metrics
 
     def _run_gcrl_eval(self, episode: int) -> EpisodeMetrics:
-        """Run one greedy evaluation episode using the goal-enabled eval env."""
+        """Run one evaluation episode using the softmax policy conditioned on eval_goal.
+
+        The paper (Liu et al., 2024) uses the SAME softmax policy for both
+        training and evaluation: π(a|s,g) ∝ exp(C[s,a,g]/τ).  Using hard
+        argmax instead can cause the agent to get permanently stuck on
+        blocked actions (wall NOPs) whose C-values are numerically similar to
+        good-direction actions early in training — the softmax naturally
+        recovers by exploring alternatives.
+        """
         self.agent.set_goal(self.eval_goal)
         obs, info = self._eval_env.reset(seed=int(self._rng.integers(0, 2**31)))
         self.agent.reset()
 
         total_reward = 0.0
         steps = 0
+        trajectory: list[tuple[int, int, int, float]] = []
 
         while True:
             state = int(np.asarray(obs).flat[0])
-            # Greedy: argmax over the contrastive critic
-            action = int(np.argmax(self.agent.C[state, :, self.eval_goal]))
+            # Softmax policy — consistent with training and the paper.
+            action = self.agent.select_action(obs)
             next_obs, reward, terminated, truncated, info = self._eval_env.step(action)
             total_reward += float(reward)
             steps += 1
+            trajectory.append((steps, state, action, float(reward)))
             obs = next_obs
 
             if terminated or truncated:
+                # Append the arrival state so the final arrow in trajectory
+                # visualisations reaches the goal cell (action=-1 = terminal marker).
+                if terminated:
+                    next_state = int(np.asarray(next_obs).flat[0])
+                    trajectory.append((steps + 1, next_state, -1, 0.0))
                 break
 
         return EpisodeMetrics(
@@ -157,6 +206,7 @@ class GCRLExperiment(BaseExperiment):
             length=steps,
             training=False,
             step_metrics=[],
+            trajectory=trajectory,
         )
 
 
@@ -189,6 +239,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--n-negatives", type=int, default=16, help="Negative examples per infoNCE update.")
     parser.add_argument("--logsumexp-reg", type=float, default=0.01, help="LogSumExp regularisation coefficient.")
     parser.add_argument("--buffer-capacity", type=int, default=10000, help="Replay buffer capacity.")
+    parser.add_argument(
+        "--contrastive-gamma",
+        type=float,
+        default=None,
+        help=(
+            "Geometric future-state sampling parameter for the contrastive "
+            "objective (Δ ~ Geom(1-cγ)-1, mean offset = cγ/(1-cγ)).  "
+            "Should be chosen so the mean offset matches typical episode length. "
+            "Defaults to --gamma if not set.  "
+            "Rule of thumb: use ~0.9 for short episodes (5×5 grid) "
+            "and ~0.99 for long episodes (15×15 grid)."
+        ),
+    )
     parser.add_argument("--gamma", type=float, default=0.99, help="Discount factor.")
     parser.add_argument("--eval-every", type=int, default=50, help="Eval every N episodes.")
     parser.add_argument("--seed", type=int, default=42, help="Global random seed.")
@@ -226,6 +289,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             yaml_defaults["max_steps"] = env_cfg["max_steps"]
         if "gamma" in mdp_cfg:
             yaml_defaults["gamma"] = mdp_cfg["gamma"]
+        if "contrastive_gamma" in agent_cfg:
+            yaml_defaults["contrastive_gamma"] = agent_cfg["contrastive_gamma"]
         if "alpha" in agent_cfg:
             yaml_defaults["alpha"] = agent_cfg["alpha"]
         if "epsilon" in agent_cfg:
@@ -257,20 +322,27 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> list[EpisodeMetrics]:
     args = parse_args(argv)
 
-    # Training env is reward-free (no goal_pos) — contrastive RL needs no reward
+    n_states = args.height * args.width
+    eval_goal = args.goal if args.goal is not None else n_states - 1
+    goal_row, goal_col = divmod(eval_goal, args.width)
+
+    # Training env: goal_pos is set so episodes terminate at the goal.
+    # This is required by Algorithm 1 of Liu et al. (2024) — the single hard
+    # target goal must be the terminal state so that the geometric future-state
+    # sampling produces (s, a, sf=goal) pairs with strong causal signal.
+    # No reward signal is used by the contrastive critic (reward-free learning).
     env = GridWorld(
         height=args.height,
         width=args.width,
+        goal_pos=(goal_row, goal_col),
         max_steps=args.max_steps,
     )
-
-    n_states = env.n_states
-    eval_goal = args.goal if args.goal is not None else n_states - 1
 
     agent = GoalConditionedAgent(
         n_states=n_states,
         n_actions=env.n_actions,
         gamma=args.gamma,
+        contrastive_gamma=args.contrastive_gamma,
         alpha=args.alpha,
         temperature=args.temperature,
         n_negatives=args.n_negatives,

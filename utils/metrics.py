@@ -26,6 +26,12 @@ class EpisodeMetrics:
         ``True`` if this was a training episode, ``False`` if evaluation.
     step_metrics :
         List of per-step metric dicts returned by the agent's update method.
+    epsilon :
+        Exploration rate at the end of this episode (``None`` if the agent
+        does not use ε-greedy exploration).
+    trajectory :
+        Sequence of ``(step, state, action, reward)`` tuples recorded during
+        the episode.  ``None`` when trajectory logging is disabled.
     """
 
     episode: int
@@ -33,6 +39,8 @@ class EpisodeMetrics:
     length: int
     training: bool = True
     step_metrics: list[dict[str, Any]] = field(default_factory=list)
+    epsilon: float | None = None
+    trajectory: list[tuple[int, int, int, float]] | None = None
 
     def mean_step_metric(self, key: str) -> float | None:
         """Return the mean of a per-step metric across the episode.
