@@ -35,7 +35,7 @@ Use **separate virtual environments**:
 From repository root:
 
 ```bash
-cd /home/runner/work/MSc_Dissertation/MSc_Dissertation
+cd /path/to/MSc_Dissertation
 python -m venv .venv-sim
 source .venv-sim/bin/activate
 python -m pip install --upgrade pip
