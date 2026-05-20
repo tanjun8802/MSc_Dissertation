@@ -86,7 +86,7 @@ Choose Isaac Lab when you need:
 Operational recommendation:
 
 - Keep Isaac Lab as a separate experiment track and environment.
-- Reuse the same experiment configuration schema and logging format used for MuJoCo runs.
+- Reuse the same experiment configuration schema and logging format as the MuJoCo+robosuite track.
 - Compare on common metrics (sample efficiency, final return, wall-clock training time).
 
 ---
