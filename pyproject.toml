@@ -10,5 +10,15 @@ dependencies = [
   "pandas>=2.2",
 ]
 
-[tool.uv]
-dev-dependencies = []
+[project.optional-dependencies]
+sim_stack = [
+  "gymnasium>=0.29",
+  "mujoco>=3.1",
+  "robosuite>=1.5",
+]
+
+[tool.setuptools.packages.find]
+exclude = ["papers*", "sandbox*"]
+
+[dependency-groups]
+dev = []
