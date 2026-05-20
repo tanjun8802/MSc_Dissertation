@@ -82,3 +82,11 @@ python experiments/run_experiment.py --episodes 50 --render
 | *Can MISL Fly?* | Mutual-information skill learning in practice |
 | *Overcoming the Sim-to-Real Gap* | Transfer learning context |
 | *Optimal Exploration for Model-Based RL* | Exploration in nonlinear systems |
+
+---
+
+## Simulation stack setup
+
+For future robotics-focused RL experiments (MuJoCo + robosuite + Gymnasium + optional Isaac Lab), see:
+
+- `docs/simulation_stack_setup.md`
