@@ -17,5 +17,8 @@ sim_stack = [
   "robosuite>=1.5",
 ]
 
-[tool.uv]
-dev-dependencies = []
+[tool.setuptools.packages.find]
+exclude = ["papers*", "sandbox*"]
+
+[dependency-groups]
+dev = []
