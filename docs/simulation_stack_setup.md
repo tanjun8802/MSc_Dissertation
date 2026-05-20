@@ -39,7 +39,7 @@ cd /path/to/MSc_Dissertation
 python -m venv .venv-sim
 source .venv-sim/bin/activate
 python -m pip install --upgrade pip
-pip install mujoco robosuite gymnasium numpy
+pip install -e ".[sim_stack]"
 ```
 
 Quick smoke test:
