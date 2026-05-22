@@ -9,10 +9,10 @@ This framework gives you a minimal training pipeline where:
 
 ## Files added
 
-- `/tmp/workspace/tanjun8802/MSc_Dissertation/rl_pipeline/envs/robosuite_gym.py`
-- `/tmp/workspace/tanjun8802/MSc_Dissertation/rl_pipeline/algorithms/base.py`
-- `/tmp/workspace/tanjun8802/MSc_Dissertation/rl_pipeline/training/loop.py`
-- `/tmp/workspace/tanjun8802/MSc_Dissertation/scripts/run_custom_pipeline.py`
+- `rl_pipeline/envs/robosuite_gym.py`
+- `rl_pipeline/algorithms/base.py`
+- `rl_pipeline/training/loop.py`
+- `scripts/run_custom_pipeline.py`
 
 ## How to run the framework
 
