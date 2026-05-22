@@ -15,7 +15,7 @@ class RandomPolicyAlgorithm(BaseAlgorithm):
     """Minimal working algorithm baseline for pipeline validation."""
 
     def select_action(self, observation, step: int, training: bool = True) -> np.ndarray:
-        _ = observation, step, training
+        del observation, step, training
         return self.action_space.sample()
 
 

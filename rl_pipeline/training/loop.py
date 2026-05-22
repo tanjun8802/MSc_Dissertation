@@ -26,7 +26,11 @@ class TrainingStats:
 
 
 def run_training_loop(env: gym.Env, algorithm: BaseAlgorithm, config: TrainingConfig) -> TrainingStats:
-    """Run environment interaction and call algorithm hooks for storage and updates."""
+    """Run environment interaction and call algorithm hooks for storage and updates.
+
+    max_episode_steps is an optional fallback time limit for environments that do not
+    emit truncation signals themselves.
+    """
 
     obs, _ = env.reset()
     stats = TrainingStats()
@@ -37,6 +41,11 @@ def run_training_loop(env: gym.Env, algorithm: BaseAlgorithm, config: TrainingCo
     for step in range(config.total_steps):
         action = algorithm.select_action(obs, step=step, training=True)
         next_obs, reward, terminated, truncated, info = env.step(action)
+        episode_length += 1
+        reached_limit = config.max_episode_steps is not None and episode_length >= config.max_episode_steps
+        if reached_limit and not terminated:
+            truncated = True
+            info["loop_time_limit"] = True
 
         transition = Transition(
             observation=obs,
@@ -49,16 +58,14 @@ def run_training_loop(env: gym.Env, algorithm: BaseAlgorithm, config: TrainingCo
         )
         algorithm.observe(transition)
 
-        if step >= config.learning_starts and (step + 1) % config.update_every == 0:
+        if step >= config.learning_starts and (step - config.learning_starts) % config.update_every == 0:
             algorithm.update(step=step)
 
         obs = next_obs
         episode_return += reward
-        episode_length += 1
         stats.total_steps += 1
 
-        reached_limit = config.max_episode_steps is not None and episode_length >= config.max_episode_steps
-        if terminated or truncated or reached_limit:
+        if terminated or truncated:
             stats.episodes += 1
             stats.returns.append(episode_return)
             stats.lengths.append(episode_length)

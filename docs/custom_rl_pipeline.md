@@ -46,4 +46,6 @@ python scripts/run_custom_pipeline.py --env Lift --robot Panda --total-steps 500
 
 - By default, observations are flattened into one vector for easier custom-policy integration.
 - Set `flatten_observation=False` in `RobosuiteGymWrapper` if you want dict observations.
+- `TrainingConfig.max_episode_steps` is a fallback limit for envs that do not emit truncation flags.
+- If the robosuite horizon is unset, the wrapper will only truncate when robosuite reports a time-limit truncation.
 - Keep this as your main research loop; use SB3 SAC separately as a sanity baseline.
