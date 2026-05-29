@@ -41,7 +41,7 @@ def _build_episode(env: FourRoomsGridWorld, num_steps: int = 16):
         action = env.action_space.sample()
         next_obs, reward, terminated, truncated, _ = env.step(action)
         episode["obs"].append(obs.copy())
-        episode["actions"].append(np.asarray(action, dtype=np.float32).copy())
+        episode["actions"].append(np.asarray(action, dtype=env.action_space.dtype))
         episode["rewards"].append(float(reward))
         episode["next_obs"].append(next_obs.copy())
         episode["terminated"].append(bool(terminated))
@@ -114,7 +114,9 @@ def test_action_space_compatibility_with_env_and_actor():
     assert torch.isfinite(log_prob).all()
     assert torch.isfinite(entropy).all()
 
-    env_action = policy_action.detach().cpu().numpy().astype(env.action_space.dtype).reshape(env.action_space.shape)
+    env_action_np = policy_action.detach().cpu().numpy()
+    env_action_typed = env_action_np.astype(env.action_space.dtype)
+    env_action = env_action_typed.reshape(env.action_space.shape)
     step_obs, step_reward, step_terminated, step_truncated, _ = env.step(env_action)
     assert np.isfinite(step_obs).all()
     assert np.isfinite(step_reward)
@@ -220,13 +222,21 @@ def test_one_update_training_step_runs_and_is_finite():
     loss = torch.nn.functional.cross_entropy(logits, labels)
     assert torch.isfinite(loss)
 
-    params_before = [param.detach().clone() for param in actor.parameters()]
+    tracked_params = list(actor.parameters()) + list(phi.parameters()) + list(psi.parameters())
+    params_before = [param.detach().clone() for param in tracked_params]
     optimizer.zero_grad(set_to_none=True)
     loss.backward()
     optimizer.step()
 
-    any_changed = any(not torch.allclose(before, after.detach()) for before, after in zip(params_before, actor.parameters()))
-    assert any_changed or torch.isfinite(loss)
+    with torch.no_grad():
+        policy_actions_post, _, _ = actor.sample_action(obs, goals)
+        phi_output_post = phi(torch.cat([obs, policy_actions_post], dim=-1))
+        psi_output_post = psi(goals)
+        logits_post = phi_output_post @ psi_output_post.T
+        post_update_loss = torch.nn.functional.cross_entropy(logits_post, labels)
+
+    any_changed = any(not torch.allclose(before, after.detach()) for before, after in zip(params_before, tracked_params))
+    assert any_changed or torch.isfinite(post_update_loss)
 
 
 def test_short_rollout_smoke_loop():
@@ -250,7 +260,8 @@ def test_short_rollout_smoke_loop():
         obs_tensor = torch.tensor(obs, dtype=torch.float32).unsqueeze(0)
         goal_tensor = torch.zeros_like(obs_tensor)
         action_tensor, _, _ = actor.sample_action(obs_tensor, goal_tensor)
-        action = action_tensor.detach().cpu().numpy().reshape(-1).astype(np.float32)
+        action_np = action_tensor.detach().cpu().numpy().reshape(-1)
+        action = action_np.astype(env.action_space.dtype)
         next_obs, reward, terminated, truncated, _ = env.step(action)
 
         assert np.isfinite(next_obs).all()
