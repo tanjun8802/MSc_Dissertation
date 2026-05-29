@@ -14,10 +14,11 @@ dependencies = [
   "robosuite>=1.5",
   "imageio>=2.37",
   "gymnasium[classic_control]",
+  "pytest>=9.0.3",
 ]
 
 [tool.setuptools.packages.find]
-exclude = ["papers*", "sandbox*"]
+exclude = ["papers*", "src*"]
 
 [dependency-groups]
 dev = []
