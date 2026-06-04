@@ -33,6 +33,10 @@ class FourRoomsGridWorld(gym.Env):
 
         self._blocked_cells = self._build_walls()
         self._outer_wall_cells = self._build_outer_walls()
+        self._free_cells = np.array(
+            [(x, y) for y in range(self.grid_size) for x in range(self.grid_size) if (x, y) not in self._blocked_cells],
+            dtype=np.int32,
+        )
         self._agent_pos = np.array([0, 0], dtype=np.int32)
         self._goal_pos = None
         self._step_count = 0
@@ -67,8 +71,8 @@ class FourRoomsGridWorld(gym.Env):
         return (x, y) not in self._blocked_cells
 
     def sample_initial_state(self):
-        sample = self.np_random.integers(0, 3, size=(2,), dtype=np.int32)
-        return sample
+        idx = int(self.np_random.integers(0, len(self._free_cells)))
+        return self._free_cells[idx].copy()
 
     def set_goal_position(self, goal_position):
         goal = np.asarray(goal_position, dtype=np.int32)
@@ -193,6 +197,5 @@ class FourRoomsGoalWrapper(gym.Wrapper):
         info["slipped"] = slipped
         info["goal_position"] = self.goal_position.astype(np.int32).tolist()
         return obs, reward, at_goal, truncated, info
-
 
 
