@@ -41,4 +41,9 @@ class GoalConditionedActor(nn.Module): # goal-conditioned policy pi(a | s, g) â€
         log_prob = (dist.log_prob(x_t) - torch.log(1 - action.pow(2) + 1e-6)).sum(dim=-1, keepdim=True)  # (B, 1)
         entropy  = dist.entropy().sum(dim=-1, keepdim=True)  # (B, 1), H(pi(.|s,g))
         return action, log_prob, entropy
+    
+    def deterministic_action(self, obs, goal):
+        mean, _ = self.forward(obs, goal)
+        action = torch.tanh(mean)  # deterministic action is just the mean passed through tanh
+        return action
 
