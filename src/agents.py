@@ -9,7 +9,7 @@ LOG_STD_MAX =  2
 
 class GoalConditionedActor(nn.Module): # goal-conditioned policy pi(a | s, g) — takes (s, g) and outputs a Gaussian action distribution
 
-    def __init__(self, obs_dim, action_dim, hidden_dim=256, inner_layers=2):
+    def __init__(self, obs_dim, action_dim, hidden_dim=256, inner_layers=2): # note here assumes s and g are the same dim
         super().__init__()
         self.fc1 = nn.Linear(obs_dim * 2, hidden_dim)  # concatenate state s and goal g as input
         self.hidden_layers = nn.ModuleList([nn.Linear(hidden_dim, hidden_dim) for _ in range(inner_layers)])

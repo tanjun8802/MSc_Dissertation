@@ -102,7 +102,7 @@ class TrajectoryReplayBuffer:
             indices=torch.tensor(idxs, device=self.device),
         )
 
-    def sample_future_goal_batch(self, batch_size, min_k=1, max_k=None, gamma=0.99): # gamma controls the geometric distribution for positive-goal sampling
+    def sample_positive_future_goal_batch(self, batch_size, min_k=1, max_k=None, gamma=0.99): # gamma controls the geometric distribution for positive-goal sampling
         assert self.size > 0, "Buffer is empty"
 
         valid_indices = []
@@ -153,7 +153,7 @@ class TrajectoryReplayBuffer:
             "obs": torch.tensor(self.obs[idxs], device=self.device),
             "actions": torch.tensor(self.actions[idxs], device=self.device),
             "next_obs": torch.tensor(self.next_obs[idxs], device=self.device),
-            "goals": torch.tensor(self.obs[g_idxs], device=self.device), # goals as the future state via GEOM
+            "future_state": torch.tensor(self.obs[g_idxs], device=self.device), # the future state via GEOM
             "rewards": torch.tensor(self.rewards[idxs], device=self.device),
             "terminated": torch.tensor(self.terminated[idxs], device=self.device),
             "truncated": torch.tensor(self.truncated[idxs], device=self.device),
@@ -169,7 +169,11 @@ class TrajectoryReplayBuffer:
         idxs = np.random.randint(0, self.size, size=batch_size) # pick random indices from the buffer and indexing the observations
         return torch.tensor(self.obs[idxs], device=self.device)
     
-    def sample_positive_future_goal(self, episode_index, timestep, k, gamma = 0.99):
+    def sample_random_goals(self, batch_size):
+        idxs = np.random.randint(0, self.size, size=batch_size) # pick random indices from the buffer and indexing the observations
+        return torch.tensor(self.obs[idxs], device=self.device)
+    
+    def sample_positive_future_goal_episode(self, episode_index, timestep, k, gamma = 0.99):
 
         if episode_index not in self.episode_to_indices:
             raise ValueError(f"Episode index {episode_index} not found in buffer")
