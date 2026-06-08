@@ -102,14 +102,16 @@ class TrajectoryReplayBuffer:
             indices=torch.tensor(idxs, device=self.device),
         )
 
-    def sample_positive_future_goal_batch(self, batch_size, min_k=1, max_k=None, gamma=0.99): # gamma controls the geometric distribution for positive-goal sampling
+    def sample_positive_future_goal_batch(self, batch_size, min_k=1, max_k=None, gamma=0.99, exclude_self_loops=True, atol=1e-6):
+        
         assert self.size > 0, "Buffer is empty"
+        assert 0.0 <= gamma < 1.0, "gamma must be in [0, 1)"
 
         valid_indices = []
         future_goal_indices = []
 
         tries = 0
-        max_tries = batch_size * 20
+        max_tries = batch_size * 200  # higher because we may reject self-loops
 
         while len(valid_indices) < batch_size and tries < max_tries:
             idx = np.random.randint(0, self.size)
@@ -127,6 +129,12 @@ class TrajectoryReplayBuffer:
                 tries += 1
                 continue
 
+            # Reject self-loop anchor transitions: obs -> next_obs does not move
+            if exclude_self_loops:
+                if np.allclose(self.obs[idx], self.next_obs[idx], atol=atol, rtol=0.0):
+                    tries += 1
+                    continue
+
             max_valid_k = ep_len - 1 - t
             if max_k is not None:
                 max_valid_k = min(max_valid_k, max_k)
@@ -135,8 +143,18 @@ class TrajectoryReplayBuffer:
                 tries += 1
                 continue
 
-            geom_k = int(np.random.geometric(p=1.0 - gamma))  # k ~ Geometric(1-γ), matches sample_positive_future_goal
-            k = max(min_k, min(geom_k, max_valid_k))  # clamp to [min_k, max_valid_k]
+            ks = np.arange(min_k, max_valid_k + 1, dtype=np.int64)
+
+            if gamma == 0.0:
+                probs = np.zeros_like(ks, dtype=np.float64)
+                probs[0] = 1.0
+            else:
+                log_weights = (ks - 1) * np.log(gamma)
+                log_weights -= np.max(log_weights)
+                weights = np.exp(log_weights)
+                probs = weights / weights.sum()
+
+            k = np.random.choice(ks, p=probs)
             future_t = t + k
             future_idx = ep_idxs[future_t]
 
@@ -144,7 +162,10 @@ class TrajectoryReplayBuffer:
             future_goal_indices.append(future_idx)
             tries += 1
 
-        assert len(valid_indices) > 0, "Could not sample valid future-goal pairs"
+        assert len(valid_indices) == batch_size, (
+            f"Could only sample {len(valid_indices)} valid transitions out of "
+            f"requested {batch_size}. Increase max_tries or collect more non-self-loop data."
+        )
 
         idxs = np.array(valid_indices, dtype=np.int64)
         g_idxs = np.array(future_goal_indices, dtype=np.int64)
@@ -153,7 +174,7 @@ class TrajectoryReplayBuffer:
             "obs": torch.tensor(self.obs[idxs], device=self.device),
             "actions": torch.tensor(self.actions[idxs], device=self.device),
             "next_obs": torch.tensor(self.next_obs[idxs], device=self.device),
-            "future_state": torch.tensor(self.obs[g_idxs], device=self.device), # the future state via GEOM
+            "future_state": torch.tensor(self.obs[g_idxs], device=self.device),
             "rewards": torch.tensor(self.rewards[idxs], device=self.device),
             "terminated": torch.tensor(self.terminated[idxs], device=self.device),
             "truncated": torch.tensor(self.truncated[idxs], device=self.device),
