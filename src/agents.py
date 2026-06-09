@@ -42,3 +42,37 @@ class GoalConditionedActor(nn.Module): # goal-conditioned policy pi(a | s, g) â€
         entropy  = dist.entropy().sum(dim=-1, keepdim=True)  # (B, 1), H(pi(.|s,g))
         return action, log_prob, entropy
 
+class DiscreteGoalConditionedActor(nn.Module): # variant of GoalConditionedActor for discrete action spaces, outputs a categorical distribution over actions instead of Gaussian
+
+    def __init__(self, obs_dim, num_actions = 4, hidden_dim=256, inner_layers=2):
+        super().__init__()
+        self.fc1 = nn.Linear(obs_dim * 2, hidden_dim)  # concatenate state s and goal g as input
+        self.hidden_layers = nn.ModuleList([nn.Linear(hidden_dim, hidden_dim) for _ in range(inner_layers)])
+        self.fc_logits = nn.Linear(hidden_dim, num_actions)   # output logits for categorical distribution
+
+    def forward(self, obs, goal):
+        x = torch.cat([obs, goal], dim=-1)  # (B, obs_dim * 2)
+        x = F.relu(self.fc1(x))
+        for layer in self.hidden_layers:
+            x = F.relu(layer(x))
+        logits = self.fc_logits(x)  # (B, num_actions)
+        return logits
+
+    def sample_action(self, obs, goal, valid_mask=None):
+        logits = self.forward(obs, goal)   # [B, 4]
+
+        if valid_mask is not None:
+            logits = logits.masked_fill(~valid_mask, -1e9)
+
+        dist = torch.distributions.Categorical(logits=logits)
+        actions = dist.sample()            # [B]
+        log_prob = dist.log_prob(actions)  # [B]
+        return actions, log_prob, logits
+
+    def greedy_action(self, obs, goal, valid_mask=None):
+        logits = self.forward(obs, goal)
+
+        if valid_mask is not None:
+            logits = logits.masked_fill(~valid_mask, -1e9)
+
+        return torch.argmax(logits, dim=-1)
