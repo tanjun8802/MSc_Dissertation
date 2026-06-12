@@ -1,5 +1,6 @@
 # Now here is the NN to train the sampled batch data from the replay buffer, the goal is to learn a dynamics model that predicts s_next from (s,a) pairs.
 
+import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
@@ -39,3 +40,27 @@ class GoalRepresentationModel(nn.Module): # symmetric counterpart to StateAction
         if self.normalise: # paper specifies no normalisation, but we keep the flag for experimentation
             x = F.normalize(x, dim=-1)
         return x
+
+class SAC_Critic(nn.Module):
+    def __init__(self, obs_dim, act_dim, hidden=256):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(obs_dim + act_dim, hidden), nn.ReLU(),
+            nn.Linear(hidden, hidden), nn.ReLU(),
+            nn.Linear(hidden, 1),
+        )
+
+    def forward(self, obs, act):
+        return self.net(torch.cat([obs, act], dim=-1))
+    
+class TD3_Critic(nn.Module):
+    def __init__(self, obs_dim, act_dim, hidden=256):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(obs_dim + act_dim, hidden), nn.ReLU(),
+            nn.Linear(hidden, hidden), nn.ReLU(),
+            nn.Linear(hidden, 1),
+        )
+
+    def forward(self, obs, act):
+        return self.net(torch.cat([obs, act], dim=-1))
