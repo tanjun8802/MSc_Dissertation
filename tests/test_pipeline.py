@@ -159,7 +159,7 @@ def test_replay_buffer_contract_shapes_and_keys():
         "indices",
         "goal_indices",
     }
-    future_batch = buffer.sample_future_goal_batch(batch_size=batch_size)
+    future_batch = buffer.sample_positive_future_goal_batch(batch_size=batch_size)
     assert set(future_batch.keys()) == expected_future_keys
     assert future_batch["obs"].shape == (batch_size, obs_dim)
     assert future_batch["actions"].shape == (batch_size, action_dim)

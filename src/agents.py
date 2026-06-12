@@ -47,3 +47,96 @@ class GoalConditionedActor(nn.Module): # goal-conditioned policy pi(a | s, g) â€
         action = torch.tanh(mean)  # deterministic action is just the mean passed through tanh
         return action
 
+class DiscreteGoalConditionedActor(nn.Module): # variant of GoalConditionedActor for discrete action spaces, outputs a categorical distribution over actions instead of Gaussian
+
+    def __init__(self, obs_dim, num_actions = 4, hidden_dim=256, inner_layers=2):
+        super().__init__()
+        self.fc1 = nn.Linear(obs_dim * 2, hidden_dim)  # concatenate state s and goal g as input
+        self.hidden_layers = nn.ModuleList([nn.Linear(hidden_dim, hidden_dim) for _ in range(inner_layers)])
+        self.fc_logits = nn.Linear(hidden_dim, num_actions)   # output logits for categorical distribution
+
+    def forward(self, obs, goal):
+        x = torch.cat([obs, goal], dim=-1)  # (B, obs_dim * 2)
+        x = F.relu(self.fc1(x))
+        for layer in self.hidden_layers:
+            x = F.relu(layer(x))
+        logits = self.fc_logits(x)  # (B, num_actions)
+        return logits
+
+    def sample_action(self, obs, goal, valid_mask=None):
+        logits = self.forward(obs, goal)   # [B, 4]
+
+        if valid_mask is not None:
+            logits = logits.masked_fill(~valid_mask, -1e9)
+
+        dist = torch.distributions.Categorical(logits=logits)
+        actions = dist.sample()            # [B]
+        log_prob = dist.log_prob(actions)  # [B]
+        return actions, log_prob, logits
+
+    def greedy_action(self, obs, goal, valid_mask=None):
+        logits = self.forward(obs, goal)
+
+        if valid_mask is not None:
+            logits = logits.masked_fill(~valid_mask, -1e9)
+
+        return torch.argmax(logits, dim=-1)
+
+class TD3_Actor(nn.Module):
+    def __init__(self, obs_dim, act_dim, hidden=256):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(obs_dim, hidden), nn.ReLU(),
+            nn.Linear(hidden, hidden), nn.ReLU(),
+            nn.Linear(hidden, act_dim),
+            nn.Tanh(),
+        )
+
+    def forward(self, obs):
+        return self.net(obs)
+
+class SAC_Actor(nn.Module):
+    def __init__(self, obs_dim, act_dim, hidden=256):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(obs_dim, hidden), nn.ReLU(),
+            nn.Linear(hidden, hidden), nn.ReLU(),
+        )
+        self.mu = nn.Linear(hidden, act_dim)
+        self.log_std = nn.Linear(hidden, act_dim)
+
+    def forward(self, obs):
+        h = self.net(obs)
+        mu = self.mu(h)
+        log_std = torch.clamp(self.log_std(h), -5, 2)
+        return mu, log_std
+
+    def sample(self, obs):
+        mu, log_std = self(obs)
+        std = log_std.exp()
+        dist = torch.distributions.Normal(mu, std)
+        z = dist.rsample()
+        a = torch.tanh(z)
+        logp = dist.log_prob(z) - torch.log(1 - a.pow(2) + 1e-6)
+        return a, logp.sum(-1, keepdim=True)
+
+class PPO_ActorCritic(nn.Module):
+    def __init__(self, obs_dim, act_dim, hidden=256):
+        super().__init__()
+        self.backbone = nn.Sequential(
+            nn.Linear(obs_dim, hidden), 
+            nn.ReLU(),
+            nn.Linear(hidden, hidden), 
+            nn.ReLU(),
+        )
+        self.mu_head = nn.Linear(hidden, act_dim)
+        self.log_std = nn.Parameter(torch.zeros(act_dim))
+        self.v_head = nn.Linear(hidden, 1)
+
+    def forward(self, obs):
+        h = self.backbone(obs)
+        mu = self.mu_head(h)
+        v = self.v_head(h)
+        std = self.log_std.exp().expand_as(mu)
+        dist = torch.distributions.Normal(mu, std)
+        return dist, v
