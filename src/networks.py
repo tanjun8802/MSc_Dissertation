@@ -64,3 +64,15 @@ class TD3_Critic(nn.Module):
 
     def forward(self, obs, act):
         return self.net(torch.cat([obs, act], dim=-1))
+
+class DQN_QNetwork(nn.Module):
+    def __init__(self, obs_dim, num_actions, hidden=256):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(obs_dim, hidden), nn.ReLU(),
+            nn.Linear(hidden, hidden), nn.ReLU(),
+            nn.Linear(hidden, num_actions),
+        )
+
+    def forward(self, obs):
+        return self.net(obs)
