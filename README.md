@@ -90,3 +90,10 @@ python experiments/run_experiment.py --episodes 50 --render
 For future robotics-focused RL experiments (MuJoCo + robosuite + Gymnasium + optional Isaac Lab), see:
 
 - `docs/simulation_stack_setup.md`
+
+## Benchmark helpers
+
+ExORL and OGBench repo-side helpers now live under `src/benchmarks/`.
+
+- Setup and usage: `docs/benchmark_setup.md`
+- CLI entrypoint: `python -m src.benchmarks.cli ...`

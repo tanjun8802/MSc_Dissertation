@@ -21,4 +21,8 @@ dependencies = [
 exclude = ["papers*", "src*"]
 
 [dependency-groups]
+benchmarks = [
+  "dm-control>=1.0.43",
+  "ogbench>=1.2.1",
+]
 dev = []
