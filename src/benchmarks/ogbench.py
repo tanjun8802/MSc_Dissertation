@@ -57,7 +57,8 @@ def load_ogbench_datasets(
 def iter_ogbench_trajectories(dataset: dict[str, np.ndarray]):
     observations = np.asarray(dataset["observations"], dtype=np.float32)
     actions = np.asarray(dataset["actions"], dtype=np.float32)
-    rewards = np.asarray(dataset.get("rewards", np.zeros(len(actions), dtype=np.float32)), dtype=np.float32)
+    num_transitions = len(actions)
+    rewards = np.asarray(dataset.get("rewards", np.zeros(num_transitions, dtype=np.float32)), dtype=np.float32)
     terminals = np.asarray(dataset["terminals"], dtype=bool)
 
     if len(observations) != len(actions):

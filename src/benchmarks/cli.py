@@ -70,7 +70,7 @@ def main() -> None:
 
     if args.benchmark == "exorl" and args.action == "inspect":
         spec = describe_exorl_dataset(args.domain, args.algorithm, data_root=args.data_root)
-        episode_files = iter_exorl_episode_files(spec.replay_dir)
+        episode_files = list(iter_exorl_episode_files(spec.replay_dir))
         first_episode = load_exorl_episode(episode_files[0]) if episode_files else {}
         summary = {
             "domain": spec.domain,

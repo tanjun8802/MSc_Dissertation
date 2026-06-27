@@ -71,6 +71,12 @@ EXORL_DATASET_URL_TEMPLATE = "https://dl.fbaipublicfiles.com/exorl/{domain}/{alg
 
 
 class DMControlGymnasiumAdapter(gym.Env):
+    """State-only Gymnasium adapter for dm_control tasks.
+
+    Rendering is intentionally omitted here because benchmark setup varies across
+    machines and this repo only needs reset/step compatibility for training.
+    """
+
     metadata = {"render_modes": []}
 
     def __init__(self, env_factory, seed: int = 0):

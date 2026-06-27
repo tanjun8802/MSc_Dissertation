@@ -52,6 +52,9 @@ def test_exorl_dataset_loader_populates_replay_buffer(tmp_path: Path):
 
     assert loaded_episodes == 1
     assert len(buffer) == 3
+    assert np.allclose(buffer.obs[:3], np.asarray([[0.0, 0.0], [1.0, 1.0], [2.0, 2.0]], dtype=np.float32))
+    assert np.allclose(buffer.actions[:3], np.asarray([[0.1], [0.2], [0.3]], dtype=np.float32))
+    assert np.allclose(buffer.rewards[:3, 0], np.asarray([1.0, 2.0, 3.0], dtype=np.float32))
 
 
 def test_ogbench_trajectory_iteration_segments_by_terminal_flag():
