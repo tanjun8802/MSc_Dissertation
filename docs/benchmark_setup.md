@@ -38,6 +38,13 @@ If `dm_control` rendering complains on a headless machine, try:
 export MUJOCO_GL=egl
 ```
 
+If `dm_control` still fails with EGL/GL import errors, install the usual MuJoCo rendering libraries on the machine first:
+
+```bash
+sudo apt update
+sudo apt install libosmesa6-dev libgl1-mesa-glx libglfw3 unzip
+```
+
 ## How to test OGBench
 
 ### Smoke-test the environment only
