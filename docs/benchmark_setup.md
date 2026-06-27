@@ -2,33 +2,33 @@
 
 ## What changed
 
-- Added `/home/runner/work/MSc_Dissertation/MSc_Dissertation/src/benchmarks/exorl.py` with ExORL dataset download, episode loading, replay-buffer conversion, and a Gymnasium-style adapter for the ExORL tasks that map directly to `dm_control` suite tasks.
-- Added `/home/runner/work/MSc_Dissertation/MSc_Dissertation/src/benchmarks/ogbench.py` with lightweight wrappers around the upstream OGBench API plus conversion helpers that load OGBench datasets into the repo's `TrajectoryReplayBuffer` format.
-- Added `/home/runner/work/MSc_Dissertation/MSc_Dissertation/src/benchmarks/cli.py` so both benchmarks can be smoke-tested from the command line with `python -m src.benchmarks.cli ...`.
-- Added `/home/runner/work/MSc_Dissertation/MSc_Dissertation/tests/test_benchmarks.py` for synthetic benchmark-data tests that validate the repo-side conversion logic without needing large downloads.
-- Updated `/home/runner/work/MSc_Dissertation/MSc_Dissertation/src/utils.py` and the existing notebooks to use the replay-buffer key name `goals` consistently.
-- Added a benchmark dependency group in `/home/runner/work/MSc_Dissertation/MSc_Dissertation/pyproject.toml` so benchmark packages can be installed only when needed.
+- Added `src/benchmarks/exorl.py` with ExORL dataset download, episode loading, replay-buffer conversion, and a Gymnasium-style adapter for the ExORL tasks that map directly to `dm_control` suite tasks.
+- Added `src/benchmarks/ogbench.py` with lightweight wrappers around the upstream OGBench API plus conversion helpers that load OGBench datasets into the repo's `TrajectoryReplayBuffer` format.
+- Added `src/benchmarks/cli.py` so both benchmarks can be smoke-tested from the command line with `python -m src.benchmarks.cli ...`.
+- Added `tests/test_benchmarks.py` for synthetic benchmark-data tests that validate the repo-side conversion logic without needing large downloads.
+- Updated `src/utils.py` and the existing notebooks to use the replay-buffer key name `goals` consistently.
+- Added a benchmark dependency group in `pyproject.toml` so benchmark packages can be installed only when needed.
 
 ## Files to know
 
-- `/home/runner/work/MSc_Dissertation/MSc_Dissertation/src/benchmarks/exorl.py`
-- `/home/runner/work/MSc_Dissertation/MSc_Dissertation/src/benchmarks/ogbench.py`
-- `/home/runner/work/MSc_Dissertation/MSc_Dissertation/src/benchmarks/cli.py`
-- `/home/runner/work/MSc_Dissertation/MSc_Dissertation/docs/benchmark_setup.md`
+- `src/benchmarks/exorl.py`
+- `src/benchmarks/ogbench.py`
+- `src/benchmarks/cli.py`
+- `docs/benchmark_setup.md`
 
 ## Install
 
 ### 1. Base repo dependencies
 
 ```bash
-cd /home/runner/work/MSc_Dissertation/MSc_Dissertation
+cd <repo-root>
 uv sync
 ```
 
 ### 2. Benchmark dependencies
 
 ```bash
-cd /home/runner/work/MSc_Dissertation/MSc_Dissertation
+cd <repo-root>
 uv sync --group benchmarks
 ```
 
@@ -50,21 +50,21 @@ sudo apt install libosmesa6-dev libgl1-mesa-glx libglfw3 unzip
 ### Smoke-test the environment only
 
 ```bash
-cd /home/runner/work/MSc_Dissertation/MSc_Dissertation
+cd <repo-root>
 uv run --group benchmarks python -m src.benchmarks.cli ogbench env pointmaze-medium-navigate-v0 --task-id 1
 ```
 
 ### Download a dataset
 
 ```bash
-cd /home/runner/work/MSc_Dissertation/MSc_Dissertation
+cd <repo-root>
 uv run --group benchmarks python -m src.benchmarks.cli ogbench download pointmaze-medium-navigate-v0
 ```
 
 ### Inspect train/validation dataset shapes
 
 ```bash
-cd /home/runner/work/MSc_Dissertation/MSc_Dissertation
+cd <repo-root>
 uv run --group benchmarks python -m src.benchmarks.cli ogbench dataset pointmaze-medium-navigate-v0
 ```
 
@@ -84,7 +84,7 @@ env, train_dataset, val_dataset = load_ogbench_datasets("pointmaze-medium-naviga
 ### Download a dataset
 
 ```bash
-cd /home/runner/work/MSc_Dissertation/MSc_Dissertation
+cd <repo-root>
 uv run python -m src.benchmarks.cli exorl download walker proto
 ```
 
@@ -95,7 +95,7 @@ This downloads the replay archive into the default repo-side benchmark cache:
 ### Inspect the downloaded replay files
 
 ```bash
-cd /home/runner/work/MSc_Dissertation/MSc_Dissertation
+cd <repo-root>
 uv run python -m src.benchmarks.cli exorl inspect walker proto
 ```
 
@@ -117,7 +117,7 @@ These are the ExORL tasks currently wired directly in this repo:
 Run one with:
 
 ```bash
-cd /home/runner/work/MSc_Dissertation/MSc_Dissertation
+cd <repo-root>
 uv run --group benchmarks python -m src.benchmarks.cli exorl env walker_walk --seed 0
 ```
 
