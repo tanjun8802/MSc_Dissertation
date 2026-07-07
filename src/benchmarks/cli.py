@@ -11,7 +11,12 @@ from .exorl import (
     load_exorl_episode,
     make_exorl_env,
 )
-from .ogbench import DEFAULT_OGBENCH_DATA_ROOT, download_ogbench_datasets, load_ogbench_datasets, make_ogbench_env
+from .ogbench import (
+    DEFAULT_OGBENCH_DATA_ROOT,
+    download_ogbench_datasets,
+    load_ogbench_datasets,
+    make_ogbench_env,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -124,7 +129,11 @@ def main() -> None:
         return
 
     if args.benchmark == "ogbench" and args.action == "dataset":
-        _, train_dataset, val_dataset = load_ogbench_datasets(args.dataset, dataset_dir=args.data_root, compact_dataset=False)
+        _, train_dataset, val_dataset = load_ogbench_datasets(
+            args.dataset,
+            dataset_dir=args.data_root,
+            compact_dataset=False,
+        )
         summary = {
             "train": {key: list(value.shape) for key, value in train_dataset.items()},
             "val": {key: list(value.shape) for key, value in val_dataset.items()},

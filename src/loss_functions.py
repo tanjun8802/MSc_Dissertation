@@ -31,3 +31,16 @@ def repulsion_loss_to_memory(psi_new, memory, margin=1.0):
     loss_mat = torch.clamp(margin - dists, min=0.0)       # [B, K]
     loss = loss_mat.mean()                                # scalar
     return loss
+
+def sigreg_loss(representation_network, sketch_dim=32, eps=1e-6): 
+    B, D = representation_network.shape
+    z = representation_network - representation_network.mean(dim=0, keepdim=True)
+
+    if D > sketch_dim:
+        S = torch.randn(D, sketch_dim, device=z.device, dtype=z.dtype) / (D ** 0.5)
+        z = z @ S
+        D = sketch_dim
+
+    cov = (z.T @ z) / (B - 1 + eps)
+    I = torch.eye(D, device=z.device, dtype=z.dtype)
+    return ((cov - I) ** 2).sum() / D

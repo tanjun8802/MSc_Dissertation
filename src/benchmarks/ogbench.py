@@ -6,6 +6,7 @@ import numpy as np
 
 
 DEFAULT_OGBENCH_DATA_ROOT = Path.home() / ".ogbench" / "data"
+
 OGBENCH_EXAMPLE_DATASETS = (
     "pointmaze-medium-navigate-v0",
     "antmaze-large-navigate-v0",
@@ -23,7 +24,8 @@ def require_ogbench():
         import ogbench
     except ImportError as exc:
         raise ImportError(
-            "ogbench is not installed. Install benchmark dependencies with `uv sync --group benchmarks`."
+            "ogbench is not installed. Install benchmark dependencies with "
+            "`uv sync --group benchmarks`."
         ) from exc
     return ogbench
 
@@ -33,7 +35,10 @@ def make_ogbench_env(dataset_name: str):
     return ogbench.make_env_and_datasets(dataset_name, env_only=True)
 
 
-def download_ogbench_datasets(dataset_names, dataset_dir: str | Path = DEFAULT_OGBENCH_DATA_ROOT) -> Path:
+def download_ogbench_datasets(
+    dataset_names,
+    dataset_dir: str | Path = DEFAULT_OGBENCH_DATA_ROOT,
+) -> Path:
     ogbench = require_ogbench()
     output_dir = Path(dataset_dir).expanduser()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -58,7 +63,10 @@ def iter_ogbench_trajectories(dataset: dict[str, np.ndarray]):
     observations = np.asarray(dataset["observations"], dtype=np.float32)
     actions = np.asarray(dataset["actions"], dtype=np.float32)
     num_transitions = len(actions)
-    rewards = np.asarray(dataset.get("rewards", np.zeros(num_transitions, dtype=np.float32)), dtype=np.float32)
+    rewards = np.asarray(
+        dataset.get("rewards", np.zeros(num_transitions, dtype=np.float32)),
+        dtype=np.float32,
+    )
     terminals = np.asarray(dataset["terminals"], dtype=bool)
 
     if len(observations) != len(actions):
@@ -78,8 +86,10 @@ def iter_ogbench_trajectories(dataset: dict[str, np.ndarray]):
     for index, is_terminal in enumerate(terminals):
         if not is_terminal and index != len(terminals) - 1:
             continue
+
         episode_length = index + 1 - episode_start
         episode_slice = slice(episode_start, index + 1)
+
         yield {
             "obs": [obs for obs in observations[episode_slice]],
             "actions": [action.reshape(-1) for action in actions[episode_slice]],
@@ -88,6 +98,7 @@ def iter_ogbench_trajectories(dataset: dict[str, np.ndarray]):
             "terminated": [False for _ in range(episode_length - 1)] + [bool(is_terminal)],
             "truncated": [False for _ in range(episode_length)],
         }
+
         episode_start = index + 1
 
 
@@ -101,9 +112,11 @@ def load_ogbench_dataset_into_buffer(
     max_episodes: int | None = None,
 ) -> int:
     selected_dataset = dataset
+
     if selected_dataset is None:
         if dataset_name is None:
             raise ValueError("Provide either a pre-loaded dataset or a dataset_name.")
+
         _, train_dataset, val_dataset = load_ogbench_datasets(
             dataset_name=dataset_name,
             dataset_dir=dataset_dir,
@@ -117,10 +130,14 @@ def load_ogbench_dataset_into_buffer(
         loaded_episodes += 1
         if max_episodes is not None and loaded_episodes >= max_episodes:
             break
+
     return loaded_episodes
 
 
-def _reconstruct_next_observations(observations: np.ndarray, valids: np.ndarray) -> np.ndarray:
+def _reconstruct_next_observations(
+    observations: np.ndarray,
+    valids: np.ndarray,
+) -> np.ndarray:
     next_observations = np.empty_like(observations)
     next_observations[:-1] = observations[1:]
     next_observations[-1] = observations[-1]

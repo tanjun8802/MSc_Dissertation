@@ -11,6 +11,7 @@ import numpy as np
 
 
 DEFAULT_EXORL_DATA_ROOT = Path.home() / ".msc_dissertation" / "benchmarks" / "exorl"
+
 EXORL_ALGORITHMS = (
     "aps",
     "diayn",
@@ -22,6 +23,7 @@ EXORL_ALGORITHMS = (
     "rnd",
     "smm",
 )
+
 EXORL_TASKS_BY_DOMAIN = {
     "cartpole": (
         "cartpole_balance",
@@ -55,6 +57,7 @@ EXORL_TASKS_BY_DOMAIN = {
         "walker_run",
     ),
 }
+
 EXORL_SUITE_TASKS = {
     "cartpole_balance": ("cartpole", "balance"),
     "cartpole_balance_sparse": ("cartpole", "balance_sparse"),
@@ -67,26 +70,40 @@ EXORL_SUITE_TASKS = {
     "walker_walk": ("walker", "walk"),
     "walker_run": ("walker", "run"),
 }
+
 EXORL_DATASET_URL_TEMPLATE = "https://dl.fbaipublicfiles.com/exorl/{domain}/{algorithm}.zip"
 
 
 class DMControlGymnasiumAdapter(gym.Env):
-    """State-only Gymnasium adapter for dm_control tasks.
-
-    Rendering is intentionally omitted here because benchmark setup varies across
-    machines and this repo only needs reset/step compatibility for training.
+    """
+    Lightweight Gymnasium adapter for dm_control state-based tasks with optional rgb rendering.
     """
 
-    metadata = {"render_modes": []}
+    metadata = {"render_modes": ["rgb_array"], "render_fps": 30}
 
-    def __init__(self, env_factory, seed: int = 0):
+    def __init__(
+        self,
+        env_factory,
+        seed: int = 0,
+        render_mode: str | None = None,
+        render_height: int = 240,
+        render_width: int = 320,
+        camera_id: int = 0,
+    ):
         super().__init__()
         self._env_factory = env_factory
         self._seed = seed
         self._env = self._env_factory(seed)
+
+        self.render_mode = render_mode
+        self.render_height = render_height
+        self.render_width = render_width
+        self.camera_id = camera_id
+
         initial_time_step = self._env.reset()
         initial_obs = self._flatten_observation(initial_time_step.observation)
         action_spec = self._env.action_spec()
+
         self.action_space = gym.spaces.Box(
             low=np.asarray(action_spec.minimum, dtype=np.float32),
             high=np.asarray(action_spec.maximum, dtype=np.float32),
@@ -103,7 +120,10 @@ class DMControlGymnasiumAdapter(gym.Env):
     @staticmethod
     def _flatten_observation(observation) -> np.ndarray:
         if isinstance(observation, dict):
-            flattened = [np.asarray(value, dtype=np.float32).reshape(-1) for value in observation.values()]
+            flattened = [
+                np.asarray(value, dtype=np.float32).reshape(-1)
+                for value in observation.values()
+            ]
             return np.concatenate(flattened, axis=0)
         return np.asarray(observation, dtype=np.float32).reshape(-1)
 
@@ -112,6 +132,7 @@ class DMControlGymnasiumAdapter(gym.Env):
         if seed is not None and seed != self._seed:
             self._seed = seed
             self._env = self._env_factory(seed)
+
         time_step = self._env.reset()
         obs = self._flatten_observation(time_step.observation)
         return obs, {"backend": "dm_control"}
@@ -123,8 +144,29 @@ class DMControlGymnasiumAdapter(gym.Env):
         reward = float(0.0 if time_step.reward is None else time_step.reward)
         terminated = bool(time_step.last())
         truncated = False
-        info = {"discount": float(1.0 if time_step.discount is None else time_step.discount)}
+        info = {
+            "discount": float(1.0 if time_step.discount is None else time_step.discount)
+        }
         return obs, reward, terminated, truncated, info
+
+    def render(self):
+        if self.render_mode is None:
+            return None
+
+        if self.render_mode != "rgb_array":
+            raise NotImplementedError(
+                f"Unsupported render_mode '{self.render_mode}'. Only 'rgb_array' is supported."
+            )
+
+        physics = getattr(self._env, "physics", None)
+        if physics is None:
+            raise RuntimeError("Underlying dm_control environment does not expose `physics` for rendering.")
+
+        return physics.render(
+            height=self.render_height,
+            width=self.render_width,
+            camera_id=self.camera_id,
+        )
 
     def close(self):
         if hasattr(self._env, "close"):
@@ -162,7 +204,7 @@ def describe_exorl_dataset(
     return ExORLDatasetSpec(
         domain=domain,
         algorithm=algorithm,
-        replay_dir=get_exorl_replay_dir(domain=domain, algorithm=algorithm, data_root=data_root),
+        replay_dir=get_exorl_replay_dir(domain, algorithm, data_root),
     )
 
 
@@ -172,8 +214,9 @@ def download_exorl_dataset(
     data_root: str | Path = DEFAULT_EXORL_DATA_ROOT,
     force_download: bool = False,
 ) -> Path:
-    replay_dir = get_exorl_replay_dir(domain=domain, algorithm=algorithm, data_root=data_root)
+    replay_dir = get_exorl_replay_dir(domain, algorithm, data_root)
     buffer_dir = replay_dir / "buffer"
+
     if buffer_dir.exists() and any(buffer_dir.glob("*.npz")) and not force_download:
         return replay_dir
 
@@ -182,12 +225,14 @@ def download_exorl_dataset(
 
     replay_dir.parent.mkdir(parents=True, exist_ok=True)
     archive_path = replay_dir.parent / f"{algorithm}.zip"
+
     with urllib.request.urlopen(get_exorl_dataset_url(domain, algorithm)) as response, archive_path.open("wb") as output:
         shutil.copyfileobj(response, output)
 
     replay_dir.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(archive_path) as archive:
         archive.extractall(replay_dir)
+
     archive_path.unlink(missing_ok=True)
     return replay_dir
 
@@ -206,14 +251,20 @@ def exorl_episode_length(episode: dict[str, np.ndarray]) -> int:
     return int(next(iter(episode.values())).shape[0] - 1)
 
 
-def exorl_episode_to_trajectory(episode: dict[str, np.ndarray]) -> dict[str, list[np.ndarray | float | bool]]:
+def exorl_episode_to_trajectory(
+    episode: dict[str, np.ndarray],
+) -> dict[str, list[np.ndarray | float | bool]]:
     total_steps = exorl_episode_length(episode)
     if total_steps <= 0:
         raise ValueError("ExORL episodes must contain at least one transition.")
 
     observations = np.asarray(episode["observation"], dtype=np.float32)
-    actions = _strip_exorl_dummy_transition(np.asarray(episode["action"], dtype=np.float32), total_steps)
-    rewards = _strip_exorl_dummy_transition(np.asarray(episode["reward"], dtype=np.float32), total_steps)
+    actions = _strip_exorl_dummy_transition(
+        np.asarray(episode["action"], dtype=np.float32), total_steps
+    )
+    rewards = _strip_exorl_dummy_transition(
+        np.asarray(episode["reward"], dtype=np.float32), total_steps
+    )
 
     return {
         "obs": [observations[index] for index in range(total_steps)],
@@ -232,18 +283,27 @@ def load_exorl_dataset_into_buffer(
 ) -> int:
     loaded_episodes = 0
     for episode_path in iter_exorl_episode_files(replay_dir):
-        replay_buffer.add_episode(exorl_episode_to_trajectory(load_exorl_episode(episode_path)))
+        replay_buffer.add_episode(
+            exorl_episode_to_trajectory(load_exorl_episode(episode_path))
+        )
         loaded_episodes += 1
         if max_episodes is not None and loaded_episodes >= max_episodes:
             break
     return loaded_episodes
 
 
-def make_exorl_env(task_name: str, seed: int = 0) -> gym.Env:
+def make_exorl_env(
+    task_name: str,
+    seed: int = 0,
+    render_mode: str | None = None,
+    render_height: int = 240,
+    render_width: int = 320,
+    camera_id: int = 0,
+) -> gym.Env:
     if task_name not in EXORL_SUITE_TASKS:
         available = ", ".join(sorted(EXORL_SUITE_TASKS))
         raise NotImplementedError(
-            "This repo only provides direct dm_control-backed ExORL environments for suite tasks. "
+            "This repo only provides dm_control-backed ExORL environments for suite tasks. "
             f"Supported tasks: {available}. Requested: {task_name}."
         )
 
@@ -251,7 +311,8 @@ def make_exorl_env(task_name: str, seed: int = 0) -> gym.Env:
         from dm_control import suite
     except ImportError as exc:
         raise ImportError(
-            "dm_control is required for ExORL environments. Install benchmark dependencies with `uv sync --group benchmarks`."
+            "dm_control is required for ExORL environments. "
+            "Install benchmark dependencies with `uv sync --group benchmarks`."
         ) from exc
 
     domain_name, suite_task_name = EXORL_SUITE_TASKS[task_name]
@@ -264,19 +325,30 @@ def make_exorl_env(task_name: str, seed: int = 0) -> gym.Env:
             environment_kwargs={"flat_observation": True},
         )
 
-    return DMControlGymnasiumAdapter(env_factory=env_factory, seed=seed)
+    return DMControlGymnasiumAdapter(
+        env_factory=env_factory,
+        seed=seed,
+        render_mode=render_mode,
+        render_height=render_height,
+        render_width=render_width,
+        camera_id=camera_id,
+    )
 
 
 def _validate_algorithm(algorithm: str) -> None:
     if algorithm not in EXORL_ALGORITHMS:
         available = ", ".join(EXORL_ALGORITHMS)
-        raise ValueError(f"Unsupported ExORL algorithm '{algorithm}'. Expected one of: {available}.")
+        raise ValueError(
+            f"Unsupported ExORL algorithm '{algorithm}'. Expected one of: {available}."
+        )
 
 
 def _validate_domain(domain: str) -> None:
     if domain not in EXORL_TASKS_BY_DOMAIN:
         available = ", ".join(sorted(EXORL_TASKS_BY_DOMAIN))
-        raise ValueError(f"Unsupported ExORL domain '{domain}'. Expected one of: {available}.")
+        raise ValueError(
+            f"Unsupported ExORL domain '{domain}'. Expected one of: {available}."
+        )
 
 
 def _strip_exorl_dummy_transition(values: np.ndarray, total_steps: int) -> np.ndarray:
@@ -285,5 +357,6 @@ def _strip_exorl_dummy_transition(values: np.ndarray, total_steps: int) -> np.nd
     if values.shape[0] == total_steps + 1:
         return values[1:]
     raise ValueError(
-        f"ExORL field has unexpected first dimension {values.shape[0]}; expected {total_steps} or {total_steps + 1}."
+        f"ExORL field has unexpected first dimension {values.shape[0]}; "
+        f"expected {total_steps} or {total_steps + 1}."
     )

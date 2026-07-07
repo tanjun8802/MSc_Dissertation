@@ -2,6 +2,8 @@ from .exorl import (
     DEFAULT_EXORL_DATA_ROOT,
     EXORL_ALGORITHMS,
     EXORL_TASKS_BY_DOMAIN,
+    EXORL_SUITE_TASKS,
+    ExORLDatasetSpec,
     describe_exorl_dataset,
     download_exorl_dataset,
     exorl_episode_length,
@@ -13,6 +15,7 @@ from .exorl import (
     load_exorl_episode,
     make_exorl_env,
 )
+
 from .ogbench import (
     DEFAULT_OGBENCH_DATA_ROOT,
     OGBENCH_EXAMPLE_DATASETS,
@@ -23,11 +26,30 @@ from .ogbench import (
     make_ogbench_env,
 )
 
+from .factory import (
+    make_env,
+    load_dataset_into_buffer,
+)
+
+from .wrappers import (
+    GoalInfoWrapper,
+)
+
+from .visualise import (
+    collect_episode_frames,
+    preview_frame,
+    random_policy,
+    save_gif,
+    save_mp4,
+)
+
 __all__ = [
     "DEFAULT_EXORL_DATA_ROOT",
     "DEFAULT_OGBENCH_DATA_ROOT",
     "EXORL_ALGORITHMS",
     "EXORL_TASKS_BY_DOMAIN",
+    "EXORL_SUITE_TASKS",
+    "ExORLDatasetSpec",
     "OGBENCH_EXAMPLE_DATASETS",
     "describe_exorl_dataset",
     "download_exorl_dataset",
@@ -44,4 +66,12 @@ __all__ = [
     "load_ogbench_datasets",
     "make_exorl_env",
     "make_ogbench_env",
+    "make_env",
+    "load_dataset_into_buffer",
+    "GoalInfoWrapper",
+    "collect_episode_frames",
+    "preview_frame",
+    "random_policy",
+    "save_gif",
+    "save_mp4",
 ]
