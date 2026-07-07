@@ -20,6 +20,7 @@ dependencies = [
   "ogbench>=1.2.1",
   "ipython",
   "ipykernel",
+  "scikit-learn",
 ]
 
 [tool.setuptools.packages.find]
