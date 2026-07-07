@@ -19,7 +19,10 @@ def repulsion_loss_to_memory(psi_new, memory, margin=1.0):
     if len(memory) == 0:
         return psi_new.new_tensor(0.0)
 
-    mem_stack = torch.stack([m.squeeze(0) for m in memory], dim=0)  # [K, rep_dim]
+    mem_stack = torch.stack(
+    [torch.as_tensor(m, dtype=psi_new.dtype, device=psi_new.device) for m in memory],
+    dim=0
+    )
 
     diff = psi_new.unsqueeze(1) - mem_stack.unsqueeze(0)  # [B, K, rep_dim]
     dists = diff.norm(dim=2)                              # [B, K]
