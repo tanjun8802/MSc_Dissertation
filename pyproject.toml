@@ -15,14 +15,11 @@ dependencies = [
   "imageio>=2.37",
   "gymnasium[classic_control]",
   "pytest>=9.0.3",
+  "dm-control>=1.0.43",
+  "ogbench>=1.2.1",
 ]
 
 [tool.setuptools.packages.find]
 exclude = ["papers*", "src*"]
 
-[dependency-groups]
-benchmarks = [
-  "dm-control>=1.0.43",
-  "ogbench>=1.2.1",
-]
 dev = []
