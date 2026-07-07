@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 import torch
 import numpy as np
+import random
 
 
 @dataclass # typed container for batches of replay data
@@ -468,3 +469,10 @@ def collect_episode(env, policy_fn):
         obs = next_obs
         done = term or trunc
     return ep, len(ep['obs'])
+
+def set_seed(seed: int):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
