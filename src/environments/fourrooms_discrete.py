@@ -251,3 +251,16 @@ class FourRoomsGoalWrapper(gym.Wrapper):
         info["slipped"] = slipped
         info["goal_position"] = self.goal_position.astype(np.int32).tolist()
         return obs, reward, at_goal, truncated, info
+    
+
+
+def make_env_fourrooms_discrete():
+    base = FourRoomsGridWorld(room_size=5, max_episode_steps=500)
+    env = FourRoomsGoalWrapper(
+        base,
+        goal_position=(9, 9),
+        goal_reward=1.0,
+        step_reward=0.0,
+        slip_prob=0.0,
+    )
+    return env

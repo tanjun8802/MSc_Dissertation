@@ -46,44 +46,92 @@ class TrajectoryReplayBuffer:
 
     def __len__(self):
         return self.size
+    
+    def _remove_index_from_episode_mapping(self, idx):
+        old_ep = self.episode_id[idx]
+        if old_ep in self.episode_to_indices:
+            try:
+                self.episode_to_indices[old_ep].remove(idx)
+                if len(self.episode_to_indices[old_ep]) == 0:
+                    del self.episode_to_indices[old_ep]
+            except ValueError:
+                pass
+
+
+    def add_transition(
+        self,
+        obs,
+        action,
+        reward,
+        next_obs,
+        terminated,
+        truncated=False,
+        episode_id=None,
+        timestep=None,
+    ):
+
+        idx = self.pos
+
+        if self.full:
+            self._remove_index_from_episode_mapping(idx)
+
+        # If caller does not provide episode metadata, create a fresh one-step episode.
+        if episode_id is None:
+            ep_id = self.current_episode_id
+            self.current_episode_id += 1
+        else:
+            ep_id = int(episode_id)
+            if ep_id >= self.current_episode_id:
+                self.current_episode_id = ep_id + 1
+
+        if timestep is None:
+            t = 0
+        else:
+            t = int(timestep)
+
+        self.obs[idx] = np.asarray(obs, dtype=np.float32)
+        self.actions[idx] = np.int64(action)
+        self.rewards[idx] = np.asarray([reward], dtype=np.float32)
+        self.next_obs[idx] = np.asarray(next_obs, dtype=np.float32)
+        self.terminated[idx] = np.asarray([terminated], dtype=np.float32)
+        self.truncated[idx] = np.asarray([truncated], dtype=np.float32)
+
+        self.episode_id[idx] = ep_id
+        self.timestep[idx] = t
+
+        if ep_id not in self.episode_to_indices:
+            self.episode_to_indices[ep_id] = []
+        self.episode_to_indices[ep_id].append(idx)
+
+        self.pos = (self.pos + 1) % self.capacity
+
+        if self.size < self.capacity:
+            self.size += 1
+        else:
+            self.full = True
 
     def add_episode(self, episode):
         ep_id = self.current_episode_id
         self.current_episode_id += 1
 
+        T = len(episode["obs"])
         ep_indices = []
 
-        T = len(episode["obs"])
         for t in range(T):
-            idx = self.pos
+            idx_before = self.pos
 
-            if self.full:
-                old_ep = self.episode_id[idx]
-                if old_ep in self.episode_to_indices:
-                    try:
-                        self.episode_to_indices[old_ep].remove(idx)
-                        if len(self.episode_to_indices[old_ep]) == 0:
-                            del self.episode_to_indices[old_ep]
-                    except ValueError:
-                        pass
+            self.add_transition(
+                obs=episode["obs"][t],
+                action=episode["actions"][t],
+                reward=episode["rewards"][t],
+                next_obs=episode["next_obs"][t],
+                terminated=episode["terminated"][t],
+                truncated=episode["truncated"][t],
+                episode_id=ep_id,
+                timestep=t,
+            )
 
-            self.obs[idx] = np.asarray(episode["obs"][t], dtype=np.float32)
-            self.actions[idx] = np.asarray(episode["actions"][t], dtype=np.float32).reshape(-1)
-            self.rewards[idx] = np.asarray([episode["rewards"][t]], dtype=np.float32)
-            self.next_obs[idx] = np.asarray(episode["next_obs"][t], dtype=np.float32)
-            self.terminated[idx] = np.asarray([episode["terminated"][t]], dtype=np.float32)
-            self.truncated[idx] = np.asarray([episode["truncated"][t]], dtype=np.float32)
-
-            self.episode_id[idx] = ep_id
-            self.timestep[idx] = t
-
-            ep_indices.append(idx)
-
-            self.pos = (self.pos + 1) % self.capacity
-            if self.size < self.capacity:
-                self.size += 1
-            else:
-                self.full = True
+            ep_indices.append(idx_before)
 
         self.episode_to_indices[ep_id] = ep_indices
 
