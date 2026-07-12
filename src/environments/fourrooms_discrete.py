@@ -6,19 +6,15 @@ from gymnasium import spaces
 class FourRoomsGridWorld(gym.Env):
     metadata = {"render_modes": ["rgb_array"], "render_fps": 8}
 
-    def __init__(
-        self,
-        room_size=11,
-        render_mode=None,
-        max_episode_steps=500,
-    ):
+    def __init__(self, room_size=11, render_mode=None, max_episode_steps=500):
         super().__init__()
         self.room_size = int(room_size)
         self.grid_size = (self.room_size * 2) + 1
+        self.width = self.grid_size
+        self.height = self.grid_size
         self.render_mode = render_mode
         self.max_episode_steps = int(max_episode_steps)
 
-        # Discrete action and observation spaces
         self.action_space = gym.spaces.Discrete(4)
         self.observation_space = spaces.Box(
             low=np.array([0.0, 0.0], dtype=np.float32),
@@ -26,6 +22,7 @@ class FourRoomsGridWorld(gym.Env):
             shape=(2,),
             dtype=np.float32,
         )
+        self.action_names = ["Up", "Down", "Left", "Right"]
 
         mid_point = (self.room_size - 1) // 2
         self._door_coords = {
@@ -46,16 +43,10 @@ class FourRoomsGridWorld(gym.Env):
         self._blocked_cells = self._build_walls()
         self._outer_wall_cells = self._build_outer_walls()
         self._free_cells = np.array(
-            [
-                (x, y)
-                for y in range(self.grid_size)
-                for x in range(self.grid_size)
-                if (x, y) not in self._blocked_cells
-            ],
+            [(x, y) for y in range(self.grid_size) for x in range(self.grid_size) if (x, y) not in self._blocked_cells],
             dtype=np.int32,
         )
 
-        # Fully discrete agent / goal cells
         self._agent_pos = np.array([0, 0], dtype=np.int32)
         self._goal_pos = None
         self._step_count = 0
@@ -63,24 +54,30 @@ class FourRoomsGridWorld(gym.Env):
     def _build_walls(self):
         wall = self.room_size
         blocked = set()
+
         for y in range(self.grid_size):
             if (wall, y) not in self._door_coords:
                 blocked.add((wall, y))
+
         for x in range(self.grid_size):
             if (x, wall) not in self._door_coords:
                 blocked.add((x, wall))
+
         return blocked
 
     def _build_outer_walls(self):
         outer = set()
         boundary_min = -1
         boundary_max = self.grid_size
+
         for y in range(boundary_min, boundary_max + 1):
             outer.add((boundary_min, y))
             outer.add((boundary_max, y))
+
         for x in range(boundary_min, boundary_max + 1):
             outer.add((x, boundary_min))
             outer.add((x, boundary_max))
+
         return outer
 
     def _is_valid_cell(self, cell):
@@ -95,32 +92,32 @@ class FourRoomsGridWorld(gym.Env):
 
     def set_goal_position(self, goal_position):
         goal = np.asarray(goal_position, dtype=np.int32)
-
         if goal.shape != (2,):
             raise ValueError(f"Invalid goal position shape: {goal_position}")
-
         if not self._is_valid_cell(goal):
             raise ValueError(f"Invalid goal cell: {goal_position}")
-
         self._goal_pos = goal.copy()
 
     def _obs(self):
         return self._agent_pos.astype(np.float32)
 
     def _action_to_delta(self, action):
-        ACTION_TO_DELTA = {
-            0: np.array([0, 1], dtype=np.int32),   # Up
-            1: np.array([0, -1], dtype=np.int32),  # Down
-            2: np.array([-1, 0], dtype=np.int32),  # Left
-            3: np.array([1, 0], dtype=np.int32),   # Right
+        action_to_delta = {
+            0: np.array([0, 1], dtype=np.int32),   # up
+            1: np.array([0, -1], dtype=np.int32),  # down
+            2: np.array([-1, 0], dtype=np.int32),  # left
+            3: np.array([1, 0], dtype=np.int32),   # right
         }
-        return ACTION_TO_DELTA.get(int(action), np.array([0, 0], dtype=np.int32))
+        return action_to_delta.get(int(action), np.array([0, 0], dtype=np.int32))
 
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
         options = options or {}
 
         start = options.get("start_position")
+        if start is None and "start_pos" in options:
+            start = options["start_pos"]
+
         if start is None:
             start = self.sample_initial_state()
         else:
@@ -189,16 +186,7 @@ class FourRoomsGridWorld(gym.Env):
 
 
 class FourRoomsGoalWrapper(gym.Wrapper):
-    """Sparse-reward goal wrapper with configurable goal and discrete slip."""
-
-    def __init__(
-        self,
-        env,
-        goal_position=(20, 20),
-        goal_reward=1.0,
-        step_reward=0.0,
-        slip_prob=0.0,
-    ):
+    def __init__(self, env, goal_position=(20, 20), goal_reward=1.0, step_reward=0.0, slip_prob=0.0):
         super().__init__(env)
         self.goal_reward = float(goal_reward)
         self.step_reward = float(step_reward)
@@ -210,10 +198,8 @@ class FourRoomsGoalWrapper(gym.Wrapper):
         goal = np.asarray(goal_position, dtype=np.int32)
         if goal.shape != (2,):
             raise ValueError(f"Invalid goal position: {goal_position}")
-
         if not self.env._is_valid_cell(goal):
             raise ValueError(f"Invalid goal position: {goal_position}")
-
         return goal.copy()
 
     def _sync_goal_to_env(self):
@@ -233,8 +219,10 @@ class FourRoomsGoalWrapper(gym.Wrapper):
         options = options or {}
         if "goal_position" in options:
             self.set_goal_position(options["goal_position"])
+
         obs, info = self.env.reset(seed=seed, options=options)
         self._sync_goal_to_env()
+
         info = dict(info)
         info["goal_position"] = self.goal_position.astype(np.int32).tolist()
         return obs, info
@@ -242,6 +230,7 @@ class FourRoomsGoalWrapper(gym.Wrapper):
     def step(self, action):
         slipped = bool(self.env.np_random.random() < self.slip_prob)
         effective_action = self._sample_slip_action() if slipped else int(action)
+
         obs, _, _, truncated, info = self.env.step(effective_action)
 
         at_goal = np.array_equal(obs.astype(np.int32), self.goal_position)
@@ -251,7 +240,6 @@ class FourRoomsGoalWrapper(gym.Wrapper):
         info["slipped"] = slipped
         info["goal_position"] = self.goal_position.astype(np.int32).tolist()
         return obs, reward, at_goal, truncated, info
-    
 
 
 def make_env_fourrooms_discrete():

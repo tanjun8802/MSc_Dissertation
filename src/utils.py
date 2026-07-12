@@ -524,3 +524,7 @@ def set_seed(seed: int):
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+
+def build_goal_batch(goal, batch_size, device):
+    goal_arr = np.array(goal, dtype=np.float32)
+    return torch.tensor(goal_arr, dtype=torch.float32, device=device).unsqueeze(0).expand(batch_size, -1)

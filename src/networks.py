@@ -4,6 +4,22 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+
+def snapshot_named_parameters(model, prefix_filter=None):
+    out = {}
+    for name, p in model.named_parameters():
+        if not p.requires_grad:
+            continue
+        if prefix_filter is None:
+            out[name] = p.detach().clone()
+        elif isinstance(prefix_filter, str):
+            if name.startswith(prefix_filter):
+                out[name] = p.detach().clone()
+        else:
+            if any(name.startswith(pref) for pref in prefix_filter):
+                out[name] = p.detach().clone()
+    return out
+
 class StateActionRepresentationModel(nn.Module): # a simple MLP that takes in (s,a) and predicts s_next, use hidden_layers to control the depth of the MLP, and hidden_dim to control the width of the MLP
 
     def __init__(self, obs_dim, action_dim, hidden_dim=256, output_dim=64, inner_layers=2,normalise=False): # A single goal paper specifies no normalisation
@@ -76,3 +92,79 @@ class DQN_QNetwork(nn.Module):
 
     def forward(self, obs):
         return self.net(obs)
+    
+
+class FactorisedDQN_QNetwork(nn.Module):
+    def __init__(
+        self,
+        obs_dim: int,
+        num_actions: int,
+        goal_dim: int = 2,
+        hidden_dim: int = 128,
+        rep_dim: int = 64,
+    ):
+        super().__init__()
+        self.obs_dim = obs_dim
+        self.num_actions = num_actions
+        self.action_dim = num_actions
+        self.goal_dim = goal_dim
+        self.rep_dim = rep_dim
+
+        self.sa_encoder = nn.Sequential(
+            nn.Linear(obs_dim + self.action_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, rep_dim),
+        )
+
+        self.goal_encoder = nn.Sequential(
+            nn.Linear(goal_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, rep_dim),
+        )
+
+    def encode_goal(self, goal: torch.Tensor) -> torch.Tensor:
+        psi = self.goal_encoder(goal)
+        psi = torch.tanh(psi)
+        psi = F.normalize(psi, p=2, dim=-1, eps=1e-8)
+        return psi
+
+    def encode_state_action(self, obs: torch.Tensor, act: torch.Tensor) -> torch.Tensor:
+        sa = torch.cat([obs, act], dim=-1)
+        phi = self.sa_encoder(sa)
+        phi = torch.tanh(phi)
+        phi = F.normalize(phi, p=2, dim=-1, eps=1e-8)
+        return phi
+
+    def forward(
+        self,
+        obs: torch.Tensor,
+        act: torch.Tensor,
+        goal: torch.Tensor,
+    ) -> torch.Tensor:
+        phi_sa = self.encode_state_action(obs, act)      # [B, D]
+        psi_z = self.encode_goal(goal)                   # [B, D]
+        q_vals = (phi_sa * psi_z).sum(dim=-1, keepdim=True)  # [B, 1]
+        return q_vals
+
+    def q_val_for_argmax_action(self, obs: torch.Tensor, goal: torch.Tensor) -> torch.Tensor:
+        B = obs.shape[0]
+        A = self.num_actions
+
+        act_onehot = F.one_hot(
+            torch.arange(A, device=obs.device),
+            num_classes=self.action_dim
+        ).float()                                        # [A, A]
+        act_onehot = act_onehot.unsqueeze(0).expand(B, -1, -1)   # [B, A, A]
+
+        obs_rep = obs.unsqueeze(1).expand(-1, A, -1)             # [B, A, obs_dim]
+        obs_flat = obs_rep.reshape(B * A, self.obs_dim)          # [B*A, obs_dim]
+        act_flat = act_onehot.reshape(B * A, self.action_dim)    # [B*A, A]
+
+        phi_sa = self.encode_state_action(obs_flat, act_flat)    # [B*A, D]
+        phi_sa = phi_sa.view(B, A, self.rep_dim)                 # [B, A, D]
+
+        psi_z = self.encode_goal(goal)                           # [B, D]
+        psi_rep = psi_z.unsqueeze(1).expand(B, A, -1)           # [B, A, D]
+
+        q_vals = (phi_sa * psi_rep).sum(dim=-1)                 # [B, A]
+        return q_vals
