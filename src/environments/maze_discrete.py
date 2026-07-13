@@ -162,12 +162,15 @@ class MazeGridWorld(gym.Env):
 
 
 class MazeGoalWrapper(gym.Wrapper):
-    def __init__(self, env, goal_position=(1, 1), goal_reward=1.0, step_reward=0.0, slip_prob=0.0):
+    def __init__(self, env, goal_position=(1, 1), goal_reward=1.0, step_reward=0.0, slip_prob=0.0, reward_mode="goal", wall_penalty=-0.05, gamma=0.99):
         super().__init__(env)
         self.goal_position = np.asarray(goal_position, dtype=np.int32)
         self.goal_reward = float(goal_reward)
         self.step_reward = float(step_reward)
         self.slip_prob = float(np.clip(slip_prob, 0.0, 1.0))
+        self.reward_mode = str(reward_mode).lower()
+        self.wall_penalty = float(wall_penalty)
+        self.gamma = float(gamma)
         self._sync_goal_to_env()
 
     def _sync_goal_to_env(self):
@@ -180,6 +183,50 @@ class MazeGoalWrapper(gym.Wrapper):
         self.goal_position = np.asarray(goal_position, dtype=np.int32)
         self._sync_goal_to_env()
 
+    def compute_simple_reward(self, state, action, next_state, goal):
+        sx, sy = state
+        nx, ny = next_state
+        gx, gy = goal
+
+        if (nx, ny) == (gx, gy):
+            return self.goal_reward
+
+        if (nx, ny) == (sx, sy):
+            return self.wall_penalty
+
+        return self.step_reward
+
+    # NEW
+    def compute_shaped_reward(self, state, action, next_state, goal):
+        sx, sy = state
+        nx, ny = next_state
+        gx, gy = goal
+
+        if (nx, ny) == (gx, gy):
+            base_r = self.goal_reward
+        elif (nx, ny) == (sx, sy):
+            base_r = self.wall_penalty
+        else:
+            base_r = self.step_reward
+
+        width = int(self.env.unwrapped.width)
+        height = int(self.env.unwrapped.height)
+        max_d = (width - 1) + (height - 1)
+
+        if max_d <= 0:
+            return base_r
+
+        def phi(xy):
+            x, y = xy
+            d = abs(gx - x) + abs(gy - y)
+            return 1.0 - d / max_d
+
+        phi_s = phi(state)
+        phi_sp = phi(next_state)
+
+        shaping = self.gamma * phi_sp - phi_s
+        return base_r + shaping
+
     def reset(self, *, seed=None, options=None):
         options = options or {}
         if "goal_position" in options:
@@ -191,10 +238,13 @@ class MazeGoalWrapper(gym.Wrapper):
         info = dict(info)
         info["goal_position"] = self.goal_position.astype(np.int32).tolist()
         return obs, info
+    
 
     def step(self, action):
         if self.slip_prob > 0.0 and self.env.np_random.random() < self.slip_prob:
             action = int(self.env.np_random.integers(0, self.env.action_space.n))
+
+        state = tuple(np.asarray(self.env.unwrapped.agent_pos, dtype=np.int32).tolist())
 
         obs, _, terminated, truncated, info = self.env.step(action)
 
@@ -203,6 +253,29 @@ class MazeGoalWrapper(gym.Wrapper):
         if reached:
             reward = self.goal_reward
             terminated = True
+
+        next_state = tuple(obs.astype(np.int32).tolist())
+        goal = tuple(self.goal_position.astype(np.int32).tolist())
+
+        if self.reward_mode == "simple":
+            reward = self.compute_simple_reward(
+                state=state,
+                action=action,
+                next_state=next_state,
+                goal=goal,
+            )
+            if reached:
+                terminated = True
+
+        elif self.reward_mode == "shaped":
+            reward = self.compute_shaped_reward(
+                state=state,
+                action=action,
+                next_state=next_state,
+                goal=goal,
+            )
+            if reached:
+                terminated = True
 
         info = dict(info)
         info["goal_position"] = self.goal_position.astype(np.int32).tolist()
