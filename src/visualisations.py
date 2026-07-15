@@ -477,3 +477,468 @@ def plot_q_diagnostics(
         axes[2].set_axis_off()
 
     plt.show()
+
+def plot_full_embedding_dashboard_html(
+    overall_results,
+    qnet,
+    mode="mean",
+    normalise=True,
+    annotate=False,
+    title_task_3d="Task embeddings in 3D PCA space",
+    title_weights="Q-network weight distributions",
+    title_sa_fixed_3d="Fixed-probe SA embeddings in 3D PCA space",
+    title_sa_iso="Final SA isotropy diagnostics",
+    save_html="full_embedding_dashboard.html",
+    sa_keywords=("sa_encoder",),
+    goal_keywords=("goal_encoder",),
+    bins=80,
+):
+    import numpy as np
+    import torch
+    from pathlib import Path
+    from sklearn.decomposition import PCA
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+
+    def _to_numpy_embedding(x):
+        if isinstance(x, torch.Tensor):
+            x = x.detach().cpu().numpy()
+        x = np.asarray(x, dtype=np.float32)
+        return x
+
+    def _ensure_keyword_iterable(x):
+        if isinstance(x, str):
+            return [x]
+        return list(x)
+
+    def _collect_embeddings(results, key, mode):
+        vectors = []
+        labels = []
+        goal_names = []
+
+        for goal, data in results.items():
+            emb_list = data.get(key, [])
+            if len(emb_list) == 0:
+                continue
+
+            emb_list_np = [_to_numpy_embedding(e).reshape(-1) for e in emb_list]
+
+            if mode == "mean":
+                vec = np.mean(np.stack(emb_list_np, axis=0), axis=0)
+                vectors.append(vec)
+                labels.append(str(goal))
+                goal_names.append(str(goal))
+            elif mode == "last":
+                vec = emb_list_np[-1]
+                vectors.append(vec)
+                labels.append(str(goal))
+                goal_names.append(str(goal))
+            elif mode == "all":
+                for i, vec in enumerate(emb_list_np):
+                    vectors.append(vec)
+                    labels.append(f"{goal} | idx={i}")
+                    goal_names.append(str(goal))
+            else:
+                raise ValueError("mode must be one of: 'mean', 'last', or 'all'")
+
+        if len(vectors) < 2:
+            raise ValueError(f"Need at least 2 embeddings in '{key}' to run PCA.")
+
+        X = np.stack(vectors, axis=0)
+
+        if normalise:
+            X = X / (np.linalg.norm(X, axis=1, keepdims=True) + 1e-8)
+
+        n_components = min(3, X.shape[0], X.shape[1])
+        if n_components < 2:
+            raise ValueError(f"Need embedding dimension >= 2 and at least 2 samples for '{key}' PCA.")
+
+        pca = PCA(n_components=n_components)
+        X_pca = pca.fit_transform(X)
+        explained = pca.explained_variance_ratio_
+
+        if n_components < 3:
+            X_3d = np.zeros((X_pca.shape[0], 3), dtype=X_pca.dtype)
+            X_3d[:, :n_components] = X_pca
+            explained_3 = np.zeros(3, dtype=np.float32)
+            explained_3[:n_components] = explained
+        else:
+            X_3d = X_pca
+            explained_3 = explained
+
+        return X, X_3d, labels, goal_names, pca, explained, explained_3
+
+    def _make_3d_figure(X_3d, labels, goal_names, explained_3, title):
+        unique_goals = sorted(list(set(goal_names)))
+        palette = [
+            "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
+            "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"
+        ]
+        color_map = {g: palette[i % len(palette)] for i, g in enumerate(unique_goals)}
+
+        fig = go.Figure()
+
+        for goal in unique_goals:
+            idxs = [i for i, g in enumerate(goal_names) if g == goal]
+            xs = X_3d[idxs, 0]
+            ys = X_3d[idxs, 1]
+            zs = X_3d[idxs, 2]
+            texts = [labels[i] for i in idxs]
+            color = color_map[goal]
+
+            for x, y, z in zip(xs, ys, zs):
+                fig.add_trace(go.Scatter3d(
+                    x=[0, x],
+                    y=[0, y],
+                    z=[0, z],
+                    mode="lines",
+                    line=dict(color=color, width=5),
+                    opacity=0.65,
+                    showlegend=False,
+                    hoverinfo="skip"
+                ))
+
+            fig.add_trace(go.Scatter3d(
+                x=xs,
+                y=ys,
+                z=zs,
+                mode="markers+text" if annotate else "markers",
+                text=texts if annotate else None,
+                textposition="top center",
+                marker=dict(size=6, color=color, opacity=0.95),
+                name=goal,
+                hovertext=texts,
+                hovertemplate=(
+                    "label=%{hovertext}<br>"
+                    "PC1=%{x:.3f}<br>"
+                    "PC2=%{y:.3f}<br>"
+                    "PC3=%{z:.3f}<extra></extra>"
+                ),
+                textfont=dict(size=10)
+            ))
+
+        fig.add_trace(go.Scatter3d(
+            x=[0],
+            y=[0],
+            z=[0],
+            mode="markers",
+            marker=dict(size=5, color="black", symbol="x"),
+            name="origin",
+            hovertemplate="origin<extra></extra>"
+        ))
+
+        fig.update_layout(
+            title=title,
+            scene=dict(
+                xaxis_title=f"PC1 ({explained_3[0]*100:.1f}%)",
+                yaxis_title=f"PC2 ({explained_3[1]*100:.1f}%)",
+                zaxis_title=f"PC3 ({explained_3[2]*100:.1f}%)",
+                aspectmode="cube"
+            ),
+            template="plotly_white",
+            legend=dict(x=1.02, y=1.0),
+            margin=dict(l=0, r=0, t=50, b=0)
+        )
+        return fig
+
+    sa_keywords_local = [k.lower() for k in _ensure_keyword_iterable(sa_keywords)]
+    goal_keywords_local = [k.lower() for k in _ensure_keyword_iterable(goal_keywords)]
+
+    # ---------------------------
+    # Window 1: weights
+    # ---------------------------
+    sa_weights = []
+    goal_weights = []
+
+    for name, param in qnet.named_parameters():
+        if not param.requires_grad:
+            continue
+        vals = param.detach().cpu().numpy().ravel()
+        lname = name.lower()
+
+        if any(k in lname for k in sa_keywords_local):
+            sa_weights.append(vals)
+        elif any(k in lname for k in goal_keywords_local):
+            goal_weights.append(vals)
+
+    fig_w = make_subplots(
+        rows=1,
+        cols=2,
+        subplot_titles=("SA encoder weights", "Goal encoder weights")
+    )
+
+    if len(sa_weights) > 0:
+        sa_all = np.concatenate(sa_weights)
+        fig_w.add_trace(
+            go.Histogram(
+                x=sa_all,
+                nbinsx=bins,
+                marker_color="#1f77b4",
+                opacity=0.8,
+                name="SA encoder"
+            ),
+            row=1, col=1
+        )
+
+    if len(goal_weights) > 0:
+        goal_all = np.concatenate(goal_weights)
+        fig_w.add_trace(
+            go.Histogram(
+                x=goal_all,
+                nbinsx=bins,
+                marker_color="#ff7f0e",
+                opacity=0.8,
+                name="Goal encoder"
+            ),
+            row=1, col=2
+        )
+
+    fig_w.update_xaxes(title_text="Weight value", row=1, col=1)
+    fig_w.update_xaxes(title_text="Weight value", row=1, col=2)
+    fig_w.update_yaxes(title_text="Count", row=1, col=1)
+    fig_w.update_yaxes(title_text="Count", row=1, col=2)
+    fig_w.update_layout(
+        title=title_weights,
+        template="plotly_white",
+        bargap=0.05,
+        showlegend=False,
+        margin=dict(l=40, r=40, t=70, b=40)
+    )
+
+    # ---------------------------
+    # Window 2: task embeddings PCA
+    # ---------------------------
+    X_task, X_task_3d, labels_task, goal_names_task, pca_task, explained_task, explained_task_3 = \
+        _collect_embeddings(overall_results, key="task_embeddings", mode=mode)
+
+    fig_task_3d = _make_3d_figure(
+        X_3d=X_task_3d,
+        labels=labels_task,
+        goal_names=goal_names_task,
+        explained_3=explained_task_3,
+        title=title_task_3d
+    )
+
+    # ---------------------------
+    # Window 3: fixed-probe SA embeddings PCA
+    # ---------------------------
+    X_sa_fix, X_sa_fix_3d, labels_sa_fix, goal_names_sa_fix, pca_sa_fix, explained_sa_fix, explained_sa_fix_3 = \
+        _collect_embeddings(overall_results, key="sa_fixed_probe_embeddings", mode=mode)
+
+    fig_sa_fixed_3d = _make_3d_figure(
+        X_3d=X_sa_fix_3d,
+        labels=labels_sa_fix,
+        goal_names=goal_names_sa_fix,
+        explained_3=explained_sa_fix_3,
+        title=title_sa_fixed_3d
+    )
+
+    # ---------------------------
+    # Window 4: final SA isotropy diagnostics
+    # ---------------------------
+    all_batches = []
+    for goal, data in overall_results.items():
+        batches = data.get("sa_batches_final", [])
+        for b in batches:
+            all_batches.append(_to_numpy_embedding(b))
+
+    if len(all_batches) == 0:
+        raise ValueError("No 'sa_batches_final' found in overall_results.")
+
+    X_iso = np.concatenate(all_batches, axis=0).astype(np.float32)   # [N, D]
+    Xc = X_iso - X_iso.mean(axis=0, keepdims=True)
+
+    cov = np.cov(Xc, rowvar=False)
+    eigvals = np.linalg.eigvalsh(cov)
+    eigvals = np.sort(eigvals)[::-1]
+
+    trace = float(np.trace(cov))
+    mean_diag = float(np.mean(np.diag(cov)))
+    offdiag = cov - np.diag(np.diag(cov))
+    mean_abs_offdiag = float(np.mean(np.abs(offdiag)))
+    eig_ratio = float(eigvals[0] / (eigvals[-1] + 1e-8))
+
+    Xn = Xc / (np.linalg.norm(Xc, axis=1, keepdims=True) + 1e-8)
+    gram = Xn @ Xn.T
+    mask = ~np.eye(gram.shape[0], dtype=bool)
+    mean_pairwise_cos = float(np.mean(gram[mask]))
+
+    fig_iso = make_subplots(
+        rows=1,
+        cols=2,
+        subplot_titles=("Covariance heatmap", "Eigenvalue spectrum")
+    )
+
+    fig_iso.add_trace(
+        go.Heatmap(
+            z=cov,
+            colorscale="RdBu",
+            zmid=0,
+            colorbar=dict(title="cov")
+        ),
+        row=1, col=1
+    )
+
+    fig_iso.add_trace(
+        go.Bar(
+            x=np.arange(1, len(eigvals) + 1),
+            y=eigvals,
+            marker_color="#2ca02c",
+            name="eigenvalues"
+        ),
+        row=1, col=2
+    )
+
+    fig_iso.update_xaxes(title_text="Dimension", row=1, col=1)
+    fig_iso.update_yaxes(title_text="Dimension", row=1, col=1)
+    fig_iso.update_xaxes(title_text="Sorted eigenvalue index", row=1, col=2)
+    fig_iso.update_yaxes(title_text="Eigenvalue", row=1, col=2)
+
+    fig_iso.update_layout(
+        title=(
+            f"{title_sa_iso}"
+            f"<br><sup>trace={trace:.4f}, mean_diag={mean_diag:.4f}, "
+            f"mean_abs_offdiag={mean_abs_offdiag:.4f}, eig_ratio={eig_ratio:.4f}, "
+            f"mean_pairwise_cos={mean_pairwise_cos:.4f}</sup>"
+        ),
+        template="plotly_white",
+        showlegend=False,
+        margin=dict(l=40, r=40, t=90, b=40)
+    )
+
+    # Explicit heights help embedded Plotly panels render reliably
+    fig_w.update_layout(height=500)
+    fig_task_3d.update_layout(height=500)
+    fig_sa_fixed_3d.update_layout(height=500)
+    fig_iso.update_layout(height=500)
+
+    # ---------------------------
+    # Save one HTML
+    # ---------------------------
+    save_html = Path(save_html)
+    save_html.parent.mkdir(parents=True, exist_ok=True)
+
+    html_w = fig_w.to_html(
+        full_html=False,
+        include_plotlyjs="cdn",
+        config={"responsive": True},
+        default_width="100%",
+        default_height="100%",
+    )
+
+    html_task = fig_task_3d.to_html(
+        full_html=False,
+        include_plotlyjs=False,
+        config={"responsive": True},
+        default_width="100%",
+        default_height="100%",
+    )
+
+    html_sa_fix = fig_sa_fixed_3d.to_html(
+        full_html=False,
+        include_plotlyjs=False,
+        config={"responsive": True},
+        default_width="100%",
+        default_height="100%",
+    )
+
+    html_iso = fig_iso.to_html(
+        full_html=False,
+        include_plotlyjs=False,
+        config={"responsive": True},
+        default_width="100%",
+        default_height="100%",
+    )
+
+    dashboard_html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Embedding Dashboard</title>
+    <style>
+        html, body {{
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            font-family: Arial, sans-serif;
+            background: #f3f4f6;
+        }}
+
+        body {{
+            overflow: hidden;
+        }}
+
+        .dashboard {{
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            grid-template-rows: 1fr 1fr;
+            gap: 12px;
+            width: 100vw;
+            height: 100vh;
+            padding: 12px;
+            box-sizing: border-box;
+        }}
+
+        .panel {{
+            background: white;
+            border: 1px solid #dcdcdc;
+            border-radius: 10px;
+            overflow: hidden;
+            min-width: 0;
+            min-height: 0;
+            box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+            display: flex;
+            flex-direction: column;
+        }}
+
+        .plot-wrap {{
+            flex: 1 1 auto;
+            width: 100%;
+            height: 100%;
+            min-width: 0;
+            min-height: 0;
+            overflow: hidden;
+        }}
+
+        .plotly-graph-div {{
+            width: 100% !important;
+            height: 100% !important;
+        }}
+    </style>
+</head>
+<body>
+    <div class="dashboard">
+        <div class="panel">
+            <div class="plot-wrap">{html_w}</div>
+        </div>
+        <div class="panel">
+            <div class="plot-wrap">{html_task}</div>
+        </div>
+        <div class="panel">
+            <div class="plot-wrap">{html_sa_fix}</div>
+        </div>
+        <div class="panel">
+            <div class="plot-wrap">{html_iso}</div>
+        </div>
+    </div>
+</body>
+</html>
+"""
+    save_html.write_text(dashboard_html, encoding="utf-8")
+
+    return {
+        "save_html": str(save_html),
+        "fig_weights": fig_w,
+        "fig_task_3d": fig_task_3d,
+        "fig_sa_fixed_3d": fig_sa_fixed_3d,
+        "fig_sa_isotropy": fig_iso,
+        "isotropy_metrics": {
+            "trace": trace,
+            "mean_diag": mean_diag,
+            "mean_abs_offdiag": mean_abs_offdiag,
+            "eig_ratio": eig_ratio,
+            "mean_pairwise_cos": mean_pairwise_cos,
+        },
+    }

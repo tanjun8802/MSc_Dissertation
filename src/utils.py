@@ -484,10 +484,14 @@ class TrajectoryReplayBufferDiscrete(TrajectoryReplayBuffer):
         }
 
 
-def evaluate_policy(env, policy_fn, episodes=8):
+def evaluate_policy(env, policy_fn, episodes=8, options=None):
     returns, lengths = [], []
     for _ in range(episodes):
-        obs, _ = env.reset()
+
+        if options is not None and "start_position" in options:
+            obs, _ = env.reset(options={"start_position": options["start_position"]})
+        else:
+            obs, _ = env.reset()
         done = False
         ep_ret, ep_len = 0.0, 0
         while not done:

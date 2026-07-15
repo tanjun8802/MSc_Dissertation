@@ -32,7 +32,7 @@ def repulsion_loss_to_memory(psi_new, memory, margin=1.0):
     loss = loss_mat.mean()                                # scalar
     return loss
 
-def sigreg_loss(representation_network, sketch_dim=32, eps=1e-6): 
+def sigreg_loss(representation_network, sketch_dim=64, eps=1e-6):
     B, D = representation_network.shape
     z = representation_network - representation_network.mean(dim=0, keepdim=True)
 
@@ -42,8 +42,12 @@ def sigreg_loss(representation_network, sketch_dim=32, eps=1e-6):
         D = sketch_dim
 
     cov = (z.T @ z) / (B - 1 + eps)
+    var_mean = cov.diag().mean()
+    cov_norm = cov / (var_mean + eps)
+
     I = torch.eye(D, device=z.device, dtype=z.dtype)
-    return ((cov - I) ** 2).sum() / D
+    loss = ((cov_norm - I) ** 2).sum() / D
+    return loss
 
 
 def orthogonal_loss(q_network, goal_t_single, embedding_memory, device, eps=1e-8):

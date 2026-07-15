@@ -162,7 +162,18 @@ class MazeGridWorld(gym.Env):
 
 
 class MazeGoalWrapper(gym.Wrapper):
-    def __init__(self, env, goal_position=(1, 1), goal_reward=1.0, step_reward=0.0, slip_prob=0.0, reward_mode="goal", wall_penalty=-0.05, gamma=0.99):
+    def __init__(
+        self,
+        env,
+        goal_position=(1, 1),
+        goal_reward=1.0,
+        step_reward=0.0,
+        slip_prob=0.0,
+        reward_mode="goal",
+        wall_penalty=-0.1,
+        gamma=0.99,
+        track_coverage=True,
+    ):
         super().__init__(env)
         self.goal_position = np.asarray(goal_position, dtype=np.int32)
         self.goal_reward = float(goal_reward)
@@ -171,6 +182,16 @@ class MazeGoalWrapper(gym.Wrapper):
         self.reward_mode = str(reward_mode).lower()
         self.wall_penalty = float(wall_penalty)
         self.gamma = float(gamma)
+
+        self.track_coverage = bool(track_coverage)
+        self.current_task = None
+        self.global_visited = set()
+        self.episode_visited = set()
+        self.task_visited = {}
+        self.task_episode_counts = {}
+        self.task_new_state_curve = {}
+        self.task_reuse_curve = {}
+
         self._sync_goal_to_env()
 
     def _sync_goal_to_env(self):
@@ -178,6 +199,96 @@ class MazeGoalWrapper(gym.Wrapper):
             self.env.set_goal_position(self.goal_position)
         else:
             self.env._goal_pos = np.asarray(self.goal_position, dtype=np.int32).copy()
+
+    def _state_id_from_obs(self, obs):
+        s = np.asarray(obs, dtype=np.int32).reshape(-1)
+        if s.shape[0] != 2:
+            raise ValueError(f"Expected obs shape (2,), got {s.shape}")
+        return (int(s[0]), int(s[1]))
+
+    def set_task(self, task_id):
+        self.current_task = task_id
+        if task_id not in self.task_visited:
+            self.task_visited[task_id] = set()
+            self.task_episode_counts[task_id] = 0
+            self.task_new_state_curve[task_id] = []
+            self.task_reuse_curve[task_id] = []
+
+    def _earlier_task_states(self):
+        earlier = set()
+        if self.current_task is None:
+            return earlier
+        for tid, states in self.task_visited.items():
+            if tid != self.current_task:
+                earlier |= states
+        return earlier
+
+    def _update_coverage_on_reset(self, obs):
+        if not self.track_coverage:
+            return
+
+        state = self._state_id_from_obs(obs)
+        self.episode_visited = {state}
+        self.global_visited.add(state)
+
+        if self.current_task is not None:
+            self.task_visited[self.current_task].add(state)
+
+    def _update_coverage_on_step(self, obs):
+        if not self.track_coverage:
+            return
+
+        state = self._state_id_from_obs(obs)
+        self.episode_visited.add(state)
+        self.global_visited.add(state)
+
+        if self.current_task is not None:
+            self.task_visited[self.current_task].add(state)
+
+    def _finalize_episode_coverage(self):
+        if not self.track_coverage or self.current_task is None:
+            return
+
+        self.task_episode_counts[self.current_task] += 1
+
+        earlier = self._earlier_task_states()
+        current = self.task_visited[self.current_task]
+
+        new_states = current - earlier
+        reused_states = current & earlier
+        reuse_ratio = 0.0 if len(current) == 0 else len(reused_states) / len(current)
+
+        self.task_new_state_curve[self.current_task].append(len(new_states))
+        self.task_reuse_curve[self.current_task].append(reuse_ratio)
+
+    def state_reuse_ratio(self):
+        if not self.track_coverage or self.current_task is None:
+            return 0.0
+        current = self.task_visited[self.current_task]
+        if len(current) == 0:
+            return 0.0
+        earlier = self._earlier_task_states()
+        reused = current & earlier
+        return len(reused) / len(current)
+
+    def new_states_in_current_task(self):
+        if not self.track_coverage or self.current_task is None:
+            return 0
+        current = self.task_visited[self.current_task]
+        earlier = self._earlier_task_states()
+        return len(current - earlier)
+
+    def coverage_stats(self):
+        stats = {
+            "global_unique_states": len(self.global_visited),
+            "current_task": self.current_task,
+        }
+        if self.current_task is not None:
+            stats["task_unique_states"] = len(self.task_visited[self.current_task])
+            stats["task_new_states"] = self.new_states_in_current_task()
+            stats["task_reuse_ratio"] = self.state_reuse_ratio()
+            stats["episodes_in_task"] = self.task_episode_counts[self.current_task]
+        return stats
 
     def set_goal_position(self, goal_position):
         self.goal_position = np.asarray(goal_position, dtype=np.int32)
@@ -190,13 +301,10 @@ class MazeGoalWrapper(gym.Wrapper):
 
         if (nx, ny) == (gx, gy):
             return self.goal_reward
-
         if (nx, ny) == (sx, sy):
             return self.wall_penalty
-
         return self.step_reward
 
-    # NEW
     def compute_shaped_reward(self, state, action, next_state, goal):
         sx, sy = state
         nx, ny = next_state
@@ -234,26 +342,30 @@ class MazeGoalWrapper(gym.Wrapper):
 
         obs, info = self.env.reset(seed=seed, options=options)
         self._sync_goal_to_env()
+        self._update_coverage_on_reset(obs)
 
         info = dict(info)
         info["goal_position"] = self.goal_position.astype(np.int32).tolist()
+
+        if self.track_coverage:
+            info["state"] = list(self._state_id_from_obs(obs))
+            info["episode_unique_states"] = len(self.episode_visited)
+            info["global_unique_states"] = len(self.global_visited)
+            if self.current_task is not None:
+                info["task_unique_states"] = len(self.task_visited[self.current_task])
+                info["task_new_states"] = self.new_states_in_current_task()
+                info["task_reuse_ratio"] = self.state_reuse_ratio()
+
         return obs, info
-    
 
     def step(self, action):
         if self.slip_prob > 0.0 and self.env.np_random.random() < self.slip_prob:
             action = int(self.env.np_random.integers(0, self.env.action_space.n))
 
         state = tuple(np.asarray(self.env.unwrapped.agent_pos, dtype=np.int32).tolist())
-
         obs, _, terminated, truncated, info = self.env.step(action)
 
-        reward = self.step_reward
         reached = np.array_equal(obs.astype(np.int32), self.goal_position)
-        if reached:
-            reward = self.goal_reward
-            terminated = True
-
         next_state = tuple(obs.astype(np.int32).tolist())
         goal = tuple(self.goal_position.astype(np.int32).tolist())
 
@@ -264,9 +376,6 @@ class MazeGoalWrapper(gym.Wrapper):
                 next_state=next_state,
                 goal=goal,
             )
-            if reached:
-                terminated = True
-
         elif self.reward_mode == "shaped":
             reward = self.compute_shaped_reward(
                 state=state,
@@ -274,10 +383,28 @@ class MazeGoalWrapper(gym.Wrapper):
                 next_state=next_state,
                 goal=goal,
             )
-            if reached:
-                terminated = True
+        else:
+            reward = self.goal_reward if reached else self.step_reward
+
+        if reached:
+            terminated = True
+
+        self._update_coverage_on_step(obs)
+
+        if terminated or truncated:
+            self._finalize_episode_coverage()
 
         info = dict(info)
         info["goal_position"] = self.goal_position.astype(np.int32).tolist()
         info["success"] = reached
+
+        if self.track_coverage:
+            info["state"] = list(self._state_id_from_obs(obs))
+            info["episode_unique_states"] = len(self.episode_visited)
+            info["global_unique_states"] = len(self.global_visited)
+            if self.current_task is not None:
+                info["task_unique_states"] = len(self.task_visited[self.current_task])
+                info["task_new_states"] = self.new_states_in_current_task()
+                info["task_reuse_ratio"] = self.state_reuse_ratio()
+
         return obs, reward, terminated, truncated, info
