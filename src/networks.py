@@ -168,3 +168,73 @@ class FactorisedDQN_QNetwork(nn.Module):
 
         q_vals = (phi_sa * psi_rep).sum(dim=-1)                 # [B, A]
         return q_vals
+    
+    def forward_with_task_embedding(
+        self,
+        obs: torch.Tensor,
+        act: torch.Tensor,
+        task_embedding: torch.Tensor,
+        normalize_embedding: bool = False,
+    ) -> torch.Tensor:
+        """
+        Compute Q(obs, act | psi) directly from a provided task embedding.
+
+        obs: [B, obs_dim]
+        act: [B, action_dim]
+        task_embedding: [B, rep_dim] or [rep_dim]
+        """
+        phi_sa = self.encode_state_action(obs, act)  # [B, D]
+
+        if task_embedding.dim() == 1:
+            task_embedding = task_embedding.unsqueeze(0).expand(obs.shape[0], -1)
+
+        psi_z = (
+            F.normalize(task_embedding, p=2, dim=-1, eps=1e-8)
+            if normalize_embedding
+            else task_embedding
+        )
+
+        q_vals = (phi_sa * psi_z).sum(dim=-1, keepdim=True)   # [B, 1]
+        return q_vals
+    
+    def q_val_for_argmax_action_from_embedding(
+        self,
+        obs: torch.Tensor,
+        task_embedding: torch.Tensor,
+        normalize_embedding: bool = False,
+    ) -> torch.Tensor:
+        """
+        Compute Q-values for all actions using a provided task embedding.
+
+        obs: [B, obs_dim]
+        task_embedding: [B, rep_dim] or [rep_dim]
+        returns: [B, A]
+        """
+        B = obs.shape[0]
+        A = self.num_actions
+
+        act_onehot = F.one_hot(
+            torch.arange(A, device=obs.device),
+            num_classes=self.action_dim
+        ).float()                                             # [A, A]
+        act_onehot = act_onehot.unsqueeze(0).expand(B, -1, -1)  # [B, A, A]
+
+        obs_rep = obs.unsqueeze(1).expand(-1, A, -1)          # [B, A, obs_dim]
+        obs_flat = obs_rep.reshape(B * A, self.obs_dim)       # [B*A, obs_dim]
+        act_flat = act_onehot.reshape(B * A, self.action_dim) # [B*A, A]
+
+        phi_sa = self.encode_state_action(obs_flat, act_flat) # [B*A, D]
+        phi_sa = phi_sa.view(B, A, self.rep_dim)              # [B, A, D]
+
+        if task_embedding.dim() == 1:
+            task_embedding = task_embedding.unsqueeze(0).expand(B, -1)
+
+        psi_z = (
+            F.normalize(task_embedding, p=2, dim=-1, eps=1e-8)
+            if normalize_embedding
+            else task_embedding
+        )
+
+        psi_rep = psi_z.unsqueeze(1).expand(B, A, -1)         # [B, A, D]
+        q_vals = (phi_sa * psi_rep).sum(dim=-1)               # [B, A]
+        return q_vals

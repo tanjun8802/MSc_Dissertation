@@ -3,6 +3,10 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 from matplotlib.colors import ListedColormap, BoundaryNorm
+from sklearn.decomposition import PCA
+import torch
+import torch.nn.functional as F
+from utils import collect_valid_states_fourrooms
 
 
 def _to_coord_set(cells):
@@ -942,3 +946,283 @@ def plot_full_embedding_dashboard_html(
             "mean_pairwise_cos": mean_pairwise_cos,
         },
     }
+
+def plot_eval_results(eval_first, eval_time_first, min_steps_first, min_time_first):
+    if eval_first and eval_time_first:
+        xs_steps, ys_steps = zip(*eval_first)
+        xs_time, ys_time = zip(*eval_time_first)
+
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 4))
+
+        ax1.plot(xs_steps, ys_steps)
+        if min_steps_first is not None:
+            ax1.axvline(min_steps_first, color='red', linestyle='--', label='Good policy achieved')
+            ax1.annotate(
+                f"Good policy achieved at step {min_steps_first}",
+                xy=(min_steps_first, 0.99),
+                xytext=(min_steps_first + 5000, 0.5),
+                arrowprops=dict(arrowstyle="->", color='red'),
+                color='red',
+            )
+        ax1.set_xlabel("Environment steps")
+        ax1.set_ylabel("Mean episodic return")
+        ax1.set_title("Q = φ(s,a)ᵀψ(z) on FourRooms (discrete) – steps")
+        ax1.grid(alpha=0.25)
+        
+        ax2.plot(xs_time, ys_time)
+        if min_time_first is not None:
+            ax2.axvline(min_time_first, color='red', linestyle='--', label='Good policy achieved')
+            ax2.annotate(
+                f"Good policy achieved at time {min_time_first:.2f}s",
+                xy=(min_time_first, 0.99),
+                xytext=(min_time_first + 5.0, 0.5),
+                arrowprops=dict(arrowstyle="->", color='red'),
+                color='red',
+            )
+        ax2.set_xlabel("Evaluation time (s)")
+        ax2.set_ylabel("Mean episodic return")
+        ax2.set_title("Q = φ(s,a)ᵀψ(z) on FourRooms (discrete) – time")
+        ax2.grid(alpha=0.25)
+
+        plt.tight_layout()
+        plt.show()
+
+def print_goal_embedding_similarity(task_embedding_memory, goal_labels=None, decimals=3):
+    if len(task_embedding_memory) == 0:
+        print("Goal embedding memory is empty.")
+        return
+
+    M = np.stack(task_embedding_memory, axis=0)  # [N, D]
+    M = M / (np.linalg.norm(M, axis=1, keepdims=True) + 1e-8)
+    sim = M @ M.T  # cosine similarity matrix, [N, N]
+
+    if goal_labels is None:
+        goal_labels = [f"g{i}" for i in range(len(task_embedding_memory))]
+
+    print("\nGoal embedding cosine similarity matrix:")
+    header = " " + " ".join([f"{str(label):>10s}" for label in goal_labels])
+    print(header)
+
+    for i, row in enumerate(sim):
+        row_str = " ".join([f"{x:10.{decimals}f}" for x in row])
+        print(f"{str(goal_labels[i]):>8s} {row_str}")
+
+    if len(task_embedding_memory) > 1:
+        upper = sim[np.triu_indices(len(task_embedding_memory), k=1)]
+        print(f"\nOff-diagonal mean similarity: {upper.mean():.{decimals}f}")
+        print(f"Off-diagonal min similarity: {upper.min():.{decimals}f}")
+        print(f"Off-diagonal max similarity: {upper.max():.{decimals}f}")
+
+def shared_pca_projection(emb_before, emb_after, n_components=2):
+    X = np.concatenate([emb_before, emb_after], axis=0)
+    pca = PCA(n_components=n_components)
+    Xp = pca.fit_transform(X)
+    Z_before = Xp[:emb_before.shape[0]]
+    Z_after = Xp[emb_before.shape[0]:]
+    return Z_before, Z_after, pca
+
+def plot_before_after(Z_before, Z_after, label_before, label_after, title):
+    plt.figure(figsize=(7, 6))
+    plt.scatter(Z_before[:, 0], Z_before[:, 1], s=25, alpha=0.7, label=label_before)
+    plt.scatter(Z_after[:, 0], Z_after[:, 1], s=25, alpha=0.7, label=label_after)
+    plt.xlabel("PC 1")
+    plt.ylabel("PC 2")
+    plt.title(title)
+    plt.legend()
+    plt.grid(alpha=0.25)
+    plt.tight_layout()
+    plt.show()
+
+def visualise_q_table(goal, q_network, eval_returns=None, task_embedding=None, device=None, make_env=None):
+    q_network.eval()
+
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    if make_env is None:
+        raise ValueError("make_env function must be provided to create the evaluation environment.")
+    
+    eval_env_first = make_env(goal=goal)
+
+    base_env = eval_env_first.unwrapped if hasattr(eval_env_first, "unwrapped") else eval_env_first
+    env_action_names = getattr(base_env, "action_names", ["Up", "Down", "Left", "Right"])
+
+    if task_embedding is not None:
+        if not torch.is_tensor(task_embedding):
+            task_embedding = torch.tensor(task_embedding, dtype=torch.float32, device=device)
+        else:
+            task_embedding = task_embedding.to(device).float()
+
+    def dqn_policy_fn(obs, q_network, goal, task_embedding=None):
+        obs_t = torch.tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
+
+        with torch.no_grad():
+            if task_embedding is None:
+                goal_arr = np.array(goal, dtype=np.float32)
+                goal_t = torch.tensor(goal_arr, dtype=torch.float32, device=device).unsqueeze(0)
+                q_vals = q_network.q_val_for_argmax_action(obs_t, goal_t)
+            else:
+                q_vals = q_network.q_val_for_argmax_action_from_embedding(
+                    obs_t,
+                    task_embedding,
+                    normalize_embedding=False,
+                )
+
+            action = int(q_vals.argmax(dim=-1).item())
+
+        return action
+
+    def dqn_value_fn(obs_batch, q_network, goal, task_embedding=None):
+        obs_t = torch.tensor(obs_batch, dtype=torch.float32, device=device)
+        B = obs_t.shape[0]
+
+        with torch.no_grad():
+            if task_embedding is None:
+                goal_arr = np.array(goal, dtype=np.float32)
+                goal_t = torch.tensor(goal_arr, dtype=torch.float32, device=device).unsqueeze(0)
+                goal_batch = goal_t.expand(B, -1)
+                q_vals = q_network.q_val_for_argmax_action(obs_t, goal_batch)
+            else:
+                q_vals = q_network.q_val_for_argmax_action_from_embedding(
+                    obs_t,
+                    task_embedding,
+                    normalize_embedding=False,
+                )
+
+            q_vals = q_vals.cpu().numpy()
+
+        return q_vals
+
+    plot_policy_rollouts(
+        env=eval_env_first,
+        policy_fn=lambda obs: dqn_policy_fn(
+            obs,
+            q_network=q_network,
+            goal=goal,
+            task_embedding=task_embedding,
+        ),
+        goal_pos=goal,
+        eval_episodes=8,
+        n_cols=4,
+        is_discrete=True,
+        step_point_size=12,
+        start_size=60,
+        end_size=50,
+        goal_size=130,
+        arrow_width=0.01,
+    )
+
+    plot_q_diagnostics(
+        env=eval_env_first,
+        value_fn=lambda obs_batch: dqn_value_fn(
+            obs_batch,
+            q_network=q_network,
+            goal=goal,
+            task_embedding=task_embedding,
+        ),
+        actor_fn=None,
+        is_discrete=True,
+        num_actions=eval_env_first.action_space.n,
+        action_names=env_action_names,
+        goal_pos=goal,
+        eval_returns=eval_returns,
+    )
+
+    eval_env_first.close()
+    q_network.train()
+
+    return q_network
+
+
+def visualise_embeddings(goal, q_network, device=None, make_env=None):
+
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if make_env is None:
+        raise ValueError("make_env function must be provided to create the evaluation environment.")
+    eval_env_first = make_env(goal=goal)
+    base_goal = np.array(goal, dtype=np.float32)
+    base_goal_t = torch.tensor(base_goal, dtype=torch.float32, device=device).unsqueeze(0)
+
+    states_base, coords_base = collect_valid_states_fourrooms(eval_env_first)
+    obs_base_t = torch.tensor(states_base, dtype=torch.float32, device=device)
+
+    q_network.eval()
+    with torch.no_grad():
+        # No encode_state in the new class, so remove phi_s_base analysis
+        psi_z_base = q_network.encode_goal(base_goal_t).cpu().numpy()  # [1, D]
+
+        N = obs_base_t.shape[0]
+        A = q_network.num_actions
+
+        act_onehot = F.one_hot(
+            torch.arange(A, device=device),
+            num_classes=q_network.action_dim
+        ).float()                                                      # [A, A]
+
+        obs_rep = obs_base_t.unsqueeze(1).expand(-1, A, -1)            # [N, A, obs_dim]
+        act_rep = act_onehot.unsqueeze(0).expand(N, -1, -1)            # [N, A, A]
+
+        obs_flat = obs_rep.reshape(N * A, q_network.obs_dim)           # [N*A, obs_dim]
+        act_flat = act_rep.reshape(N * A, q_network.action_dim)        # [N*A, A]
+
+        phi_sa_base = q_network.encode_state_action(obs_flat, act_flat).cpu().numpy()  # [N*A, D]
+        phi_sa_base = phi_sa_base.reshape(N, A, q_network.rep_dim)     # [N, A, D]
+
+    N_base, A_base, D_base = phi_sa_base.shape
+    phi_sa_base_flat = phi_sa_base.reshape(N_base * A_base, D_base)
+
+    print("states_base:", states_base.shape)
+    print("coords_base:", coords_base.shape)
+    print("phi(s,a) base:", phi_sa_base.shape)
+    print("psi(z) base:", psi_z_base.shape)
+
+    # Convert to torch
+    phisa_t = torch.tensor(phi_sa_base_flat, dtype=torch.float32)
+    psi_t   = torch.tensor(psi_z_base.squeeze(0), dtype=torch.float32)  # [D]
+
+    # 1) Norm statistics
+    norms = phisa_t.norm(dim=-1)   # [N*A]
+    print(f"phi(s,a) norms: mean={norms.mean().item():.4f}, std={norms.std().item():.4f}")
+
+    # 2) Effective rank (via singular values)
+    phisa_centered = phisa_t - phisa_t.mean(dim=0, keepdim=True)
+    U, S, Vh = torch.linalg.svd(phisa_centered, full_matrices=False)
+    S_np = S.cpu().numpy()
+    explained = (S_np ** 2) / (S_np ** 2).sum()
+    cumulative = explained.cumsum()
+
+    print("top 5 singular values:", S_np[:5])
+    print("cumulative variance (first 5 dims):", cumulative[:5])
+
+    psi_unit = psi_t / (psi_t.norm() + 1e-8)
+    phisa_unit = phisa_t / (phisa_t.norm(dim=-1, keepdim=True) + 1e-8)
+
+    # 2) Compute cosine similarities
+    cos = phisa_unit @ psi_unit  # [N*A]
+    cos_np = cos.cpu().numpy()
+
+    print(f"cos(phi(s,a), psi): mean={cos_np.mean():.4f}, std={cos_np.std():.4f}")
+
+    # 3) Create side-by-side plots
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+
+    # Left: Variance spectrum
+    axes[0].plot(cumulative, marker="o")
+    axes[0].set_xlabel("Number of components")
+    axes[0].set_ylabel("Cumulative variance explained")
+    axes[0].set_title(f"Variance spectrum of phi(s,a) [{goal}]")
+    axes[0].grid(alpha=0.3)
+
+    # Right: Cosine similarity histogram
+    axes[1].hist(cos_np, bins=40, alpha=0.7)
+    axes[1].set_xlabel("cos(phi(s,a), psi(z))")
+    axes[1].set_ylabel("count")
+    axes[1].set_title(f"Cosine histo phi(s,a) vs psi(z) [{goal}]")
+    axes[1].grid(alpha=0.3)
+
+    plt.tight_layout()
+    plt.show()
+
+
+    eval_env_first.close()

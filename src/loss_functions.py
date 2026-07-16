@@ -42,11 +42,9 @@ def sigreg_loss(representation_network, sketch_dim=64, eps=1e-6):
         D = sketch_dim
 
     cov = (z.T @ z) / (B - 1 + eps)
-    var_mean = cov.diag().mean()
-    cov_norm = cov / (var_mean + eps)
 
     I = torch.eye(D, device=z.device, dtype=z.dtype)
-    loss = ((cov_norm - I) ** 2).sum() / D
+    loss = ((cov - I) ** 2).sum() / D
     return loss
 
 

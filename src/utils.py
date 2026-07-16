@@ -2,6 +2,8 @@ from dataclasses import dataclass
 import torch
 import numpy as np
 import random
+import torch.nn.functional as F
+import matplotlib.pyplot as plt
 
 
 @dataclass # typed container for batches of replay data
@@ -532,3 +534,242 @@ def set_seed(seed: int):
 def build_goal_batch(goal, batch_size, device):
     goal_arr = np.array(goal, dtype=np.float32)
     return torch.tensor(goal_arr, dtype=torch.float32, device=device).unsqueeze(0).expand(batch_size, -1)
+
+
+def get_base_env(env):
+    return env.unwrapped
+
+def collect_valid_states_fourrooms(env):
+
+    base_env = get_base_env(env)
+
+    if not hasattr(base_env, "_free_cells"):
+        raise RuntimeError("Base env does not expose _free_cells.")
+
+    coords = np.asarray(base_env._free_cells, dtype=np.int32)      # [N, 2]
+    states = coords.astype(np.float32)                             # obs == (x, y)
+
+    return states, coords
+
+def estimate_fisher_diag(
+    model,
+    target_model,
+    replay_buffer,
+    goal,
+    num_actions,
+    device=None,
+    gamma=0.99,
+    batch_size=256,
+    n_batches=64,
+    prefix_filter="sa_encoder",
+    use_success_only=False,
+):
+
+    model.eval()
+    target_model.eval()
+
+    fisher_diag = {}
+
+    # Initialise Fisher entries for selected parameters
+    for name, p in model.named_parameters():
+        if not p.requires_grad:
+            continue
+
+        if prefix_filter is None:
+            fisher_diag[name] = torch.zeros_like(p, device=device)
+        elif isinstance(prefix_filter, str):
+            if name.startswith(prefix_filter):
+                fisher_diag[name] = torch.zeros_like(p, device=device)
+        else:
+            if any(name.startswith(pref) for pref in prefix_filter):
+                fisher_diag[name] = torch.zeros_like(p, device=device)
+
+    if len(fisher_diag) == 0:
+        raise ValueError("No parameters matched prefix_filter for Fisher estimation.")
+
+    # Accumulate squared gradients
+    num_batches_used = 0
+
+    for _ in range(n_batches):
+        if use_success_only and hasattr(replay_buffer, "sample_success"):
+            batch = replay_buffer.sample_success(batch_size)
+        else:
+            batch = replay_buffer.sample(batch_size)
+
+        obs_t = batch.obs          # [B, obs_dim]
+        act_t = batch.actions.long()   # [B, 1]
+        rew_t = batch.rewards      # [B, 1]
+        next_obs_t = batch.next_obs
+        term_t = batch.terminated
+        trunc_t = batch.truncated
+        done_t = torch.clamp(term_t + trunc_t, 0.0, 1.0)
+
+        B = obs_t.shape[0]
+        goal_batch = build_goal_batch(goal, B, device)
+
+        with torch.no_grad():
+            next_q_vals = target_model.q_val_for_argmax_action(next_obs_t, goal_batch)
+            next_q = next_q_vals.max(dim=-1, keepdim=True).values
+            target = rew_t + gamma * (1.0 - done_t) * next_q
+
+        act_onehot = torch.nn.functional.one_hot(
+            act_t.squeeze(-1),
+            num_classes=num_actions
+        ).float()
+
+        current_q = model(obs_t, act_onehot, goal_batch)
+        td_loss = torch.nn.functional.mse_loss(current_q, target)
+
+        model.zero_grad(set_to_none=True)
+        td_loss.backward()
+
+        for name, p in model.named_parameters():
+            if name in fisher_diag and p.grad is not None:
+                fisher_diag[name] += p.grad.detach().pow(2)
+
+        num_batches_used += 1
+
+    if num_batches_used == 0:
+        raise RuntimeError("No batches used in Fisher estimation.")
+
+    # Average over batches
+    for name in fisher_diag:
+        fisher_diag[name] /= float(num_batches_used)
+
+    # Per-parameter normalisation to stabilise scale
+    eps = 1e-8
+    for name, F in fisher_diag.items():
+        mean_val = F.mean()
+        if mean_val > 0:
+            fisher_diag[name] = F / (mean_val + eps)
+
+    scale = 10.0  # try 10, 50, etc.
+    for name in fisher_diag:
+        fisher_diag[name] = fisher_diag[name] * scale
+
+    model.train()
+    target_model.train()
+
+    return fisher_diag
+
+
+def extract_mean_sa_embedding(
+    q_network,
+    buffer,
+    num_actions,
+    batch_size=256,
+    device=None,
+    as_numpy=True,
+):
+
+    if device is None:
+        device = next(q_network.parameters()).device
+
+    n_available = len(buffer)
+    if n_available == 0:
+        raise ValueError("Replay buffer is empty; cannot extract SA embeddings.")
+
+    probe_bs = min(batch_size, n_available)
+
+    q_network.eval()
+    with torch.no_grad():
+        probe_batch = buffer.sample(probe_bs)
+        obs_t = probe_batch.obs.to(device)                              # [B, obs_dim]
+        act_idx = probe_batch.actions.long().squeeze(-1).to(device)    # [B]
+        act_onehot = F.one_hot(act_idx, num_classes=num_actions).float()
+
+        phi_sa = q_network.encode_state_action(obs_t, act_onehot)      # [B, D]
+        mean_sa_embedding = phi_sa.mean(dim=0)                         # [D]
+
+    if as_numpy:
+        return mean_sa_embedding.detach().cpu().numpy()
+    return mean_sa_embedding.detach().cpu()
+
+
+def extract_fixed_probe_sa_embedding(
+    q_network,
+    obs_probe,
+    act_probe_idx,
+    num_actions,
+    device=None,
+    as_numpy=True,
+):
+
+    if device is None:
+        device = next(q_network.parameters()).device
+
+    if not torch.is_tensor(obs_probe):
+        obs_probe = torch.tensor(obs_probe, dtype=torch.float32, device=device)
+    else:
+        obs_probe = obs_probe.to(device).float()
+
+    obs_probe = obs_probe.unsqueeze(0)  # [1, obs_dim]
+
+    act_probe = F.one_hot(
+        torch.tensor([act_probe_idx], device=device),
+        num_classes=num_actions,
+    ).float()  # [1, action_dim]
+
+    q_network.eval()
+    with torch.no_grad():
+        phi_sa = q_network.encode_state_action(obs_probe, act_probe)   # [1, D]
+        phi_sa = phi_sa.squeeze(0)
+
+    if as_numpy:
+        return phi_sa.detach().cpu().numpy()
+    return phi_sa.detach().cpu()
+
+
+def extract_sa_batch_for_isotropy(
+    q_network,
+    buffer,
+    num_actions,
+    batch_size=1024,
+    device=None,
+    as_numpy=True,
+):
+ 
+    if device is None:
+        device = next(q_network.parameters()).device
+
+    n_available = len(buffer)
+    if n_available == 0:
+        raise ValueError("Replay buffer is empty; cannot extract SA batch.")
+
+    probe_bs = min(batch_size, n_available)
+
+    q_network.eval()
+    with torch.no_grad():
+        probe_batch = buffer.sample(probe_bs)
+        obs_t = probe_batch.obs.to(device)
+        act_idx = probe_batch.actions.long().squeeze(-1).to(device)
+        act_onehot = F.one_hot(act_idx, num_classes=num_actions).float()
+
+        phi_sa = q_network.encode_state_action(obs_t, act_onehot)      # [B, D]
+
+    if as_numpy:
+        return phi_sa.detach().cpu().numpy()
+    return phi_sa.detach().cpu()
+
+def compute_embedding_drift(overall_results, q_net, device):
+    drift = {}
+    for goal, data in overall_results.items():
+        if len(data["task_embeddings"]) == 0:
+            continue
+
+        # e.g. embedding right after this goal was learned
+        emb_old = np.asarray(data["task_embeddings"][0], dtype=np.float32)
+
+        # embedding now, with final goal encoder
+        goal_arr = np.array(goal, dtype=np.float32)
+        goal_t = torch.tensor(goal_arr, dtype=torch.float32, device=device).unsqueeze(0)
+        with torch.no_grad():
+            emb_new = q_net.encode_goal(goal_t).squeeze(0).cpu().numpy()
+
+        # cosine similarity
+        def _norm(x):
+            return x / (np.linalg.norm(x) + 1e-8)
+
+        cos = float(np.dot(_norm(emb_old), _norm(emb_new)))
+        drift[goal] = cos
+    return drift

@@ -408,3 +408,4 @@ class MazeGoalWrapper(gym.Wrapper):
                 info["task_reuse_ratio"] = self.state_reuse_ratio()
 
         return obs, reward, terminated, truncated, info
+    
