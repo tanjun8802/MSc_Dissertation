@@ -11,6 +11,7 @@ dependencies = [
   "pandas>=2.2",
   "torch>=2.11",
   "gymnasium>=0.29",
+  "ale-py>=0.10.2",
   "mujoco>=3.1",
   "robosuite>=1.5",
   "imageio>=2.37",
