@@ -773,3 +773,62 @@ def compute_embedding_drift(overall_results, q_net, device):
         cos = float(np.dot(_norm(emb_old), _norm(emb_new)))
         drift[goal] = cos
     return drift
+
+def collect_weight_snapshot(
+    qnet,
+    goal_label,
+    stage_label,
+    sa_keywords_local,
+    goal_keywords_local,
+    max_samples_per_group=40000,
+):
+    sa_weights = []
+    goal_weights = []
+
+    for name, param in qnet.named_parameters():
+        vals = param.detach().cpu().numpy().ravel()
+        lname = name.lower()
+
+        if any(k in lname for k in sa_keywords_local):
+            sa_weights.append(vals)
+        elif any(k in lname for k in goal_keywords_local):
+            goal_weights.append(vals)
+
+    sa_all = np.concatenate(sa_weights) if len(sa_weights) else np.array([], dtype=np.float32)
+    goal_all = np.concatenate(goal_weights) if len(goal_weights) else np.array([], dtype=np.float32)
+
+    rng = np.random.default_rng(0)
+
+    def sample_vec(x, max_n):
+        if x.size <= max_n:
+            return x.astype(np.float32)
+        idx = rng.choice(x.size, size=max_n, replace=False)
+        return x[idx].astype(np.float32)
+
+    snapshot = {
+        "goal": str(goal_label),
+        "stage": str(stage_label),
+        "sa_sample": sample_vec(sa_all, max_samples_per_group),
+        "goal_sample": sample_vec(goal_all, max_samples_per_group),
+        "sa_stats": {
+            "count": int(sa_all.size),
+            "mean": float(sa_all.mean()) if sa_all.size else np.nan,
+            "std": float(sa_all.std()) if sa_all.size else np.nan,
+            "min": float(sa_all.min()) if sa_all.size else np.nan,
+            "max": float(sa_all.max()) if sa_all.size else np.nan,
+            "p01": float(np.quantile(sa_all, 0.01)) if sa_all.size else np.nan,
+            "p50": float(np.quantile(sa_all, 0.50)) if sa_all.size else np.nan,
+            "p99": float(np.quantile(sa_all, 0.99)) if sa_all.size else np.nan,
+        },
+        "goal_stats": {
+            "count": int(goal_all.size),
+            "mean": float(goal_all.mean()) if goal_all.size else np.nan,
+            "std": float(goal_all.std()) if goal_all.size else np.nan,
+            "min": float(goal_all.min()) if goal_all.size else np.nan,
+            "max": float(goal_all.max()) if goal_all.size else np.nan,
+            "p01": float(np.quantile(goal_all, 0.01)) if goal_all.size else np.nan,
+            "p50": float(np.quantile(goal_all, 0.50)) if goal_all.size else np.nan,
+            "p99": float(np.quantile(goal_all, 0.99)) if goal_all.size else np.nan,
+        },
+    }
+    return snapshot

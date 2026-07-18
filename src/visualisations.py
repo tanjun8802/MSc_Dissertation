@@ -7,6 +7,9 @@ from sklearn.decomposition import PCA
 import torch
 import torch.nn.functional as F
 from utils import collect_valid_states_fourrooms
+from pathlib import Path
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 
 def _to_coord_set(cells):
@@ -496,13 +499,8 @@ def plot_full_embedding_dashboard_html(
     sa_keywords=("sa_encoder",),
     goal_keywords=("goal_encoder",),
     bins=80,
+    weights_his=None,
 ):
-    import numpy as np
-    import torch
-    from pathlib import Path
-    from sklearn.decomposition import PCA
-    import plotly.graph_objects as go
-    from plotly.subplots import make_subplots
 
     def _to_numpy_embedding(x):
         if isinstance(x, torch.Tensor):
@@ -648,67 +646,220 @@ def plot_full_embedding_dashboard_html(
     sa_keywords_local = [k.lower() for k in _ensure_keyword_iterable(sa_keywords)]
     goal_keywords_local = [k.lower() for k in _ensure_keyword_iterable(goal_keywords)]
 
+        # ---------------------------
+    # Window 1: weights + slider
     # ---------------------------
-    # Window 1: weights
-    # ---------------------------
-    sa_weights = []
-    goal_weights = []
+    if weights_his is None or len(weights_his) == 0:
+        sa_weights = []
+        goal_weights = []
 
-    for name, param in qnet.named_parameters():
-        if not param.requires_grad:
-            continue
-        vals = param.detach().cpu().numpy().ravel()
-        lname = name.lower()
+        for name, param in qnet.named_parameters():
+            if not param.requires_grad:
+                continue
+            vals = param.detach().cpu().numpy().ravel()
+            lname = name.lower()
 
-        if any(k in lname for k in sa_keywords_local):
-            sa_weights.append(vals)
-        elif any(k in lname for k in goal_keywords_local):
-            goal_weights.append(vals)
+            if any(k in lname for k in sa_keywords_local):
+                sa_weights.append(vals)
+            elif any(k in lname for k in goal_keywords_local):
+                goal_weights.append(vals)
 
-    fig_w = make_subplots(
-        rows=1,
-        cols=2,
-        subplot_titles=("SA encoder weights", "Goal encoder weights")
-    )
+        fig_w = make_subplots(
+            rows=1,
+            cols=2,
+            subplot_titles=("SA encoder weights", "Goal encoder weights")
+        )
 
-    if len(sa_weights) > 0:
-        sa_all = np.concatenate(sa_weights)
+        if len(sa_weights) > 0:
+            sa_all = np.concatenate(sa_weights)
+            fig_w.add_trace(
+                go.Histogram(
+                    x=sa_all,
+                    nbinsx=bins,
+                    marker_color="#1f77b4",
+                    opacity=0.8,
+                    name="SA encoder"
+                ),
+                row=1, col=1
+            )
+
+        if len(goal_weights) > 0:
+            goal_all = np.concatenate(goal_weights)
+            fig_w.add_trace(
+                go.Histogram(
+                    x=goal_all,
+                    nbinsx=bins,
+                    marker_color="#ff7f0e",
+                    opacity=0.8,
+                    name="Goal encoder"
+                ),
+                row=1, col=2
+            )
+
+        fig_w.update_xaxes(title_text="Weight value", row=1, col=1)
+        fig_w.update_xaxes(title_text="Weight value", row=1, col=2)
+        fig_w.update_yaxes(title_text="Count", row=1, col=1)
+        fig_w.update_yaxes(title_text="Count", row=1, col=2)
+        fig_w.update_layout(
+            title=title_weights,
+            template="plotly_white",
+            bargap=0.05,
+            showlegend=False,
+            margin=dict(l=40, r=40, t=70, b=40)
+        )
+
+    else:
+        fig_w = make_subplots(
+            rows=1,
+            cols=2,
+            subplot_titles=("SA encoder weights", "Goal encoder weights")
+        )
+
+        first = weights_his[0]
+
+        sa0 = np.asarray(first.get("sa_sample", []), dtype=np.float32)
+        goal0 = np.asarray(first.get("goal_sample", []), dtype=np.float32)
+
+        def _stats_text(snap):
+            sa_stats = snap.get("sa_stats", {})
+            goal_stats = snap.get("goal_stats", {})
+            return (
+                f"{title_weights}"
+                f"<br><sup>{snap.get('stage', 'snapshot')} | "
+                f"SA μ={sa_stats.get('mean', np.nan):.4f}, σ={sa_stats.get('std', np.nan):.4f} | "
+                f"Goal μ={goal_stats.get('mean', np.nan):.4f}, σ={goal_stats.get('std', np.nan):.4f}</sup>"
+            )
+
         fig_w.add_trace(
             go.Histogram(
-                x=sa_all,
+                x=sa0,
                 nbinsx=bins,
                 marker_color="#1f77b4",
                 opacity=0.8,
-                name="SA encoder"
+                name="SA encoder",
+                histnorm=""
             ),
             row=1, col=1
         )
 
-    if len(goal_weights) > 0:
-        goal_all = np.concatenate(goal_weights)
         fig_w.add_trace(
             go.Histogram(
-                x=goal_all,
+                x=goal0,
                 nbinsx=bins,
                 marker_color="#ff7f0e",
                 opacity=0.8,
-                name="Goal encoder"
+                name="Goal encoder",
+                histnorm=""
             ),
             row=1, col=2
         )
 
-    fig_w.update_xaxes(title_text="Weight value", row=1, col=1)
-    fig_w.update_xaxes(title_text="Weight value", row=1, col=2)
-    fig_w.update_yaxes(title_text="Count", row=1, col=1)
-    fig_w.update_yaxes(title_text="Count", row=1, col=2)
-    fig_w.update_layout(
-        title=title_weights,
-        template="plotly_white",
-        bargap=0.05,
-        showlegend=False,
-        margin=dict(l=40, r=40, t=70, b=40)
-    )
+        frames = []
+        slider_steps = []
 
+        for i, snap in enumerate(weights_his):
+            sa_vals = np.asarray(snap.get("sa_sample", []), dtype=np.float32)
+            goal_vals = np.asarray(snap.get("goal_sample", []), dtype=np.float32)
+
+            frames.append(
+                go.Frame(
+                    name=str(i),
+                    data=[
+                        go.Histogram(
+                            x=sa_vals,
+                            nbinsx=bins,
+                            marker_color="#1f77b4",
+                            opacity=0.8,
+                            name="SA encoder",
+                            histnorm=""
+                        ),
+                        go.Histogram(
+                            x=goal_vals,
+                            nbinsx=bins,
+                            marker_color="#ff7f0e",
+                            opacity=0.8,
+                            name="Goal encoder",
+                            histnorm=""
+                        ),
+                    ],
+                    layout=go.Layout(
+                        title=_stats_text(snap)
+                    )
+                )
+            )
+
+            slider_steps.append(
+                {
+                    "method": "animate",
+                    "label": snap.get("stage", f"step_{i}"),
+                    "args": [
+                        [str(i)],
+                        {
+                            "mode": "immediate",
+                            "frame": {"duration": 0, "redraw": True},
+                            "transition": {"duration": 0},
+                        },
+                    ],
+                }
+            )
+
+        fig_w.frames = frames
+
+        fig_w.update_xaxes(title_text="Weight value", row=1, col=1)
+        fig_w.update_xaxes(title_text="Weight value", row=1, col=2)
+        fig_w.update_yaxes(title_text="Count", row=1, col=1)
+        fig_w.update_yaxes(title_text="Count", row=1, col=2)
+
+        fig_w.update_layout(
+            title=_stats_text(first),
+            template="plotly_white",
+            bargap=0.05,
+            showlegend=False,
+            margin=dict(l=40, r=40, t=95, b=70),
+            sliders=[
+                {
+                    "active": 0,
+                    "pad": {"t": 20},
+                    "currentvalue": {"prefix": "Weights snapshot: "},
+                    "steps": slider_steps,
+                }
+            ],
+            updatemenus=[
+                {
+                    "type": "buttons",
+                    "direction": "left",
+                    "x": 0.0,
+                    "y": 1.18,
+                    "showactive": False,
+                    "buttons": [
+                        {
+                            "label": "Play",
+                            "method": "animate",
+                            "args": [
+                                None,
+                                {
+                                    "fromcurrent": True,
+                                    "transition": {"duration": 250},
+                                    "frame": {"duration": 500, "redraw": True},
+                                },
+                            ],
+                        },
+                        {
+                            "label": "Pause",
+                            "method": "animate",
+                            "args": [
+                                [None],
+                                {
+                                    "mode": "immediate",
+                                    "transition": {"duration": 0},
+                                    "frame": {"duration": 0, "redraw": False},
+                                },
+                            ],
+                        },
+                    ],
+                }
+            ],
+        )
     # ---------------------------
     # Window 2: task embeddings PCA
     # ---------------------------
@@ -1033,7 +1184,7 @@ def plot_before_after(Z_before, Z_after, label_before, label_after, title):
     plt.tight_layout()
     plt.show()
 
-def visualise_q_table(goal, q_network, eval_returns=None, task_embedding=None, device=None, make_env=None):
+def visualise_q_table(goal, q_network, eval_returns=None, task_embedding=None, device=None, make_env=None, reset_options=None):
     q_network.eval()
 
     if device is None:
@@ -1110,6 +1261,7 @@ def visualise_q_table(goal, q_network, eval_returns=None, task_embedding=None, d
         end_size=50,
         goal_size=130,
         arrow_width=0.01,
+        reset_options=reset_options
     )
 
     plot_q_diagnostics(
