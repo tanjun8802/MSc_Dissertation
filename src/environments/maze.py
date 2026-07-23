@@ -264,6 +264,8 @@ class MazeGoalWrapper(gym.Wrapper):
         track_coverage=True,
         goal_radius=0.5,
         movement_eps=1e-8,
+        movement_bonus_coef=0.005,
+        movement_bonus_power=1.0,
     ):
         super().__init__(env)
         self.goal_position = np.asarray(goal_position, dtype=np.float32)
@@ -275,6 +277,9 @@ class MazeGoalWrapper(gym.Wrapper):
         self.gamma = float(gamma)
         self.goal_radius = float(goal_radius)
         self.movement_eps = float(movement_eps)
+
+        self.movement_bonus_coef = float(movement_bonus_coef)
+        self.movement_bonus_power = float(movement_bonus_power)
 
         self.track_coverage = bool(track_coverage)
         self.current_task = None
@@ -292,6 +297,12 @@ class MazeGoalWrapper(gym.Wrapper):
             self.env.set_goal_position(self.goal_position)
         else:
             self.env._goal_pos = np.asarray(self.goal_position, dtype=np.float32).copy()
+
+    def _movement_bonus(self, state, next_state):
+        move_dist = float(np.linalg.norm(np.asarray(next_state) - np.asarray(state)))
+        if move_dist <= self.movement_eps:
+            return 0.0
+        return self.movement_bonus_coef * (move_dist ** self.movement_bonus_power)
 
     def _state_id_from_obs(self, obs):
         s = np.asarray(obs, dtype=np.float32).reshape(-1)
@@ -389,15 +400,17 @@ class MazeGoalWrapper(gym.Wrapper):
         self._sync_goal_to_env()
 
     def compute_simple_reward(self, state, action, next_state, goal):
-        gx, gy = goal
         dist_to_goal = float(np.linalg.norm(np.asarray(next_state) - np.asarray(goal)))
         moved = float(np.linalg.norm(np.asarray(next_state) - np.asarray(state))) > self.movement_eps
 
         if dist_to_goal <= self.goal_radius:
-            return self.goal_reward
-        if not moved:
-            return self.wall_penalty
-        return self.step_reward
+            base_r = self.goal_reward
+        elif not moved:
+            base_r = self.wall_penalty
+        else:
+            base_r = self.step_reward
+
+        return base_r + self._movement_bonus(state, next_state)
 
     def compute_shaped_reward(self, state, action, next_state, goal):
         gx, gy = goal
@@ -416,18 +429,18 @@ class MazeGoalWrapper(gym.Wrapper):
         max_d = (width - 1) + (height - 1)
 
         if max_d <= 0:
-            return base_r
+            shaping = 0.0
+        else:
+            def phi(xy):
+                x, y = float(xy[0]), float(xy[1])
+                d = abs(gx - x) + abs(gy - y)
+                return 1.0 - d / max_d
 
-        def phi(xy):
-            x, y = float(xy[0]), float(xy[1])
-            d = abs(gx - x) + abs(gy - y)
-            return 1.0 - d / max_d
+            phi_s = phi(state)
+            phi_sp = phi(next_state)
+            shaping = self.gamma * phi_sp - phi_s
 
-        phi_s = phi(state)
-        phi_sp = phi(next_state)
-
-        shaping = self.gamma * phi_sp - phi_s
-        return base_r + shaping
+        return base_r + shaping + self._movement_bonus(state, next_state)
 
     def reset(self, *, seed=None, options=None):
         options = options or {}

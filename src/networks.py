@@ -124,14 +124,12 @@ class FactorisedDQN_QNetwork(nn.Module):
 
     def encode_goal(self, goal: torch.Tensor) -> torch.Tensor:
         psi = self.goal_encoder(goal)
-        psi = torch.tanh(psi)
         psi = F.normalize(psi, p=2, dim=-1, eps=1e-8)
         return psi
 
     def encode_state_action(self, obs: torch.Tensor, act: torch.Tensor) -> torch.Tensor:
         sa = torch.cat([obs, act], dim=-1)
         phi = self.sa_encoder(sa)
-        phi = torch.tanh(phi)
         phi = F.normalize(phi, p=2, dim=-1, eps=1e-8)
         return phi
 
@@ -237,4 +235,113 @@ class FactorisedDQN_QNetwork(nn.Module):
 
         psi_rep = psi_z.unsqueeze(1).expand(B, A, -1)         # [B, A, D]
         q_vals = (phi_sa * psi_rep).sum(dim=-1)               # [B, A]
+        return q_vals
+
+class Factorised_TD3_Critic(nn.Module):
+    def __init__(
+        self,
+        obs_dim: int,
+        act_dim: int,
+        goal_dim: int = 2,
+        hidden_dim: int = 128,
+        rep_dim: int = 64,
+    ):
+        super().__init__()
+        self.obs_dim = obs_dim
+        self.act_dim = act_dim
+        self.goal_dim = goal_dim
+        self.rep_dim = rep_dim
+
+        self.sa_encoder = nn.Sequential(
+            nn.Linear(obs_dim + act_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, rep_dim),
+        )
+
+        self.goal_encoder = nn.Sequential(
+            nn.Linear(goal_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, rep_dim),
+        )
+
+    def encode_goal(self, goal: torch.Tensor) -> torch.Tensor:
+        psi = self.goal_encoder(goal)
+        psi = F.normalize(psi, p=2, dim=-1, eps=1e-8)
+        return psi
+
+    def encode_state_action(self, obs: torch.Tensor, act: torch.Tensor) -> torch.Tensor:
+        sa = torch.cat([obs, act], dim=-1)
+        phi = self.sa_encoder(sa)
+        phi = F.normalize(phi, p=2, dim=-1, eps=1e-8)
+        return phi
+
+    def forward(
+        self,
+        obs: torch.Tensor,
+        act: torch.Tensor,
+        goal: torch.Tensor,
+    ) -> torch.Tensor:
+        phi_sa = self.encode_state_action(obs, act)
+        psi_g = self.encode_goal(goal)
+        q_vals = (phi_sa * psi_g).sum(dim=-1, keepdim=True)
+        return q_vals
+
+    def forward_with_task_embedding(
+        self,
+        obs: torch.Tensor,
+        act: torch.Tensor,
+        task_embedding: torch.Tensor,
+        normalize_embedding: bool = False,
+    ) -> torch.Tensor:
+        phi_sa = self.encode_state_action(obs, act)
+
+        if task_embedding.dim() == 1:
+            task_embedding = task_embedding.unsqueeze(0).expand(obs.shape[0], -1)
+
+        psi_g = (
+            F.normalize(task_embedding, p=2, dim=-1, eps=1e-8)
+            if normalize_embedding
+            else task_embedding
+        )
+
+        q_vals = (phi_sa * psi_g).sum(dim=-1, keepdim=True)
+        return q_vals
+
+    def forward_from_sa_embedding(
+        self,
+        sa_embedding: torch.Tensor,
+        goal: torch.Tensor,
+        normalize_sa: bool = False,
+    ) -> torch.Tensor:
+        phi_sa = (
+            F.normalize(sa_embedding, p=2, dim=-1, eps=1e-8)
+            if normalize_sa
+            else sa_embedding
+        )
+        psi_g = self.encode_goal(goal)
+        q_vals = (phi_sa * psi_g).sum(dim=-1, keepdim=True)
+        return q_vals
+
+    def forward_from_embeddings(
+        self,
+        sa_embedding: torch.Tensor,
+        task_embedding: torch.Tensor,
+        normalize_sa: bool = False,
+        normalize_task: bool = False,
+    ) -> torch.Tensor:
+        phi_sa = (
+            F.normalize(sa_embedding, p=2, dim=-1, eps=1e-8)
+            if normalize_sa
+            else sa_embedding
+        )
+        psi_g = (
+            F.normalize(task_embedding, p=2, dim=-1, eps=1e-8)
+            if normalize_task
+            else task_embedding
+        )
+
+        if psi_g.dim() == 1:
+            psi_g = psi_g.unsqueeze(0).expand(phi_sa.shape[0], -1)
+
+        q_vals = (phi_sa * psi_g).sum(dim=-1, keepdim=True)
         return q_vals

@@ -2,7 +2,7 @@ import torch
 import torch.nn.functional as F
 
 
-def contrastive_loss(all_logits, temperature=1, reg_coef=0.01):
+def contrastive_loss(all_logits, temperature=1.0, reg_coef=0.01):
 
     labels = torch.arange(all_logits.size(0), device=all_logits.device)
     scaled_logits = all_logits / temperature

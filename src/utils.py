@@ -486,25 +486,37 @@ class TrajectoryReplayBufferDiscrete(TrajectoryReplayBuffer):
         }
 
 
-def evaluate_policy(env, policy_fn, episodes=8, options=None):
-    returns, lengths = [], []
-    for _ in range(episodes):
+def evaluate_policy(
+    env,
+    policy_fn,
+    episodes=8,
+    return_per_episode=False,
+):
+    episode_returns = []
+    episode_lengths = []
 
-        if options is not None and "start_position" in options:
-            obs, _ = env.reset(options={"start_position": options["start_position"]})
-        else:
-            obs, _ = env.reset()
+    for _ in range(episodes):
+        obs, _ = env.reset()
         done = False
-        ep_ret, ep_len = 0.0, 0
+        ep_ret = 0.0
+        ep_len = 0
+
         while not done:
-            act = policy_fn(obs)
-            obs, rew, term, trunc, _ = env.step(act)
+            action = policy_fn(obs)
+            obs, rew, term, trunc, _ = env.step(action)
+            done = term or trunc
             ep_ret += float(rew)
             ep_len += 1
-            done = term or trunc
-        returns.append(ep_ret)
-        lengths.append(ep_len)
-    return float(np.mean(returns)), float(np.mean(lengths))
+
+        episode_returns.append(ep_ret)
+        episode_lengths.append(ep_len)
+
+    mean_ret = float(np.mean(episode_returns)) if len(episode_returns) > 0 else 0.0
+    mean_len = float(np.mean(episode_lengths)) if len(episode_lengths) > 0 else 0.0
+
+    if return_per_episode:
+        return mean_ret, mean_len, episode_returns
+    return mean_ret, mean_len
 
 
 def collect_episode(env, policy_fn):
@@ -832,3 +844,323 @@ def collect_weight_snapshot(
         },
     }
     return snapshot
+
+def compute_weight_change_from_snapshots(before_snap, after_snap, prefix="sa"):
+    """
+    Compare two snapshots produced by collect_weight_snapshot(...).
+
+    prefix:
+        "sa"   -> uses "sa_sample" and "sa_stats"
+        "goal" -> uses "goal_sample" and "goal_stats"
+
+    Returns:
+        dict with vector drift from sampled weights + stats drift.
+    """
+    sample_key = f"{prefix}_sample"
+    stats_key = f"{prefix}_stats"
+
+    if sample_key not in before_snap or sample_key not in after_snap:
+        raise KeyError(f"Missing sample key '{sample_key}' in snapshots")
+    if stats_key not in before_snap or stats_key not in after_snap:
+        raise KeyError(f"Missing stats key '{stats_key}' in snapshots")
+
+    before_sample = np.asarray(before_snap[sample_key], dtype=np.float32).ravel()
+    after_sample = np.asarray(after_snap[sample_key], dtype=np.float32).ravel()
+
+    # They should usually match because you use fixed RNG and same max_samples_per_group,
+    # but align defensively just in case.
+    L = min(before_sample.size, after_sample.size)
+    before_sample = before_sample[:L]
+    after_sample = after_sample[:L]
+
+    diff = after_sample - before_sample
+
+    sample_l2 = float(np.linalg.norm(diff, ord=2))
+    sample_l1 = float(np.linalg.norm(diff, ord=1))
+    sample_linf = float(np.linalg.norm(diff, ord=np.inf)) if L > 0 else 0.0
+    sample_mean_abs = float(np.mean(np.abs(diff))) if L > 0 else 0.0
+    sample_rms = float(np.sqrt(np.mean(diff ** 2))) if L > 0 else 0.0
+
+    before_stats = before_snap[stats_key]
+    after_stats = after_snap[stats_key]
+
+    stats_delta = {}
+    for k in ["mean", "std", "min", "max", "p01", "p50", "p99"]:
+        b = before_stats.get(k, np.nan)
+        a = after_stats.get(k, np.nan)
+        stats_delta[f"delta_{k}"] = float(a - b)
+
+    return {
+        "prefix": prefix,
+        "num_compared": int(L),
+        "sample_l2": sample_l2,
+        "sample_l1": sample_l1,
+        "sample_linf": sample_linf,
+        "sample_mean_abs": sample_mean_abs,
+        "sample_rms": sample_rms,
+        "stats_delta": stats_delta,
+    }
+
+def plot_sa_encoder_changes_across_tasks(overall_results):
+    """
+    Plot SA encoder drift across tasks using values stored in overall_results.
+
+    Expected per goal:
+        overall_results[goal]["sa_weight_change"] -> list of dicts
+    where each dict contains:
+        - sample_l2
+        - sample_l1
+        - sample_linf
+        - sample_mean_abs
+        - sample_rms
+        - stats_delta: {
+            delta_mean, delta_std, delta_min, delta_max, delta_p01, delta_p50, delta_p99
+          }
+    """
+
+    goals = list(overall_results.keys())
+
+    used_goals = []
+    sa_l2 = []
+    sa_rms = []
+    sa_mean_abs = []
+    delta_std = []
+    delta_p50 = []
+
+    for goal in goals:
+        entries = overall_results[goal].get("sa_weight_change", [])
+
+        if len(entries) == 0:
+            continue
+
+        # If multiple seeds later, average across seeds
+        l2_vals = []
+        rms_vals = []
+        mean_abs_vals = []
+        dstd_vals = []
+        dp50_vals = []
+
+        for entry in entries:
+            if entry is None:
+                continue
+
+            l2_vals.append(entry["sample_l2"])
+            rms_vals.append(entry["sample_rms"])
+            mean_abs_vals.append(entry["sample_mean_abs"])
+            dstd_vals.append(entry["stats_delta"]["delta_std"])
+            dp50_vals.append(entry["stats_delta"]["delta_p50"])
+
+        if len(l2_vals) == 0:
+            continue
+
+        used_goals.append(goal)
+        sa_l2.append(np.mean(l2_vals))
+        sa_rms.append(np.mean(rms_vals))
+        sa_mean_abs.append(np.mean(mean_abs_vals))
+        delta_std.append(np.mean(dstd_vals))
+        delta_p50.append(np.mean(dp50_vals))
+
+    if len(used_goals) == 0:
+        raise ValueError("No sa_weight_change entries found in overall_results.")
+
+    x = np.arange(len(used_goals))
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+    # --- Left: sampled drift magnitude ---
+    axes[0].plot(x, sa_l2, marker="o", linewidth=2.5, color="tab:blue", label="Sample L2")
+    axes[0].plot(x, sa_rms, marker="o", linewidth=2.5, color="tab:orange", label="Sample RMS")
+    axes[0].plot(x, sa_mean_abs, marker="o", linewidth=2.5, color="tab:green", label="Mean |Δ|")
+    axes[0].set_title("SA Encoder Drift Magnitude")
+    axes[0].set_xlabel("Goal Index")
+    axes[0].set_ylabel("Drift")
+    axes[0].set_xticks(x)
+    axes[0].set_xticklabels([str(g) for g in used_goals], rotation=45, ha="right")
+    axes[0].grid(True, axis="y", linestyle="--", alpha=0.3)
+    axes[0].legend(loc="best")
+
+    # --- Right: distribution shift ---
+    axes[1].plot(x, delta_std, marker="o", linewidth=2.5, color="tab:red", label="Δ std")
+    axes[1].plot(x, delta_p50, marker="o", linewidth=2.5, color="tab:purple", label="Δ p50")
+    axes[1].axhline(0.0, color="black", linestyle="--", linewidth=1, alpha=0.6)
+    axes[1].set_title("SA Encoder Distribution Shift")
+    axes[1].set_xlabel("Goal Index")
+    axes[1].set_ylabel("Change in Weight Statistics")
+    axes[1].set_xticks(x)
+    axes[1].set_xticklabels([str(g) for g in used_goals], rotation=45, ha="right")
+    axes[1].grid(True, axis="y", linestyle="--", alpha=0.3)
+    axes[1].legend(loc="best")
+
+    fig.suptitle("SA Encoder Changes Across Tasks", fontsize=14)
+    fig.tight_layout()
+    plt.show()
+
+def extract_mean_sa_embedding_td3(
+    critic,
+    buffer,
+    batch_size,
+    device,
+    as_numpy=True,
+):
+    if len(buffer) == 0:
+        raise ValueError("Buffer is empty; cannot extract mean SA embedding.")
+
+    sample_size = min(batch_size, len(buffer))
+    batch = buffer.sample(sample_size)
+
+    obs_t = batch.obs.float().to(device)
+    act_t = batch.actions.float().to(device)
+
+    with torch.no_grad():
+        phi_sa = critic.encode_state_action(obs_t, act_t)   # [B, D]
+        phi_mean = phi_sa.mean(dim=0)                       # [D]
+
+    if as_numpy:
+        return phi_mean.cpu().numpy()
+    return phi_mean
+
+
+def extract_fixed_probe_sa_embedding_td3(
+    critic,
+    obs_probe,
+    act_probe,
+    device,
+    as_numpy=True,
+):
+    obs_t = torch.tensor(obs_probe, dtype=torch.float32, device=device).unsqueeze(0)
+    act_t = torch.tensor(act_probe, dtype=torch.float32, device=device).unsqueeze(0)
+
+    with torch.no_grad():
+        phi_sa = critic.encode_state_action(obs_t, act_t).squeeze(0)   # [D]
+
+    if as_numpy:
+        return phi_sa.cpu().numpy()
+    return phi_sa
+
+
+def extract_sa_batch_for_isotropy_td3(
+    critic,
+    buffer,
+    batch_size,
+    device,
+    as_numpy=True,
+):
+    if len(buffer) == 0:
+        raise ValueError("Buffer is empty; cannot extract SA batch.")
+
+    sample_size = min(batch_size, len(buffer))
+    batch = buffer.sample(sample_size)
+
+    obs_t = batch.obs.float().to(device)
+    act_t = batch.actions.float().to(device)
+
+    with torch.no_grad():
+        phi_sa = critic.encode_state_action(obs_t, act_t)   # [B, D]
+
+    if as_numpy:
+        return phi_sa.cpu().numpy()
+    return phi_sa
+
+def moving_average(values, window):
+    values = np.asarray(values, dtype=np.float32)
+    if values.size == 0:
+        return np.array([], dtype=np.float32)
+
+    window = max(1, int(window))
+    if values.size < window:
+        return np.array([values.mean()], dtype=np.float32)
+
+    kernel = np.ones(window, dtype=np.float32) / float(window)
+    return np.convolve(values, kernel, mode="valid")
+
+
+class EarlyStopperRL:
+
+    def __init__(
+        self,
+        target_reward=0.90,
+        ma_window=5,
+        plateau_patience=8,
+        min_improvement=0.01,
+        max_return_var=None,
+        min_steps_before_stop=0,
+        max_epsilon_for_stop=None,
+    ):
+        self.target_reward = float(target_reward)
+        self.ma_window = int(ma_window)
+        self.plateau_patience = int(plateau_patience)
+        self.min_improvement = float(min_improvement)
+        self.max_return_var = max_return_var
+        self.min_steps_before_stop = int(min_steps_before_stop)
+        self.max_epsilon_for_stop = max_epsilon_for_stop
+
+        self.eval_steps = []
+        self.eval_means = []
+        self.eval_vars = []
+
+        self.best_ma = -np.inf
+        self.best_step = None
+        self.plateau_streak = 0
+
+    def update(self, step, mean_return, episode_returns=None, epsilon=None):
+        step = int(step)
+        mean_return = float(mean_return)
+
+        if episode_returns is None:
+            ret_var = np.nan
+        else:
+            ep = np.asarray(episode_returns, dtype=np.float32)
+            ret_var = float(np.var(ep)) if ep.size > 1 else 0.0
+
+        self.eval_steps.append(step)
+        self.eval_means.append(mean_return)
+        self.eval_vars.append(ret_var)
+
+        ma_series = moving_average(self.eval_means, self.ma_window)
+        current_ma = float(ma_series[-1])
+
+        improved = current_ma > (self.best_ma + self.min_improvement)
+        if improved:
+            self.best_ma = current_ma
+            self.best_step = step
+            self.plateau_streak = 0
+        else:
+            self.plateau_streak += 1
+
+        reached_target = current_ma >= self.target_reward
+        enough_steps = step >= self.min_steps_before_stop
+
+        epsilon_ok = True
+        if self.max_epsilon_for_stop is not None and epsilon is not None:
+            epsilon_ok = float(epsilon) <= float(self.max_epsilon_for_stop)
+
+        variance_ok = True
+        if self.max_return_var is not None and not np.isnan(ret_var):
+            variance_ok = ret_var <= float(self.max_return_var)
+
+        plateau_ok = self.plateau_streak >= self.plateau_patience
+
+        should_stop = (
+            reached_target
+            and plateau_ok
+            and variance_ok
+            and enough_steps
+            #and epsilon_ok
+        )
+
+        info = {
+            "step": step,
+            "mean_return": mean_return,
+            "return_var": ret_var,
+            "current_ma": current_ma,
+            "best_ma": float(self.best_ma),
+            "best_step": self.best_step,
+            "plateau_streak": int(self.plateau_streak),
+            "reached_target": bool(reached_target),
+            "plateau_ok": bool(plateau_ok),
+            "variance_ok": bool(variance_ok),
+            "enough_steps": bool(enough_steps),
+            "epsilon_ok": bool(epsilon_ok),
+            "should_stop": bool(should_stop),
+        }
+        return should_stop, info

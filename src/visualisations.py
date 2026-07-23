@@ -1286,12 +1286,25 @@ def visualise_q_table(goal, q_network, eval_returns=None, task_embedding=None, d
     return q_network
 
 
-def visualise_embeddings(goal, q_network, device=None, make_env=None):
+def visualise_embeddings(
+    goal,
+    q_network,
+    actor=None,
+    device=None,
+    make_env=None,
+    action_mode="auto",
+    probe_actions=None,
+):
+    import numpy as np
+    import torch
+    import torch.nn.functional as F
+    import matplotlib.pyplot as plt
 
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if make_env is None:
         raise ValueError("make_env function must be provided to create the evaluation environment.")
+
     eval_env_first = make_env(goal=goal)
     base_goal = np.array(goal, dtype=np.float32)
     base_goal_t = torch.tensor(base_goal, dtype=torch.float32, device=device).unsqueeze(0)
@@ -1300,44 +1313,120 @@ def visualise_embeddings(goal, q_network, device=None, make_env=None):
     obs_base_t = torch.tensor(states_base, dtype=torch.float32, device=device)
 
     q_network.eval()
+    if actor is not None:
+        actor.eval()
+
     with torch.no_grad():
-        # No encode_state in the new class, so remove phi_s_base analysis
-        psi_z_base = q_network.encode_goal(base_goal_t).cpu().numpy()  # [1, D]
+        psi_z_base = q_network.encode_goal(base_goal_t).cpu().numpy()  # [1, D_goal_like]
 
-        N = obs_base_t.shape[0]
-        A = q_network.num_actions
+        if action_mode == "auto":
+            if hasattr(q_network, "num_actions"):
+                action_mode = "all_discrete"
+            elif actor is not None:
+                action_mode = "actor"
+            else:
+                raise ValueError(
+                    "Could not infer action_mode. Provide actor for continuous mode "
+                    "or set action_mode explicitly."
+                )
 
-        act_onehot = F.one_hot(
-            torch.arange(A, device=device),
-            num_classes=q_network.action_dim
-        ).float()                                                      # [A, A]
+        # ---------------------------------------------------
+        # Discrete mode: enumerate all actions
+        # ---------------------------------------------------
+        if action_mode == "all_discrete":
+            if not hasattr(q_network, "num_actions"):
+                raise ValueError("q_network.num_actions is required for discrete action analysis.")
+            if not hasattr(q_network, "obs_dim"):
+                raise ValueError("q_network.obs_dim is required for discrete action analysis.")
+            if not hasattr(q_network, "rep_dim"):
+                raise ValueError("q_network.rep_dim is required for discrete action analysis.")
 
-        obs_rep = obs_base_t.unsqueeze(1).expand(-1, A, -1)            # [N, A, obs_dim]
-        act_rep = act_onehot.unsqueeze(0).expand(N, -1, -1)            # [N, A, A]
+            N = obs_base_t.shape[0]
+            A = q_network.num_actions
+            action_dim = getattr(q_network, "action_dim", q_network.num_actions)
 
-        obs_flat = obs_rep.reshape(N * A, q_network.obs_dim)           # [N*A, obs_dim]
-        act_flat = act_rep.reshape(N * A, q_network.action_dim)        # [N*A, A]
+            act_onehot = F.one_hot(
+                torch.arange(A, device=device),
+                num_classes=action_dim
+            ).float()
 
-        phi_sa_base = q_network.encode_state_action(obs_flat, act_flat).cpu().numpy()  # [N*A, D]
-        phi_sa_base = phi_sa_base.reshape(N, A, q_network.rep_dim)     # [N, A, D]
+            obs_rep = obs_base_t.unsqueeze(1).expand(-1, A, -1)
+            act_rep = act_onehot.unsqueeze(0).expand(N, -1, -1)
 
-    N_base, A_base, D_base = phi_sa_base.shape
-    phi_sa_base_flat = phi_sa_base.reshape(N_base * A_base, D_base)
+            obs_flat = obs_rep.reshape(N * A, q_network.obs_dim)
+            act_flat = act_rep.reshape(N * A, action_dim)
 
-    print("states_base:", states_base.shape)
-    print("coords_base:", coords_base.shape)
-    print("phi(s,a) base:", phi_sa_base.shape)
-    print("psi(z) base:", psi_z_base.shape)
+            phi_sa_base = q_network.encode_state_action(obs_flat, act_flat).cpu().numpy()
+            phi_sa_base = phi_sa_base.reshape(N, A, -1)
+            phi_sa_base_flat = phi_sa_base.reshape(N * A, -1)
 
-    # Convert to torch
+            print("Embedding mode: all_discrete")
+            print("states_base:", states_base.shape)
+            print("coords_base:", coords_base.shape)
+            print("phi(s,a) base:", phi_sa_base.shape)
+            print("psi(z) / task code base:", psi_z_base.shape)
+
+        # ---------------------------------------------------
+        # Continuous mode: actor action for each state
+        # ---------------------------------------------------
+        elif action_mode == "actor":
+            if actor is None:
+                raise ValueError("actor must be provided when action_mode='actor'.")
+
+            N = obs_base_t.shape[0]
+            goal_batch = base_goal_t.expand(N, -1)
+
+            act_base = actor(obs_base_t, goal_batch)
+            phi_sa_base = q_network.encode_state_action(obs_base_t, act_base).cpu().numpy()
+            phi_sa_base_flat = phi_sa_base
+
+            print("Embedding mode: actor")
+            print("states_base:", states_base.shape)
+            print("coords_base:", coords_base.shape)
+            print("actions from actor:", act_base.shape)
+            print("phi(s, pi(s,g)) base:", phi_sa_base.shape)
+            print("psi(z) / task code base:", psi_z_base.shape)
+
+        # ---------------------------------------------------
+        # Continuous mode: fixed probe actions
+        # ---------------------------------------------------
+        elif action_mode == "probe":
+            if probe_actions is None:
+                raise ValueError("probe_actions must be provided when action_mode='probe'.")
+
+            probe_actions_t = torch.tensor(np.asarray(probe_actions), dtype=torch.float32, device=device)
+            N = obs_base_t.shape[0]
+            K = probe_actions_t.shape[0]
+
+            obs_rep = obs_base_t.unsqueeze(1).expand(-1, K, -1)
+            act_rep = probe_actions_t.unsqueeze(0).expand(N, -1, -1)
+
+            obs_flat = obs_rep.reshape(N * K, obs_base_t.shape[1])
+            act_flat = act_rep.reshape(N * K, probe_actions_t.shape[1])
+
+            phi_sa_base = q_network.encode_state_action(obs_flat, act_flat).cpu().numpy()
+            phi_sa_base = phi_sa_base.reshape(N, K, -1)
+            phi_sa_base_flat = phi_sa_base.reshape(N * K, -1)
+
+            print("Embedding mode: probe")
+            print("states_base:", states_base.shape)
+            print("coords_base:", coords_base.shape)
+            print("probe_actions:", probe_actions_t.shape)
+            print("phi(s,a_probe) base:", phi_sa_base.shape)
+            print("psi(z) / task code base:", psi_z_base.shape)
+
+        else:
+            raise ValueError(f"Unknown action_mode: {action_mode}")
+
+    # --------------------------------------------
+    # Shared diagnostics
+    # --------------------------------------------
     phisa_t = torch.tensor(phi_sa_base_flat, dtype=torch.float32)
-    psi_t   = torch.tensor(psi_z_base.squeeze(0), dtype=torch.float32)  # [D]
+    psi_t = torch.tensor(psi_z_base.squeeze(0), dtype=torch.float32)
 
-    # 1) Norm statistics
-    norms = phisa_t.norm(dim=-1)   # [N*A]
+    norms = phisa_t.norm(dim=-1)
     print(f"phi(s,a) norms: mean={norms.mean().item():.4f}, std={norms.std().item():.4f}")
 
-    # 2) Effective rank (via singular values)
     phisa_centered = phisa_t - phisa_t.mean(dim=0, keepdim=True)
     U, S, Vh = torch.linalg.svd(phisa_centered, full_matrices=False)
     S_np = S.cpu().numpy()
@@ -1347,34 +1436,773 @@ def visualise_embeddings(goal, q_network, device=None, make_env=None):
     print("top 5 singular values:", S_np[:5])
     print("cumulative variance (first 5 dims):", cumulative[:5])
 
-    psi_unit = psi_t / (psi_t.norm() + 1e-8)
-    phisa_unit = phisa_t / (phisa_t.norm(dim=-1, keepdim=True) + 1e-8)
+    can_compare_cosine = (phisa_t.shape[-1] == psi_t.shape[-1])
 
-    # 2) Compute cosine similarities
-    cos = phisa_unit @ psi_unit  # [N*A]
-    cos_np = cos.cpu().numpy()
+    if can_compare_cosine:
+        psi_unit = psi_t / (psi_t.norm() + 1e-8)
+        phisa_unit = phisa_t / (phisa_t.norm(dim=-1, keepdim=True) + 1e-8)
+        cos = phisa_unit @ psi_unit
+        cos_np = cos.cpu().numpy()
+        print(f"cos(phi(s,a), psi/task): mean={cos_np.mean():.4f}, std={cos_np.std():.4f}")
+    else:
+        cos_np = None
+        print(
+            f"Skipping cosine histogram: phi dim = {phisa_t.shape[-1]}, "
+            f"goal/task dim = {psi_t.shape[-1]}"
+        )
 
-    print(f"cos(phi(s,a), psi): mean={cos_np.mean():.4f}, std={cos_np.std():.4f}")
-
-    # 3) Create side-by-side plots
     fig, axes = plt.subplots(1, 2, figsize=(12, 4))
 
-    # Left: Variance spectrum
     axes[0].plot(cumulative, marker="o")
     axes[0].set_xlabel("Number of components")
     axes[0].set_ylabel("Cumulative variance explained")
     axes[0].set_title(f"Variance spectrum of phi(s,a) [{goal}]")
     axes[0].grid(alpha=0.3)
 
-    # Right: Cosine similarity histogram
-    axes[1].hist(cos_np, bins=40, alpha=0.7)
-    axes[1].set_xlabel("cos(phi(s,a), psi(z))")
-    axes[1].set_ylabel("count")
-    axes[1].set_title(f"Cosine histo phi(s,a) vs psi(z) [{goal}]")
-    axes[1].grid(alpha=0.3)
+    if cos_np is not None:
+        axes[1].hist(cos_np, bins=40, alpha=0.7)
+        axes[1].set_xlabel("cos(phi(s,a), psi/task)")
+        axes[1].set_ylabel("count")
+        axes[1].set_title(f"Cosine histo phi(s,a) vs psi/task [{goal}]")
+        axes[1].grid(alpha=0.3)
+    else:
+        psi_np = psi_t.cpu().numpy()
+        axes[1].hist(psi_np, bins=40, alpha=0.7)
+        axes[1].set_xlabel("task code value")
+        axes[1].set_ylabel("count")
+        axes[1].set_title(f"Task-code histogram [{goal}]")
+        axes[1].grid(alpha=0.3)
+        axes[1].text(
+            0.5, 0.95,
+            f"phi dim={phisa_t.shape[-1]}, task dim={psi_t.shape[-1]}",
+            ha="center", va="top",
+            transform=axes[1].transAxes, fontsize=10
+        )
 
     plt.tight_layout()
     plt.show()
 
+    eval_env_first.close()
+
+    q_network.train()
+    if actor is not None:
+        actor.train()
+
+
+
+def visualise_q_table_td3(
+    goal,
+    actor,
+    q1,
+    q2,
+    eval_returns=None,
+    task_embedding=None,
+    device=None,
+    make_env=None,
+    reset_options=None,
+):
+    actor.eval()
+    q1.eval()
+    q2.eval()
+
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    if make_env is None:
+        raise ValueError("make_env function must be provided to create the evaluation environment.")
+
+    eval_env_first = make_env(goal=goal)
+
+    # Optional task embedding
+    if task_embedding is not None:
+        if not torch.is_tensor(task_embedding):
+            task_embedding = torch.tensor(task_embedding, dtype=torch.float32, device=device)
+        else:
+            task_embedding = task_embedding.to(device).float()
+
+    goal_arr = np.array(goal, dtype=np.float32)
+    goal_t_single = torch.tensor(goal_arr, dtype=torch.float32, device=device).unsqueeze(0)
+
+    def td3_policy_fn(obs):
+        obs_t = torch.tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
+        with torch.no_grad():
+            action_t = actor(obs_t, goal_t_single)
+        return action_t.squeeze(0).cpu().numpy().astype(np.float32)
+
+    def td3_value_fn(obs_batch):
+        obs_t = torch.tensor(obs_batch, dtype=torch.float32, device=device)
+        B = obs_t.shape[0]
+        goal_batch = goal_t_single.expand(B, -1)
+
+        with torch.no_grad():
+            act_t = actor(obs_t, goal_batch)
+
+            if task_embedding is None:
+                q1_vals = q1(obs_t, act_t, goal_batch)
+                q2_vals = q2(obs_t, act_t, goal_batch)
+            else:
+                q1_vals = q1.forward_with_task_embedding(
+                    obs_t,
+                    act_t,
+                    task_embedding,
+                    normalize_embedding=False,
+                )
+                q2_vals = q2.forward_with_task_embedding(
+                    obs_t,
+                    act_t,
+                    task_embedding,
+                    normalize_embedding=False,
+                )
+
+            minq_vals = torch.minimum(q1_vals, q2_vals)
+
+        # Return [N] to match continuous branch of plot_q_diagnostics
+        return minq_vals.squeeze(-1).cpu().numpy()
+
+    def td3_actor_fn(obs_batch):
+        obs_t = torch.tensor(obs_batch, dtype=torch.float32, device=device)
+        B = obs_t.shape[0]
+        goal_batch = goal_t_single.expand(B, -1)
+
+        with torch.no_grad():
+            act_t = actor(obs_t, goal_batch)
+
+        return act_t.cpu().numpy()
+
+    # 1) Rollouts
+    plot_policy_rollouts(
+        env=eval_env_first,
+        policy_fn=td3_policy_fn,
+        goal_pos=goal,
+        eval_episodes=8,
+        n_cols=4,
+        is_discrete=False,
+        step_point_size=12,
+        start_size=60,
+        end_size=50,
+        goal_size=130,
+        arrow_width=0.01,
+        reset_options=reset_options,
+    )
+
+    # 2) Q diagnostics (continuous mode)
+    plot_q_diagnostics(
+        env=eval_env_first,
+        value_fn=td3_value_fn,
+        actor_fn=td3_actor_fn,
+        is_discrete=False,
+        num_actions=0,
+        action_names=None,
+        goal_pos=goal,
+        eval_returns=eval_returns,
+    )
 
     eval_env_first.close()
+    actor.train()
+    q1.train()
+    q2.train()
+
+    return actor, q1, q2
+
+def plot_full_embedding_dashboard_2d_html(
+    overall_results,
+    qnet,
+    mode="mean",
+    normalise=True,
+    annotate=False,
+    title_task_3d="Task embeddings in 2D PCA space",
+    title_weights="Q-network weight distributions",
+    title_sa_fixed_3d="Fixed-probe SA embeddings in 2D PCA space",
+    title_sa_iso="Final SA isotropy diagnostics",
+    save_html="full_embedding_dashboard.html",
+    sa_keywords=("sa_encoder",),
+    goal_keywords=("goal_encoder",),
+    bins=80,
+    weights_his=None,
+):
+    # ---------------------------
+    # Helper functions
+    # ---------------------------
+    def _to_numpy_embedding(x):
+        if isinstance(x, torch.Tensor):
+            x = x.detach().cpu().numpy()
+        x = np.asarray(x, dtype=np.float32)
+        return x
+
+    def _ensure_keyword_iterable(x):
+        if isinstance(x, str):
+            return [x]
+        return list(x)
+
+    def _collect_embeddings(results, key, mode):
+        """
+        Collect embeddings and project to 2D with PCA.
+        Returns:
+            X         : original embeddings [N, D]
+            X_pca_2d  : 2D PCA projection [N, 2]
+            labels    : text labels for points
+            goal_names: goal labels (for coloring)
+            pca       : PCA object
+            explained : variance ratios for PC1, PC2
+        """
+        vectors = []
+        labels = []
+        goal_names = []
+
+        for goal, data in results.items():
+            emb_list = data.get(key, [])
+            if len(emb_list) == 0:
+                continue
+
+            emb_list_np = [_to_numpy_embedding(e).reshape(-1) for e in emb_list]
+
+            if mode == "mean":
+                vec = np.mean(np.stack(emb_list_np, axis=0), axis=0)
+                vectors.append(vec)
+                labels.append(str(goal))
+                goal_names.append(str(goal))
+            elif mode == "last":
+                vec = emb_list_np[-1]
+                vectors.append(vec)
+                labels.append(str(goal))
+                goal_names.append(str(goal))
+            elif mode == "all":
+                for i, vec in enumerate(emb_list_np):
+                    vectors.append(vec)
+                    labels.append(f"{goal} | idx={i}")
+                    goal_names.append(str(goal))
+            else:
+                raise ValueError("mode must be one of: 'mean', 'last', or 'all'")
+
+        if len(vectors) < 2:
+            raise ValueError(f"Need at least 2 embeddings in '{key}' to run PCA.")
+
+        X = np.stack(vectors, axis=0)
+
+        if normalise:
+            X = X / (np.linalg.norm(X, axis=1, keepdims=True) + 1e-8)
+
+        n_components = min(2, X.shape[0], X.shape[1])
+        if n_components < 2:
+            raise ValueError(
+                f"Need embedding dimension >= 2 and at least 2 samples for '{key}' PCA."
+            )
+
+        pca = PCA(n_components=n_components)
+        X_pca = pca.fit_transform(X)
+        explained = pca.explained_variance_ratio_
+
+        return X, X_pca, labels, goal_names, pca, explained
+
+    def _make_2d_figure(X_2d, labels, goal_names, explained, title):
+        """
+        Make a 2D PCA scatter figure with PC1/PC2 axes.
+        """
+        unique_goals = sorted(list(set(goal_names)))
+        palette = [
+            "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
+            "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"
+        ]
+        color_map = {g: palette[i % len(palette)] for i, g in enumerate(unique_goals)}
+
+        fig = go.Figure()
+
+        for goal in unique_goals:
+            idxs = [i for i, g in enumerate(goal_names) if g == goal]
+            xs = X_2d[idxs, 0]
+            ys = X_2d[idxs, 1]
+            texts = [labels[i] for i in idxs]
+            color = color_map[goal]
+
+            fig.add_trace(go.Scatter(
+                x=xs,
+                y=ys,
+                mode="markers+text" if annotate else "markers",
+                text=texts if annotate else None,
+                textposition="top center",
+                marker=dict(size=9, color=color, opacity=0.9),
+                name=goal,
+                hovertext=texts,
+                hovertemplate=(
+                    "label=%{hovertext}<br>"
+                    "PC1=%{x:.3f}<br>"
+                    "PC2=%{y:.3f}<extra></extra>"
+                ),
+                textfont=dict(size=10)
+            ))
+
+        fig.add_trace(go.Scatter(
+            x=[0],
+            y=[0],
+            mode="markers",
+            marker=dict(size=7, color="black", symbol="x"),
+            name="origin",
+            hovertemplate="origin<extra></extra>"
+        ))
+
+        fig.update_layout(
+            title=title,
+            xaxis_title=f"PC1 ({explained[0]*100:.1f}%)",
+            yaxis_title=f"PC2 ({explained[1]*100:.1f}%)",
+            template="plotly_white",
+            legend=dict(x=1.02, y=1.0),
+            margin=dict(l=40, r=40, t=60, b=40)
+        )
+
+        return fig
+
+    sa_keywords_local = [k.lower() for k in _ensure_keyword_iterable(sa_keywords)]
+    goal_keywords_local = [k.lower() for k in _ensure_keyword_iterable(goal_keywords)]
+
+    # ---------------------------
+    # Window 1: weights + slider
+    # ---------------------------
+    if weights_his is None or len(weights_his) == 0:
+        sa_weights = []
+        goal_weights = []
+
+        for name, param in qnet.named_parameters():
+            if not param.requires_grad:
+                continue
+            vals = param.detach().cpu().numpy().ravel()
+            lname = name.lower()
+
+            if any(k in lname for k in sa_keywords_local):
+                sa_weights.append(vals)
+            elif any(k in lname for k in goal_keywords_local):
+                goal_weights.append(vals)
+
+        fig_w = make_subplots(
+            rows=1,
+            cols=2,
+            subplot_titles=("SA encoder weights", "Goal encoder weights")
+        )
+
+        if len(sa_weights) > 0:
+            sa_all = np.concatenate(sa_weights)
+            fig_w.add_trace(
+                go.Histogram(
+                    x=sa_all,
+                    nbinsx=bins,
+                    marker_color="#1f77b4",
+                    opacity=0.8,
+                    name="SA encoder"
+                ),
+                row=1, col=1
+            )
+
+        if len(goal_weights) > 0:
+            goal_all = np.concatenate(goal_weights)
+            fig_w.add_trace(
+                go.Histogram(
+                    x=goal_all,
+                    nbinsx=bins,
+                    marker_color="#ff7f0e",
+                    opacity=0.8,
+                    name="Goal encoder"
+                ),
+                row=1, col=2
+            )
+
+        fig_w.update_xaxes(title_text="Weight value", row=1, col=1)
+        fig_w.update_xaxes(title_text="Weight value", row=1, col=2)
+        fig_w.update_yaxes(title_text="Count", row=1, col=1)
+        fig_w.update_yaxes(title_text="Count", row=1, col=2)
+        fig_w.update_layout(
+            title=title_weights,
+            template="plotly_white",
+            bargap=0.05,
+            showlegend=False,
+            margin=dict(l=40, r=40, t=70, b=40)
+        )
+
+    else:
+        fig_w = make_subplots(
+            rows=1,
+            cols=2,
+            subplot_titles=("SA encoder weights", "Goal encoder weights")
+        )
+
+        first = weights_his[0]
+
+        sa0 = np.asarray(first.get("sa_sample", []), dtype=np.float32)
+        goal0 = np.asarray(first.get("goal_sample", []), dtype=np.float32)
+
+        def _stats_text(snap):
+            sa_stats = snap.get("sa_stats", {})
+            goal_stats = snap.get("goal_stats", {})
+            return (
+                f"{title_weights}"
+                f"<br><sup>{snap.get('stage', 'snapshot')} | "
+                f"SA μ={sa_stats.get('mean', np.nan):.4f}, σ={sa_stats.get('std', np.nan):.4f} | "
+                f"Goal μ={goal_stats.get('mean', np.nan):.4f}, σ={goal_stats.get('std', np.nan):.4f}</sup>"
+            )
+
+        fig_w.add_trace(
+            go.Histogram(
+                x=sa0,
+                nbinsx=bins,
+                marker_color="#1f77b4",
+                opacity=0.8,
+                name="SA encoder",
+                histnorm=""
+            ),
+            row=1, col=1
+        )
+
+        fig_w.add_trace(
+            go.Histogram(
+                x=goal0,
+                nbinsx=bins,
+                marker_color="#ff7f0e",
+                opacity=0.8,
+                name="Goal encoder",
+                histnorm=""
+            ),
+            row=1, col=2
+        )
+
+        frames = []
+        slider_steps = []
+
+        for i, snap in enumerate(weights_his):
+            sa_vals = np.asarray(snap.get("sa_sample", []), dtype=np.float32)
+            goal_vals = np.asarray(snap.get("goal_sample", []), dtype=np.float32)
+
+            frames.append(
+                go.Frame(
+                    name=str(i),
+                    data=[
+                        go.Histogram(
+                            x=sa_vals,
+                            nbinsx=bins,
+                            marker_color="#1f77b4",
+                            opacity=0.8,
+                            name="SA encoder",
+                            histnorm=""
+                        ),
+                        go.Histogram(
+                            x=goal_vals,
+                            nbinsx=bins,
+                            marker_color="#ff7f0e",
+                            opacity=0.8,
+                            name="Goal encoder",
+                            histnorm=""
+                        ),
+                    ],
+                    layout=go.Layout(
+                        title=_stats_text(snap)
+                    )
+                )
+            )
+
+            slider_steps.append(
+                {
+                    "method": "animate",
+                    "label": snap.get("stage", f"step_{i}"),
+                    "args": [
+                        [str(i)],
+                        {
+                            "mode": "immediate",
+                            "frame": {"duration": 0, "redraw": True},
+                            "transition": {"duration": 0},
+                        },
+                    ],
+                }
+            )
+
+        fig_w.frames = frames
+
+        fig_w.update_xaxes(title_text="Weight value", row=1, col=1)
+        fig_w.update_xaxes(title_text="Weight value", row=1, col=2)
+        fig_w.update_yaxes(title_text="Count", row=1, col=1)
+        fig_w.update_yaxes(title_text="Count", row=1, col=2)
+
+        fig_w.update_layout(
+            title=_stats_text(first),
+            template="plotly_white",
+            bargap=0.05,
+            showlegend=False,
+            margin=dict(l=40, r=40, t=95, b=70),
+            sliders=[
+                {
+                    "active": 0,
+                    "pad": {"t": 20},
+                    "currentvalue": {"prefix": "Weights snapshot: "},
+                    "steps": slider_steps,
+                }
+            ],
+            updatemenus=[
+                {
+                    "type": "buttons",
+                    "direction": "left",
+                    "x": 0.0,
+                    "y": 1.18,
+                    "showactive": False,
+                    "buttons": [
+                        {
+                            "label": "Play",
+                            "method": "animate",
+                            "args": [
+                                None,
+                                {
+                                    "fromcurrent": True,
+                                    "transition": {"duration": 250},
+                                    "frame": {"duration": 500, "redraw": True},
+                                },
+                            ],
+                        },
+                        {
+                            "label": "Pause",
+                            "method": "animate",
+                            "args": [
+                                [None],
+                                {
+                                    "mode": "immediate",
+                                    "transition": {"duration": 0},
+                                    "frame": {"duration": 0, "redraw": False},
+                                },
+                            ],
+                        },
+                    ],
+                }
+            ],
+        )
+
+    # ---------------------------
+    # Window 2: task embeddings PCA (2D)
+    # ---------------------------
+    X_task, X_task_2d, labels_task, goal_names_task, pca_task, explained_task = \
+        _collect_embeddings(overall_results, key="task_embeddings", mode=mode)
+
+    fig_task_2d = _make_2d_figure(
+        X_2d=X_task_2d,
+        labels=labels_task,
+        goal_names=goal_names_task,
+        explained=explained_task,
+        title=title_task_3d
+    )
+
+    # ---------------------------
+    # Window 3: fixed-probe SA embeddings PCA (2D)
+    # ---------------------------
+    X_sa_fix, X_sa_fix_2d, labels_sa_fix, goal_names_sa_fix, pca_sa_fix, explained_sa_fix = \
+        _collect_embeddings(overall_results, key="sa_fixed_probe_embeddings", mode=mode)
+
+    fig_sa_fixed_2d = _make_2d_figure(
+        X_2d=X_sa_fix_2d,
+        labels=labels_sa_fix,
+        goal_names=goal_names_sa_fix,
+        explained=explained_sa_fix,
+        title=title_sa_fixed_3d
+    )
+
+    # ---------------------------
+    # Window 4: final SA isotropy diagnostics
+    # ---------------------------
+    all_batches = []
+    for goal, data in overall_results.items():
+        batches = data.get("sa_batches_final", [])
+        for b in batches:
+            all_batches.append(_to_numpy_embedding(b))
+
+    if len(all_batches) == 0:
+        raise ValueError("No 'sa_batches_final' found in overall_results.")
+
+    X_iso = np.concatenate(all_batches, axis=0).astype(np.float32)   # [N, D]
+    Xc = X_iso - X_iso.mean(axis=0, keepdims=True)
+
+    cov = np.cov(Xc, rowvar=False)
+    eigvals = np.linalg.eigvalsh(cov)
+    eigvals = np.sort(eigvals)[::-1]
+
+    trace = float(np.trace(cov))
+    mean_diag = float(np.mean(np.diag(cov)))
+    offdiag = cov - np.diag(np.diag(cov))
+    mean_abs_offdiag = float(np.mean(np.abs(offdiag)))
+    eig_ratio = float(eigvals[0] / (eigvals[-1] + 1e-8))
+
+    Xn = Xc / (np.linalg.norm(Xc, axis=1, keepdims=True) + 1e-8)
+    gram = Xn @ Xn.T
+    mask = ~np.eye(gram.shape[0], dtype=bool)
+    mean_pairwise_cos = float(np.mean(gram[mask]))
+
+    fig_iso = make_subplots(
+        rows=1,
+        cols=2,
+        subplot_titles=("Covariance heatmap", "Eigenvalue spectrum")
+    )
+
+    fig_iso.add_trace(
+        go.Heatmap(
+            z=cov,
+            colorscale="RdBu",
+            zmid=0,
+            colorbar=dict(title="cov")
+        ),
+        row=1, col=1
+    )
+
+    fig_iso.add_trace(
+        go.Bar(
+            x=np.arange(1, len(eigvals) + 1),
+            y=eigvals,
+            marker_color="#2ca02c",
+            name="eigenvalues"
+        ),
+        row=1, col=2
+    )
+
+    fig_iso.update_xaxes(title_text="Dimension", row=1, col=1)
+    fig_iso.update_yaxes(title_text="Dimension", row=1, col=1)
+    fig_iso.update_xaxes(title_text="Sorted eigenvalue index", row=1, col=2)
+    fig_iso.update_yaxes(title_text="Eigenvalue", row=1, col=2)
+
+    fig_iso.update_layout(
+        title=(
+            f"{title_sa_iso}"
+            f"<br><sup>trace={trace:.4f}, mean_diag={mean_diag:.4f}, "
+            f"mean_abs_offdiag={mean_abs_offdiag:.4f}, eig_ratio={eig_ratio:.4f}, "
+            f"mean_pairwise_cos={mean_pairwise_cos:.4f}</sup>"
+        ),
+        template="plotly_white",
+        showlegend=False,
+        margin=dict(l=40, r=40, t=90, b=40)
+    )
+
+    # Explicit heights
+    fig_w.update_layout(height=500)
+    fig_task_2d.update_layout(height=500)
+    fig_sa_fixed_2d.update_layout(height=500)
+    fig_iso.update_layout(height=500)
+
+    # ---------------------------
+    # Save one HTML
+    # ---------------------------
+    save_html = Path(save_html)
+    save_html.parent.mkdir(parents=True, exist_ok=True)
+
+    html_w = fig_w.to_html(
+        full_html=False,
+        include_plotlyjs="cdn",
+        config={"responsive": True},
+        default_width="100%",
+        default_height="100%",
+    )
+
+    html_task = fig_task_2d.to_html(
+        full_html=False,
+        include_plotlyjs=False,
+        config={"responsive": True},
+        default_width="100%",
+        default_height="100%",
+    )
+
+    html_sa_fix = fig_sa_fixed_2d.to_html(
+        full_html=False,
+        include_plotlyjs=False,
+        config={"responsive": True},
+        default_width="100%",
+        default_height="100%",
+    )
+
+    html_iso = fig_iso.to_html(
+        full_html=False,
+        include_plotlyjs=False,
+        config={"responsive": True},
+        default_width="100%",
+        default_height="100%",
+    )
+
+    dashboard_html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Embedding Dashboard</title>
+    <style>
+        html, body {{
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            font-family: Arial, sans-serif;
+            background: #f3f4f6;
+        }}
+
+        body {{
+            overflow: hidden;
+        }}
+
+        .dashboard {{
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            grid-template-rows: 1fr 1fr;
+            gap: 12px;
+            width: 100vw;
+            height: 100vh;
+            padding: 12px;
+            box-sizing: border-box;
+        }}
+
+        .panel {{
+            background: white;
+            border: 1px solid #dcdcdc;
+            border-radius: 10px;
+            overflow: hidden;
+            min-width: 0;
+            min-height: 0;
+            box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+            display: flex;
+            flex-direction: column;
+        }}
+
+        .plot-wrap {{
+            flex: 1 1 auto;
+            width: 100%;
+            height: 100%;
+            min-width: 0;
+            min-height: 0;
+            overflow: hidden;
+        }}
+
+        .plotly-graph-div {{
+            width: 100% !important;
+            height: 100% !important;
+        }}
+    </style>
+</head>
+<body>
+    <div class="dashboard">
+        <div class="panel">
+            <div class="plot-wrap">{html_w}</div>
+        </div>
+        <div class="panel">
+            <div class="plot-wrap">{html_task}</div>
+        </div>
+        <div class="panel">
+            <div class="plot-wrap">{html_sa_fix}</div>
+        </div>
+        <div class="panel">
+            <div class="plot-wrap">{html_iso}</div>
+        </div>
+    </div>
+</body>
+</html>
+"""
+    save_html.write_text(dashboard_html, encoding="utf-8")
+
+    return {
+        "save_html": str(save_html),
+        "fig_weights": fig_w,
+        "fig_task_2d": fig_task_2d,
+        "fig_sa_fixed_2d": fig_sa_fixed_2d,
+        "fig_sa_isotropy": fig_iso,
+        "isotropy_metrics": {
+            "trace": trace,
+            "mean_diag": mean_diag,
+            "mean_abs_offdiag": mean_abs_offdiag,
+            "eig_ratio": eig_ratio,
+            "mean_pairwise_cos": mean_pairwise_cos,
+        },
+    }

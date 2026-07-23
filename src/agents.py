@@ -140,3 +140,33 @@ class PPO_ActorCritic(nn.Module):
         std = self.log_std.exp().expand_as(mu)
         dist = torch.distributions.Normal(mu, std)
         return dist, v
+
+class Factorised_TD3_Actor(nn.Module):
+    def __init__(
+        self,
+        obs_dim: int,
+        act_dim: int,
+        goal_dim: int = 2,
+        hidden_dim: int = 256,
+    ):
+        super().__init__()
+        self.obs_dim = obs_dim
+        self.act_dim = act_dim
+        self.goal_dim = goal_dim
+
+        self.net = nn.Sequential(
+            nn.Linear(obs_dim + goal_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, act_dim),
+            nn.Tanh(),  # assuming actions in [-1, 1]
+        )
+
+    def forward(self, obs: torch.Tensor, goal: torch.Tensor) -> torch.Tensor:
+        """
+        obs:  [B, obs_dim]
+        goal: [B, goal_dim]
+        """
+        x = torch.cat([obs, goal], dim=-1)
+        return self.net(x)
