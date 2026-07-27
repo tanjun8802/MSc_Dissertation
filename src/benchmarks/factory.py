@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from .atari import make_atari_env
 from .exorl import (
     DEFAULT_EXORL_DATA_ROOT,
     download_exorl_dataset,
@@ -14,6 +15,7 @@ from .ogbench import (
     load_ogbench_dataset_into_buffer,
     make_ogbench_env,
 )
+from .procgen import make_procgen_env
 from .wrappers import GoalInfoWrapper
 
 
@@ -28,6 +30,21 @@ def make_env(
     render_height: int = 240,
     render_width: int = 320,
     camera_id: int = 0,
+    # Atari-specific
+    frame_stack: int = 4,
+    noop_max: int = 30,
+    frame_skip: int = 4,
+    episodic_life: bool = True,
+    clip_rewards: bool = True,
+    grayscale: bool = True,
+    image_size: int = 84,
+    full_action_space: bool = False,
+    max_episode_steps: int | None = None,
+    # Procgen-specific
+    num_levels: int = 0,
+    start_level: int = 0,
+    distribution_mode: str = "easy",
+    normalize_obs: bool = True,
 ):
     benchmark = benchmark.lower()
 
@@ -42,8 +59,36 @@ def make_env(
         )
     elif benchmark == "ogbench":
         env = make_ogbench_env(task)
+    elif benchmark == "atari":
+        env = make_atari_env(
+            task,
+            seed=seed,
+            render_mode=render_mode,
+            frame_stack=frame_stack,
+            noop_max=noop_max,
+            frame_skip=frame_skip,
+            episodic_life=episodic_life,
+            clip_rewards=clip_rewards,
+            grayscale=grayscale,
+            image_size=image_size,
+            full_action_space=full_action_space,
+            max_episode_steps=max_episode_steps if max_episode_steps is not None else 108_000,
+        )
+    elif benchmark == "procgen":
+        env = make_procgen_env(
+            task,
+            num_levels=num_levels,
+            start_level=start_level,
+            distribution_mode=distribution_mode,
+            seed=seed,
+            render_mode=render_mode,
+            normalize_obs=normalize_obs,
+        )
     else:
-        raise ValueError(f"Unsupported benchmark '{benchmark}'. Expected 'exorl' or 'ogbench'.")
+        raise ValueError(
+            f"Unsupported benchmark '{benchmark}'. "
+            "Expected 'exorl', 'ogbench', 'atari', or 'procgen'."
+        )
 
     if add_goal_wrapper:
         env = GoalInfoWrapper(env, goal_fn=goal_fn)
@@ -99,4 +144,8 @@ def load_dataset_into_buffer(
             max_episodes=max_episodes,
         )
 
-    raise ValueError(f"Unsupported benchmark '{benchmark}'. Expected 'exorl' or 'ogbench'.")
+    raise ValueError(
+        f"Unsupported benchmark '{benchmark}'. "
+        "Expected 'exorl' or 'ogbench'.  "
+        "(Atari and Procgen benchmarks are online-only and do not support offline dataset loading.)"
+    )

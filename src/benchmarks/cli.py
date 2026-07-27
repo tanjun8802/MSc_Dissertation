@@ -3,6 +3,10 @@ from __future__ import annotations
 import argparse
 import json
 
+from .atari import (
+    ATARI_57_GAMES,
+    make_atari_env,
+)
 from .exorl import (
     DEFAULT_EXORL_DATA_ROOT,
     describe_exorl_dataset,
@@ -16,6 +20,10 @@ from .ogbench import (
     download_ogbench_datasets,
     load_ogbench_datasets,
     make_ogbench_env,
+)
+from .procgen import (
+    PROCGEN_GAMES,
+    make_procgen_env,
 )
 
 
@@ -55,6 +63,29 @@ def build_parser() -> argparse.ArgumentParser:
     ogbench_dataset = ogbench_subparsers.add_parser("dataset", help="Load an OGBench dataset and print split shapes.")
     ogbench_dataset.add_argument("dataset")
     ogbench_dataset.add_argument("--data-root", default=str(DEFAULT_OGBENCH_DATA_ROOT))
+
+    # ---- Atari -----------------------------------------------------------
+    atari_parser = subparsers.add_parser("atari", help="Work with Atari/ALE environments.")
+    atari_subparsers = atari_parser.add_subparsers(dest="action", required=True)
+
+    atari_env = atari_subparsers.add_parser("env", help="Smoke-test an Atari game.")
+    atari_env.add_argument("game", help="Game name, e.g. 'Breakout' or 'Pong'.")
+    atari_env.add_argument("--seed", type=int, default=0)
+    atari_env.add_argument("--no-frame-stack", action="store_true")
+    atari_env.add_argument("--no-grayscale", action="store_true")
+
+    atari_list = atari_subparsers.add_parser("list", help="List available Atari games.")
+
+    # ---- Procgen ---------------------------------------------------------
+    procgen_parser = subparsers.add_parser("procgen", help="Work with Procgen environments.")
+    procgen_subparsers = procgen_parser.add_subparsers(dest="action", required=True)
+
+    procgen_env = procgen_subparsers.add_parser("env", help="Smoke-test a Procgen game.")
+    procgen_env.add_argument("game", help="Game name, e.g. 'coinrun' or 'starpilot'.")
+    procgen_env.add_argument("--seed", type=int, default=0)
+    procgen_env.add_argument("--distribution-mode", default="easy")
+
+    procgen_list = procgen_subparsers.add_parser("list", help="List available Procgen games.")
 
     return parser
 
@@ -138,6 +169,61 @@ def main() -> None:
             "train": {key: list(value.shape) for key, value in train_dataset.items()},
             "val": {key: list(value.shape) for key, value in val_dataset.items()},
         }
+        print(json.dumps(summary, indent=2, sort_keys=True))
+        return
+
+    # ---- Atari handlers --------------------------------------------------
+    if args.benchmark == "atari" and args.action == "list":
+        for game in ATARI_57_GAMES:
+            print(game)
+        return
+
+    if args.benchmark == "atari" and args.action == "env":
+        env = make_atari_env(
+            args.game,
+            seed=args.seed,
+            frame_stack=0 if args.no_frame_stack else 4,
+            grayscale=not args.no_grayscale,
+        )
+        obs, info = env.reset(seed=args.seed)
+        action = env.action_space.sample()
+        next_obs, reward, terminated, truncated, step_info = env.step(action)
+        summary = {
+            "obs_shape": list(obs.shape),
+            "next_obs_shape": list(next_obs.shape),
+            "action_space_n": int(env.action_space.n),
+            "reward": reward,
+            "terminated": terminated,
+            "truncated": truncated,
+        }
+        env.close()
+        print(json.dumps(summary, indent=2, sort_keys=True))
+        return
+
+    # ---- Procgen handlers ------------------------------------------------
+    if args.benchmark == "procgen" and args.action == "list":
+        for game in PROCGEN_GAMES:
+            print(game)
+        return
+
+    if args.benchmark == "procgen" and args.action == "env":
+        env = make_procgen_env(
+            args.game,
+            seed=args.seed,
+            distribution_mode=args.distribution_mode,
+        )
+        obs, info = env.reset()
+        action = env.action_space.sample()
+        next_obs, reward, terminated, truncated, step_info = env.step(action)
+        summary = {
+            "obs_shape": list(obs.shape),
+            "next_obs_shape": list(next_obs.shape),
+            "action_space_n": int(env.action_space.n),
+            "reward": reward,
+            "terminated": terminated,
+            "truncated": truncated,
+        }
+        env.close()
         print(json.dumps(summary, indent=2, sort_keys=True))
         return
 

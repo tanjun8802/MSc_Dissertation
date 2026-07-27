@@ -21,6 +21,8 @@ dependencies = [
   "ipython",
   "ipykernel",
   "scikit-learn",
+  "ale-py>=0.10",
+  "procgen>=0.10",
 ]
 
 [tool.setuptools.packages.find]

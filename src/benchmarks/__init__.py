@@ -1,3 +1,9 @@
+from .atari import (
+    ATARI_57_GAMES,
+    ATARI_100K_GAMES,
+    make_atari_env,
+)
+
 from .exorl import (
     DEFAULT_EXORL_DATA_ROOT,
     EXORL_ALGORITHMS,
@@ -26,6 +32,13 @@ from .ogbench import (
     make_ogbench_env,
 )
 
+from .procgen import (
+    PROCGEN_GAMES,
+    PROCGEN_DISTRIBUTION_MODES,
+    ProcgenGymnasiumAdapter,
+    make_procgen_env,
+)
+
 from .factory import (
     make_env,
     load_dataset_into_buffer,
@@ -44,6 +57,8 @@ from .visualise import (
 )
 
 __all__ = [
+    "ATARI_57_GAMES",
+    "ATARI_100K_GAMES",
     "DEFAULT_EXORL_DATA_ROOT",
     "DEFAULT_OGBENCH_DATA_ROOT",
     "EXORL_ALGORITHMS",
@@ -66,6 +81,11 @@ __all__ = [
     "load_ogbench_datasets",
     "make_exorl_env",
     "make_ogbench_env",
+    "make_atari_env",
+    "make_procgen_env",
+    "PROCGEN_GAMES",
+    "PROCGEN_DISTRIBUTION_MODES",
+    "ProcgenGymnasiumAdapter",
     "make_env",
     "load_dataset_into_buffer",
     "GoalInfoWrapper",
