@@ -2206,3 +2206,110 @@ def plot_full_embedding_dashboard_2d_html(
             "mean_pairwise_cos": mean_pairwise_cos,
         },
     }
+
+def plot_min_steps_and_min_time(overall_results, seeds=None):  
+
+    goals = list(overall_results.keys())
+
+    mean_steps_per_goal = []
+    std_steps_per_goal = []
+    mean_time_per_goal = []
+    std_time_per_goal = []
+    used_goals = []
+
+    for goal in goals:
+        steps_raw = overall_results[goal]["min_steps"]
+        time_raw  = overall_results[goal]["min_time"]
+
+        steps_arr = np.array(
+            [np.nan if x is None else x for x in steps_raw],
+            dtype=float
+        )
+        time_arr  = np.array(
+            [np.nan if x is None else x for x in time_raw],
+            dtype=float
+        )
+
+        # Skip goals with no valid data
+        if np.all(np.isnan(steps_arr)) or np.all(np.isnan(time_arr)):
+            print(f"[WARN] Skipping goal {goal}: all min_steps or min_time are NaN/None")
+            continue
+
+        mean_steps_per_goal.append(steps_arr.mean())
+        std_steps_per_goal.append(steps_arr.std())
+
+        mean_time_per_goal.append(time_arr.mean())
+        std_time_per_goal.append(time_arr.std())
+
+        used_goals.append(goal)
+
+    if not used_goals:
+        raise ValueError("No goals with non-empty min_steps/min_time found.")
+
+    x = np.arange(len(used_goals))
+
+    mean_steps_per_goal = np.array(mean_steps_per_goal)
+    std_steps_per_goal  = np.array(std_steps_per_goal)
+    mean_time_per_goal  = np.array(mean_time_per_goal)
+    std_time_per_goal   = np.array(std_time_per_goal)
+
+    fig, (ax1, ax2) = plt.subplots(
+        1, 2,
+        figsize=(14, 5)
+    )
+
+    # --- Left subplot: steps ---
+    steps_color = "tab:blue"
+    ax1.plot(
+        x,
+        mean_steps_per_goal,
+        color=steps_color,
+        marker="o",
+        linewidth=2.5,
+        label="Mean Min Steps"
+    )
+    ax1.fill_between(
+        x,
+        mean_steps_per_goal - std_steps_per_goal,
+        mean_steps_per_goal + std_steps_per_goal,
+        color=steps_color,
+        alpha=0.2,
+        label="±1 std"
+    )
+    ax1.set_title(F"Minimum Steps Across {len(seeds)} Seeds")
+    ax1.set_xlabel("Goal Index")
+    ax1.set_ylabel("Steps")
+    ax1.set_xticks(x)
+    ax1.set_xticklabels([str(g) for g in used_goals], rotation=45, ha="right")
+    ax1.grid(True, axis="y", linestyle="--", alpha=0.3)
+    ax1.legend(loc="best")
+
+    # --- Right subplot: time ---
+    time_color = "tab:orange"
+    ax2.plot(
+        x,
+        mean_time_per_goal,
+        color=time_color,
+        marker="o",
+        linewidth=2.5,
+        label="Mean Min Time"
+    )
+    ax2.fill_between(
+        x,
+        mean_time_per_goal - std_time_per_goal,
+        mean_time_per_goal + std_time_per_goal,
+        color=time_color,
+        alpha=0.2,
+        label="±1 std"
+    )
+    ax2.set_title(F"Minimum Time Across {len(seeds)} Seeds")
+    ax2.set_xlabel("Goal Index")
+    ax2.set_ylabel("Time")
+    ax2.set_xticks(x)
+    ax2.set_xticklabels([str(g) for g in used_goals], rotation=45, ha="right")
+    ax2.grid(True, axis="y", linestyle="--", alpha=0.3)
+    ax2.legend(loc="best")
+
+    fig.suptitle("Mean ± Std per Goal", fontsize=14)
+    fig.tight_layout()
+    plt.show()

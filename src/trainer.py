@@ -26,6 +26,7 @@ from loss_functions import (
     orthogonal_loss,
     ewc_regulariser_loss,
     weight_regulariser_loss,
+    goal_memory_contrastive_loss
 )
 
 
@@ -266,6 +267,8 @@ def dqn_train(
                 break
             eval_env.close()
 
+    min_steps = global_step
+    min_time = time.perf_counter() - start_time
     goal_tensor = torch.tensor(np.array(goal, dtype=np.float32), dtype=torch.float32, device=device).unsqueeze(0)
     with torch.no_grad():
         psi_z = q_network.encode_goal(goal_tensor)
@@ -339,8 +342,9 @@ def dqn_train_multi_loss(
     goal=None,
     params=None,
     regulariser=None,
-    reg_alpha=500,
+    reg_alpha=500.0,
     embedding_memory=None,
+    memory_goals=None,
     reference_params=None,
     fisher_diag=None,
     sa_reg_prefix_filter="sa_encoder",
@@ -412,6 +416,7 @@ def dqn_train_multi_loss(
     replay_td_loss_val = torch.tensor(0.0, device=device)
     loss = torch.tensor(0.0, device=device)
     td_loss = torch.tensor(0.0, device=device)
+    goal_reg_loss = torch.tensor(0.0, device=device)
 
     num_actions = env.action_space.n
 
@@ -519,6 +524,28 @@ def dqn_train_multi_loss(
 
             loss = td_loss
 
+            if regulariser == "goal_memory_contrastive":
+                if embedding_memory is not None and len(embedding_memory) > 0:
+                    if memory_goals is None:
+                        raise ValueError("memory_goals must be provided for goal_memory_contrastive")
+
+                    goal_tensor = torch.tensor(goal, dtype=torch.float32, device=device).unsqueeze(0)
+                    current_goal_embedding = q_network.encode_goal(goal_tensor)
+
+                    goal_reg_loss = goal_memory_contrastive_loss(
+                        current_embedding=current_goal_embedding,
+                        embedding_memory=embedding_memory,
+                        current_goal=goal,
+                        memory_goals=memory_goals,
+                        similarity_mode="euclidean",
+                        temperature=2.0,
+                        pos_threshold=0.6,
+                        neg_threshold=0.3,
+                        margin=1.0,
+                    )
+
+                    loss = loss + reg_alpha * goal_reg_loss
+
             if len(replay_task_buffers) > 0:
                 loss = loss + replay_loss_coef * replay_td_loss_val
 
@@ -562,6 +589,7 @@ def dqn_train_multi_loss(
                 f"| TD={td_loss.item():.3f} | ReplayTD={replay_td_loss_val.item():.3f} "
                 f"| Ortho={ortho_loss.item():.3f} | SigReg={sigreg_loss_val.item():.3f} "
                 f"| EWC={ewc_loss.item():.6f} | Loss={loss.item():.3f}"
+                f"| goal_reg_loss={goal_reg_loss.item():.4f}"
             )
             if mean_ret >= early_stop_reward:
                 success_streak += 1
@@ -580,6 +608,8 @@ def dqn_train_multi_loss(
                 eval_env.close()
                 break
             eval_env.close()
+    min_steps = global_step
+    min_time = time.perf_counter() - start_time
 
     goal_tensor = torch.tensor(np.array(goal, dtype=np.float32), dtype=torch.float32, device=device).unsqueeze(0)
     with torch.no_grad():
@@ -863,6 +893,8 @@ def td3_train(
 
             eval_env.close()
 
+    min_steps = global_step
+    min_time = time.perf_counter() - start_time
     goal_tensor = torch.tensor(np.array(goal, dtype=np.float32), dtype=torch.float32, device=device).unsqueeze(0)
     with torch.no_grad():
         psi_z = q1.encode_goal(goal_tensor)

@@ -1,5 +1,6 @@
 import torch
 import torch.nn.functional as F
+import numpy as np
 
 
 def contrastive_loss(all_logits, temperature=1.0, reg_coef=0.01):
@@ -123,4 +124,82 @@ def ewc_regulariser_loss(model, reference_params, fisher_diag, prefix_filter=Non
 
     return loss
 
+
+
+def goal_similarity_from_coords(current_goal, memory_goals, mode="euclidean", temperature=2.0):
+    current_goal = np.array(current_goal, dtype=np.float32)
+
+    if len(memory_goals) == 0:
+        return np.array([], dtype=np.float32)
+
+    memory_goals = np.array(memory_goals, dtype=np.float32)
+
+    if mode == "euclidean":
+        dists = np.linalg.norm(memory_goals - current_goal[None, :], axis=1)
+    else:
+        raise ValueError(f"Unknown similarity mode: {mode}")
+
+    sims = np.exp(-dists / max(temperature, 1e-8))
+    if sims.max() > 0:
+        sims = sims / sims.max()
+    return sims.astype(np.float32)
+
+
+def goal_memory_contrastive_loss(
+    current_embedding,
+    embedding_memory,
+    current_goal,
+    memory_goals,
+    similarity_mode="euclidean",
+    temperature=2.0,
+    pos_threshold=0.6,
+    neg_threshold=0.3,
+    margin=1.0,
+):
+    if len(embedding_memory) == 0:
+        return torch.tensor(0.0, device=current_embedding.device)
+
+    if current_embedding.dim() == 1:
+        current_embedding = current_embedding.unsqueeze(0)
+
+    mem_tensors = []
+    for emb in embedding_memory:
+        if isinstance(emb, np.ndarray):
+            emb = torch.tensor(emb, dtype=torch.float32, device=current_embedding.device)
+        else:
+            emb = emb.to(current_embedding.device, dtype=torch.float32)
+
+        if emb.dim() == 2 and emb.shape[0] == 1:
+            emb = emb.squeeze(0)
+        mem_tensors.append(emb)
+
+    mem = torch.stack(mem_tensors, dim=0)   # [M, D]
+    cur = current_embedding.squeeze(0)      # [D]
+
+    sims = goal_similarity_from_coords(
+        current_goal=current_goal,
+        memory_goals=memory_goals,
+        mode=similarity_mode,
+        temperature=temperature,
+    )
+    sims = torch.tensor(sims, dtype=torch.float32, device=current_embedding.device)
+
+    dists = torch.norm(mem - cur.unsqueeze(0), dim=1)
+
+    pos_mask = sims >= pos_threshold
+    neg_mask = sims <= neg_threshold
+
+    loss = torch.tensor(0.0, device=current_embedding.device)
+
+    if pos_mask.any():
+        pos_weights = sims[pos_mask]
+        pos_dists = dists[pos_mask]
+        loss = loss + (pos_weights * pos_dists.pow(2)).mean()
+
+    if neg_mask.any():
+        neg_weights = 1.0 - sims[neg_mask]
+        neg_dists = dists[neg_mask]
+        loss = loss + (neg_weights * F.relu(margin - neg_dists).pow(2)).mean()
+
+    return loss
 
