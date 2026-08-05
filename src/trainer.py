@@ -142,7 +142,7 @@ def dqn_train(
         next_obs, rew, term, trunc, _ = env.step(action)
         done = term or trunc
 
-        buffer.add_transition(obs, action, rew, next_obs, done)
+        buffer.add_transition(obs, action, rew, next_obs, term, trunc)
         obs = next_obs
         global_step += 1
 
@@ -158,7 +158,6 @@ def dqn_train(
             next_obs_t = batch.next_obs
             term_t = batch.terminated
             trunc_t = batch.truncated
-            done_t = torch.clamp(term_t + trunc_t, 0.0, 1.0)
 
             goal_batch = goal_t_single.expand(obs_t.shape[0], -1)
             B = obs_t.shape[0]
@@ -167,8 +166,8 @@ def dqn_train(
                 next_q_vals = q_target_network.q_val_for_argmax_action(next_obs_t, goal_batch)
                 next_q = next_q_vals.max(dim=-1, keepdim=True).values
                 gamma_final = gamma ** td_steps
-                target = rew_t + gamma_final * (1.0 - done_t) * next_q
-
+                target = rew_t + gamma_final * (1.0 - term_t) * next_q
+ 
             act_onehot = F.one_hot(
                 act_t.squeeze(-1),
                 num_classes=num_actions
@@ -427,7 +426,6 @@ def dqn_train_multi_loss(
         next_obs_t = batch.next_obs
         term_t = batch.terminated
         trunc_t = batch.truncated
-        done_t = torch.clamp(term_t + trunc_t, 0.0, 1.0)
 
         B = obs_t.shape[0]
         goal_batch = build_goal_batch(batch_goal, B, device)
@@ -436,7 +434,7 @@ def dqn_train_multi_loss(
             next_q_vals = q_target_network.q_val_for_argmax_action(next_obs_t, goal_batch)
             next_q = next_q_vals.max(dim=-1, keepdim=True).values
             gamma_final = gamma ** td_steps
-            target = rew_t + gamma_final * (1.0 - done_t) * next_q
+            target = rew_t + gamma_final * (1.0 - term_t) * next_q
 
         act_onehot = F.one_hot(
             act_t.squeeze(-1),
@@ -462,7 +460,7 @@ def dqn_train_multi_loss(
         next_obs, rew, term, trunc, _ = env.step(action)
         done = term or trunc
 
-        buffer.add_transition(obs, action, rew, next_obs, done)
+        buffer.add_transition(obs, action, rew, next_obs, term, trunc)
         obs = next_obs
         global_step += 1
 
@@ -765,7 +763,7 @@ def td3_train(
         next_obs, reward, terminated, truncated, info = env.step(action)
         done = terminated or truncated
 
-        replay.add_transition(obs, action, reward, next_obs, done)
+        replay.add_transition(obs, action, reward, next_obs, terminated, truncated)
 
         obs = next_obs
         total_env_steps += 1
@@ -786,7 +784,7 @@ def td3_train(
         next_obs, reward, terminated, truncated, info = env.step(action)
         done = terminated or truncated
 
-        replay.add_transition(obs, action, reward, next_obs, done)
+        replay.add_transition(obs, action, reward, next_obs, terminated, truncated)
 
         obs = next_obs
         total_env_steps += 1
@@ -802,12 +800,15 @@ def td3_train(
                 act_b = batch.actions.float()
                 rew_b = batch.rewards.float()
                 next_obs_b = batch.next_obs.float()
-                done_b = torch.clamp(batch.terminated + batch.truncated, 0, 1).float()
+                term_b = batch.terminated.float()
+                trunc_b = batch.truncated.float()
 
                 if rew_b.ndim == 1:
                     rew_b = rew_b.unsqueeze(-1)
-                if done_b.ndim == 1:
-                    done_b = done_b.unsqueeze(-1)
+                if term_b.ndim == 1:
+                    term_b = term_b.unsqueeze(-1)
+                if trunc_b.ndim == 1:
+                    trunc_b = trunc_b.unsqueeze(-1)
 
                 goal_b = goal_t_single.expand(obs_b.shape[0], -1)
 
@@ -822,7 +823,7 @@ def td3_train(
                     target_q2 = q2_tgt(next_obs_b, next_a_b, goal_b)
                     target_q = torch.min(target_q1, target_q2)
 
-                    y = rew_b + gamma * (1.0 - done_b) * target_q
+                    y = rew_b + gamma * (1.0 - term_b) * target_q
 
                 q1_pred = q1(obs_b, act_b, goal_b)
                 q2_pred = q2(obs_b, act_b, goal_b)
@@ -893,7 +894,7 @@ def td3_train(
 
             eval_env.close()
 
-    min_steps = global_step
+    min_steps = total_env_steps
     min_time = time.perf_counter() - start_time
     goal_tensor = torch.tensor(np.array(goal, dtype=np.float32), dtype=torch.float32, device=device).unsqueeze(0)
     with torch.no_grad():
