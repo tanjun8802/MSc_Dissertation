@@ -345,3 +345,38 @@ class Factorised_TD3_Critic(nn.Module):
 
         q_vals = (phi_sa * psi_g).sum(dim=-1, keepdim=True)
         return q_vals
+
+class DQN_Atari_CNN(nn.Module):
+    def __init__(self, obs_shape, num_actions):
+        super().__init__()
+        assert len(obs_shape) == 3, f"Expected obs_shape=(C,H,W), got {obs_shape}"
+        c, h, w = obs_shape
+
+        self.features = nn.Sequential(
+            nn.Conv2d(c, 32, kernel_size=8, stride=4),
+            nn.ReLU(),
+            nn.Conv2d(32, 64, kernel_size=4, stride=2),
+            nn.ReLU(),
+            nn.Conv2d(64, 64, kernel_size=3, stride=1),
+            nn.ReLU(),
+            nn.Flatten(),
+        )
+
+        with torch.no_grad():
+            dummy = torch.zeros(1, c, h, w)
+            n_flat = self.features(dummy).shape[1]
+
+        self.head = nn.Sequential(
+            nn.Linear(n_flat, 512),
+            nn.ReLU(),
+            nn.Linear(512, num_actions),
+        )
+
+    def forward(self, obs):
+        if obs.ndim == 3:
+            obs = obs.unsqueeze(0)
+        obs = obs.float()
+        if obs.max() > 1.5:
+            obs = obs / 255.0
+        x = self.features(obs)
+        return self.head(x)

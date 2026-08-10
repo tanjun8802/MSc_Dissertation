@@ -519,6 +519,25 @@ mujoco = [
 ]
 
 [[package]]
+name = "gymnasium-robotics"
+version = "1.4.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "gymnasium" },
+    { name = "imageio" },
+    { name = "jinja2" },
+    { name = "mujoco" },
+    { name = "numpy" },
+    { name = "packaging" },
+    { name = "pettingzoo" },
+    { name = "setuptools" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/ad/d1/9dd787d82ffcccf099aca1698c252aae262bbf59bf6824ad83b8f50c363a/gymnasium_robotics-1.4.2.tar.gz", hash = "sha256:d11e49bf3d481e9049e97536f74e2e62a88e651bdafee9da1b8258736a226010", size = 26075452, upload-time = "2026-01-02T21:50:27.523Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/71/86/2b890923c96b2ef3cf0f98ce91c54bad762db0982e07e6dd9b2afab9a2d3/gymnasium_robotics-1.4.2-py3-none-any.whl", hash = "sha256:a1743530431cb377e6b3b956d284bc96436fc68bac1648ef205054c178e7dc4b", size = 26174405, upload-time = "2026-01-02T21:50:24.315Z" },
+]
+
+[[package]]
 name = "idna"
 version = "3.18"
 source = { registry = "https://pypi.org/simple" }
@@ -873,6 +892,7 @@ dependencies = [
     { name = "autorom", extra = ["accept-rom-license"] },
     { name = "dm-control" },
     { name = "gymnasium", extra = ["atari", "classic-control"] },
+    { name = "gymnasium-robotics" },
     { name = "imageio" },
     { name = "ipykernel" },
     { name = "ipython" },
@@ -899,6 +919,7 @@ requires-dist = [
     { name = "gymnasium", specifier = ">=0.29" },
     { name = "gymnasium", extras = ["atari", "accept-rom-license"], specifier = ">=1.0.0" },
     { name = "gymnasium", extras = ["classic-control"] },
+    { name = "gymnasium-robotics", specifier = ">=1.0.0" },
     { name = "imageio", specifier = ">=2.37" },
     { name = "ipykernel" },
     { name = "ipython" },
@@ -1243,6 +1264,19 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/30/4b/90c937815137d43ce71ba043cd3566221e9df6b9c805f24b5d138c9d40a7/parso-0.8.7.tar.gz", hash = "sha256:eaaac4c9fdd5e9e8852dc778d2d7405897ec510f2a298071453e5e3a07914bb1", size = 401824, upload-time = "2026-05-01T23:13:02.138Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/99/5d/8268b644392ee874ee82a635cd0df1773de230bde356c38de28e298392cc/parso-0.8.7-py2.py3-none-any.whl", hash = "sha256:a8926eb2a1b915486941fdbd31e86a4baf88fe8c210f25f2f35ecec5b574ca1c", size = 107025, upload-time = "2026-05-01T23:12:58.867Z" },
+]
+
+[[package]]
+name = "pettingzoo"
+version = "1.26.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "gymnasium" },
+    { name = "numpy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/df/a6/b92fbff8dc3aabc0fcbd9ad26073b36161f96ab3bb8fa96ee1f907ea8431/pettingzoo-1.26.1.tar.gz", hash = "sha256:1bae0c7d3c51bf032f2e2abb589b211feec786de76cbbff87f8189ad51649820", size = 695464, upload-time = "2026-04-27T00:38:40.162Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/95/da/89907ebf66f435ad36395ec25af4a79e5f9a58821314811f33649959162d/pettingzoo-1.26.1-py3-none-any.whl", hash = "sha256:f4715dde696bf159d68bb1d3f764ff5083eb7e0cc32ac31a748e81ae530181dd", size = 805499, upload-time = "2026-04-27T00:38:38.377Z" },
 ]
 
 [[package]]

@@ -26,8 +26,8 @@ dependencies = [
   "autorom[accept-rom-license]>=0.6.1",
   "plotly>=5.23.0",
   "kaleido>=0.2.1",
+  "gymnasium-robotics>=1.0.0",
 ]
-
 [tool.setuptools.packages.find]
 exclude = ["papers*", "src*"]
 

@@ -305,185 +305,185 @@ class TrajectoryReplayBufferDiscrete(TrajectoryReplayBuffer):
     def __len__(self):
         return self.size
 
-    def add_episode(self, episode):
-        ep_id = self.current_episode_id
-        self.current_episode_id += 1
+    # def add_episode(self, episode):
+    #     ep_id = self.current_episode_id
+    #     self.current_episode_id += 1
 
-        ep_indices = []
+    #     ep_indices = []
 
-        T = len(episode["obs"])
-        for t in range(T):
-            idx = self.pos
+    #     T = len(episode["obs"])
+    #     for t in range(T):
+    #         idx = self.pos
 
-            if self.full:
-                old_ep = self.episode_id[idx]
-                if old_ep in self.episode_to_indices:
-                    try:
-                        self.episode_to_indices[old_ep].remove(idx)
-                        if len(self.episode_to_indices[old_ep]) == 0:
-                            del self.episode_to_indices[old_ep]
-                    except ValueError:
-                        pass
+    #         if self.full:
+    #             old_ep = self.episode_id[idx]
+    #             if old_ep in self.episode_to_indices:
+    #                 try:
+    #                     self.episode_to_indices[old_ep].remove(idx)
+    #                     if len(self.episode_to_indices[old_ep]) == 0:
+    #                         del self.episode_to_indices[old_ep]
+    #                 except ValueError:
+    #                     pass
 
-            self.obs[idx] = np.asarray(episode["obs"][t], dtype=np.float32)
-            self.actions[idx] = np.int64(episode["actions"][t])
-            self.rewards[idx] = np.asarray([episode["rewards"][t]], dtype=np.float32)
-            self.next_obs[idx] = np.asarray(episode["next_obs"][t], dtype=np.float32)
-            self.terminated[idx] = np.asarray([episode["terminated"][t]], dtype=np.float32)
-            self.truncated[idx] = np.asarray([episode["truncated"][t]], dtype=np.float32)
+    #         self.obs[idx] = np.asarray(episode["obs"][t], dtype=np.float32)
+    #         self.actions[idx] = np.int64(episode["actions"][t])
+    #         self.rewards[idx] = np.asarray([episode["rewards"][t]], dtype=np.float32)
+    #         self.next_obs[idx] = np.asarray(episode["next_obs"][t], dtype=np.float32)
+    #         self.terminated[idx] = np.asarray([episode["terminated"][t]], dtype=np.float32)
+    #         self.truncated[idx] = np.asarray([episode["truncated"][t]], dtype=np.float32)
 
-            self.episode_id[idx] = ep_id
-            self.timestep[idx] = t
+    #         self.episode_id[idx] = ep_id
+    #         self.timestep[idx] = t
 
-            ep_indices.append(idx)
+    #         ep_indices.append(idx)
 
-            self.pos = (self.pos + 1) % self.capacity
-            if self.size < self.capacity:
-                self.size += 1
-            else:
-                self.full = True
+    #         self.pos = (self.pos + 1) % self.capacity
+    #         if self.size < self.capacity:
+    #             self.size += 1
+    #         else:
+    #             self.full = True
 
-        self.episode_to_indices[ep_id] = ep_indices
+    #     self.episode_to_indices[ep_id] = ep_indices
 
-    def sample(self, batch_size):
-        assert self.size > 0, "Buffer is empty"
-        idxs = np.random.randint(0, self.size, size=batch_size)
+    # def sample(self, batch_size):
+    #     assert self.size > 0, "Buffer is empty"
+    #     idxs = np.random.randint(0, self.size, size=batch_size)
 
-        return ReplayBatch(
-            obs=torch.tensor(self.obs[idxs], device=self.device),
-            actions=torch.tensor(self.actions[idxs], device=self.device),
-            rewards=torch.tensor(self.rewards[idxs], device=self.device),
-            next_obs=torch.tensor(self.next_obs[idxs], device=self.device),
-            terminated=torch.tensor(self.terminated[idxs], device=self.device),
-            truncated=torch.tensor(self.truncated[idxs], device=self.device),
-            episode_id=torch.tensor(self.episode_id[idxs], device=self.device),
-            timestep=torch.tensor(self.timestep[idxs], device=self.device),
-            indices=torch.tensor(idxs, device=self.device),
-        )
+    #     return ReplayBatch(
+    #         obs=torch.tensor(self.obs[idxs], device=self.device),
+    #         actions=torch.tensor(self.actions[idxs], device=self.device),
+    #         rewards=torch.tensor(self.rewards[idxs], device=self.device),
+    #         next_obs=torch.tensor(self.next_obs[idxs], device=self.device),
+    #         terminated=torch.tensor(self.terminated[idxs], device=self.device),
+    #         truncated=torch.tensor(self.truncated[idxs], device=self.device),
+    #         episode_id=torch.tensor(self.episode_id[idxs], device=self.device),
+    #         timestep=torch.tensor(self.timestep[idxs], device=self.device),
+    #         indices=torch.tensor(idxs, device=self.device),
+    #     )
 
-    def sample_positive_future_goal_batch(self, batch_size, min_k=1, max_k=None, gamma=0.99, exclude_self_loops=True, atol=1e-6):
+    # def sample_positive_future_goal_batch(self, batch_size, min_k=1, max_k=None, gamma=0.99, exclude_self_loops=True, atol=1e-6):
         
-        assert self.size > 0, "Buffer is empty"
-        assert 0.0 <= gamma < 1.0, "gamma must be in [0, 1)"
+    #     assert self.size > 0, "Buffer is empty"
+    #     assert 0.0 <= gamma < 1.0, "gamma must be in [0, 1)"
 
-        valid_indices = []
-        future_goal_indices = []
+    #     valid_indices = []
+    #     future_goal_indices = []
 
-        tries = 0
-        max_tries = batch_size * 300  # higher because we may reject self-loops
+    #     tries = 0
+    #     max_tries = batch_size * 300  # higher because we may reject self-loops
 
-        while len(valid_indices) < batch_size and tries < max_tries:
-            idx = np.random.randint(0, self.size)
-            ep_id = self.episode_id[idx]
-            t = self.timestep[idx]
+    #     while len(valid_indices) < batch_size and tries < max_tries:
+    #         idx = np.random.randint(0, self.size)
+    #         ep_id = self.episode_id[idx]
+    #         t = self.timestep[idx]
 
-            if ep_id == -1 or ep_id not in self.episode_to_indices:
-                tries += 1
-                continue
+    #         if ep_id == -1 or ep_id not in self.episode_to_indices:
+    #             tries += 1
+    #             continue
 
-            ep_idxs = self.episode_to_indices[ep_id]
-            ep_len = len(ep_idxs)
+    #         ep_idxs = self.episode_to_indices[ep_id]
+    #         ep_len = len(ep_idxs)
 
-            if t >= ep_len - 1:
-                tries += 1
-                continue
+    #         if t >= ep_len - 1:
+    #             tries += 1
+    #             continue
 
-            # Reject self-loop anchor transitions: obs -> next_obs does not move
-            if exclude_self_loops:
-                if np.allclose(self.obs[idx], self.next_obs[idx], atol=atol, rtol=0.0):
-                    tries += 1
-                    continue
+    #         # Reject self-loop anchor transitions: obs -> next_obs does not move
+    #         if exclude_self_loops:
+    #             if np.allclose(self.obs[idx], self.next_obs[idx], atol=atol, rtol=0.0):
+    #                 tries += 1
+    #                 continue
 
-            max_valid_k = ep_len - 1 - t
-            if max_k is not None:
-                max_valid_k = min(max_valid_k, max_k)
+    #         max_valid_k = ep_len - 1 - t
+    #         if max_k is not None:
+    #             max_valid_k = min(max_valid_k, max_k)
 
-            if max_valid_k < min_k:
-                tries += 1
-                continue
+    #         if max_valid_k < min_k:
+    #             tries += 1
+    #             continue
 
-            ks = np.arange(min_k, max_valid_k + 1, dtype=np.int64)
+    #         ks = np.arange(min_k, max_valid_k + 1, dtype=np.int64)
 
-            if gamma == 0.0:
-                probs = np.zeros_like(ks, dtype=np.float64)
-                probs[0] = 1.0
-            else:
-                log_weights = (ks - 1) * np.log(gamma)
-                log_weights -= np.max(log_weights)
-                weights = np.exp(log_weights)
-                probs = weights / weights.sum()
+    #         if gamma == 0.0:
+    #             probs = np.zeros_like(ks, dtype=np.float64)
+    #             probs[0] = 1.0
+    #         else:
+    #             log_weights = (ks - 1) * np.log(gamma)
+    #             log_weights -= np.max(log_weights)
+    #             weights = np.exp(log_weights)
+    #             probs = weights / weights.sum()
 
-            k = np.random.choice(ks, p=probs)
-            future_t = t + k
-            future_idx = ep_idxs[future_t]
+    #         k = np.random.choice(ks, p=probs)
+    #         future_t = t + k
+    #         future_idx = ep_idxs[future_t]
 
-            valid_indices.append(idx)
-            future_goal_indices.append(future_idx)
-            tries += 1
+    #         valid_indices.append(idx)
+    #         future_goal_indices.append(future_idx)
+    #         tries += 1
 
-        assert len(valid_indices) == batch_size, (
-            f"Could only sample {len(valid_indices)} valid transitions out of "
-            f"requested {batch_size}. Increase max_tries or collect more non-self-loop data."
-        )
+    #     assert len(valid_indices) == batch_size, (
+    #         f"Could only sample {len(valid_indices)} valid transitions out of "
+    #         f"requested {batch_size}. Increase max_tries or collect more non-self-loop data."
+    #     )
 
-        idxs = np.array(valid_indices, dtype=np.int64)
-        g_idxs = np.array(future_goal_indices, dtype=np.int64)
+    #     idxs = np.array(valid_indices, dtype=np.int64)
+    #     g_idxs = np.array(future_goal_indices, dtype=np.int64)
 
-        batch = {
-            "obs": torch.tensor(self.obs[idxs], device=self.device),
-            "actions": torch.tensor(self.actions[idxs], device=self.device),
-            "next_obs": torch.tensor(self.next_obs[idxs], device=self.device),
-            "goals": torch.tensor(self.obs[g_idxs], device=self.device),
-            "rewards": torch.tensor(self.rewards[idxs], device=self.device),
-            "terminated": torch.tensor(self.terminated[idxs], device=self.device),
-            "truncated": torch.tensor(self.truncated[idxs], device=self.device),
-            "episode_id": torch.tensor(self.episode_id[idxs], device=self.device),
-            "timestep": torch.tensor(self.timestep[idxs], device=self.device),
-            "future_timestep": torch.tensor(self.timestep[g_idxs], device=self.device),
-            "indices": torch.tensor(idxs, device=self.device),
-            "goal_indices": torch.tensor(g_idxs, device=self.device),
-        }
-        return batch
+    #     batch = {
+    #         "obs": torch.tensor(self.obs[idxs], device=self.device),
+    #         "actions": torch.tensor(self.actions[idxs], device=self.device),
+    #         "next_obs": torch.tensor(self.next_obs[idxs], device=self.device),
+    #         "goals": torch.tensor(self.obs[g_idxs], device=self.device),
+    #         "rewards": torch.tensor(self.rewards[idxs], device=self.device),
+    #         "terminated": torch.tensor(self.terminated[idxs], device=self.device),
+    #         "truncated": torch.tensor(self.truncated[idxs], device=self.device),
+    #         "episode_id": torch.tensor(self.episode_id[idxs], device=self.device),
+    #         "timestep": torch.tensor(self.timestep[idxs], device=self.device),
+    #         "future_timestep": torch.tensor(self.timestep[g_idxs], device=self.device),
+    #         "indices": torch.tensor(idxs, device=self.device),
+    #         "goal_indices": torch.tensor(g_idxs, device=self.device),
+    #     }
+    #     return batch
 
-    def sample_negative_future_goals(self, batch_size):
-        idxs = np.random.randint(0, self.size, size=batch_size) # pick random indices from the buffer and indexing the observations
-        return torch.tensor(self.obs[idxs], device=self.device)
+    # def sample_negative_future_goals(self, batch_size):
+    #     idxs = np.random.randint(0, self.size, size=batch_size) # pick random indices from the buffer and indexing the observations
+    #     return torch.tensor(self.obs[idxs], device=self.device)
     
-    def sample_random_goals(self, batch_size):
-        idxs = np.random.randint(0, self.size, size=batch_size) # pick random indices from the buffer and indexing the observations
-        return torch.tensor(self.obs[idxs], device=self.device)
+    # def sample_random_goals(self, batch_size):
+    #     idxs = np.random.randint(0, self.size, size=batch_size) # pick random indices from the buffer and indexing the observations
+    #     return torch.tensor(self.obs[idxs], device=self.device)
     
-    def sample_positive_future_goal_episode(self, episode_index, timestep, k, gamma = 0.99):
+    # def sample_positive_future_goal_episode(self, episode_index, timestep, k, gamma = 0.99):
 
-        if episode_index not in self.episode_to_indices:
-            raise ValueError(f"Episode index {episode_index} not found in buffer")
+    #     if episode_index not in self.episode_to_indices:
+    #         raise ValueError(f"Episode index {episode_index} not found in buffer")
 
-        ep_idxs = self.episode_to_indices[episode_index]
-        ep_len = len(ep_idxs)
+    #     ep_idxs = self.episode_to_indices[episode_index]
+    #     ep_len = len(ep_idxs)
 
-        if timestep >= ep_len - 1:
-            raise ValueError(f"Timestep {timestep} is out of bounds for episode of length {ep_len}")
+    #     if timestep >= ep_len - 1:
+    #         raise ValueError(f"Timestep {timestep} is out of bounds for episode of length {ep_len}")
 
-        max_valid_k = ep_len - 1 - timestep
-        if k > max_valid_k:
-            raise ValueError(f"k={k} is too large for episode of length {ep_len} at timestep {timestep}")
+    #     max_valid_k = ep_len - 1 - timestep
+    #     if k > max_valid_k:
+    #         raise ValueError(f"k={k} is too large for episode of length {ep_len} at timestep {timestep}")
 
-        geometric = torch.distributions.Geometric(probs=torch.tensor(1-gamma)) # geometric distribution to sample k with probability proportional to gamma^k
-        steps_ahead = int(geometric.sample().item()) + 1 # sample k, cast to int, and add 1 to ensure it's at least t+1
-        steps_ahead = min(steps_ahead, max_valid_k) # clamp so we never index past the end of the episode
-        print(f"Sampled k={steps_ahead} from geometric distribution with gamma={gamma}")
-        future_t = timestep + steps_ahead
-        future_idx = ep_idxs[future_t]
-        print(self.obs[future_idx])
-        return torch.tensor(self.obs[future_idx], device=self.device) # return the future state as the positive goal
+    #     geometric = torch.distributions.Geometric(probs=torch.tensor(1-gamma)) # geometric distribution to sample k with probability proportional to gamma^k
+    #     steps_ahead = int(geometric.sample().item()) + 1 # sample k, cast to int, and add 1 to ensure it's at least t+1
+    #     steps_ahead = min(steps_ahead, max_valid_k) # clamp so we never index past the end of the episode
+    #     print(f"Sampled k={steps_ahead} from geometric distribution with gamma={gamma}")
+    #     future_t = timestep + steps_ahead
+    #     future_idx = ep_idxs[future_t]
+    #     print(self.obs[future_idx])
+    #     return torch.tensor(self.obs[future_idx], device=self.device) # return the future state as the positive goal
 
-    def stats(self):
-        return {
-            "size": self.size,
-            "capacity": self.capacity,
-            "num_episodes": len(self.episode_to_indices),
-            "current_episode_id": self.current_episode_id,
-        }
+    # def stats(self):
+    #     return {
+    #         "size": self.size,
+    #         "capacity": self.capacity,
+    #         "num_episodes": len(self.episode_to_indices),
+    #         "current_episode_id": self.current_episode_id,
+    #     }
 
 
 def evaluate_policy(
@@ -614,7 +614,6 @@ def estimate_fisher_diag(
         next_obs_t = batch.next_obs
         term_t = batch.terminated
         trunc_t = batch.truncated
-        done_t = torch.clamp(term_t + trunc_t, 0.0, 1.0)
 
         B = obs_t.shape[0]
         goal_batch = build_goal_batch(goal, B, device)
@@ -622,7 +621,7 @@ def estimate_fisher_diag(
         with torch.no_grad():
             next_q_vals = target_model.q_val_for_argmax_action(next_obs_t, goal_batch)
             next_q = next_q_vals.max(dim=-1, keepdim=True).values
-            target = rew_t + gamma * (1.0 - done_t) * next_q
+            target = rew_t + gamma * (1.0 - term_t) * next_q
 
         act_onehot = torch.nn.functional.one_hot(
             act_t.squeeze(-1),
@@ -1164,3 +1163,384 @@ class EarlyStopperRL:
             "should_stop": bool(should_stop),
         }
         return should_stop, info
+
+
+def get_free_cells(maze_layout):
+    free_cells = []
+    for y, row in enumerate(maze_layout):
+        for x, val in enumerate(row):
+            if val == 0:
+                free_cells.append((x, y))  # x, y order
+    return free_cells
+
+def sample_goals(num_goals, rng, cells, exclude=None):
+    exclude = set() if exclude is None else set(exclude)
+    candidates = [g for g in cells if g not in exclude]
+    assert num_goals <= len(candidates), "num_goals exceeds available free cells"
+    idx = rng.choice(len(candidates), size=num_goals, replace=False)
+    return [candidates[i] for i in idx]
+class AtariReplayBuffer:
+    def __init__(self, capacity, obs_shape, device="cpu"):
+        self.capacity = int(capacity)
+        self.obs_shape = tuple(obs_shape)
+        self.device = device
+
+        self.obs = np.zeros((self.capacity, *self.obs_shape), dtype=np.float32)
+        self.next_obs = np.zeros((self.capacity, *self.obs_shape), dtype=np.float32)
+        self.actions = np.zeros((self.capacity,), dtype=np.int64)
+        self.rewards = np.zeros((self.capacity, 1), dtype=np.float32)
+        self.terminated = np.zeros((self.capacity, 1), dtype=np.float32)
+        self.truncated = np.zeros((self.capacity, 1), dtype=np.float32)
+        self.episode_id = np.full((self.capacity,), -1, dtype=np.int64)
+        self.timestep = np.full((self.capacity,), -1, dtype=np.int64)
+
+        self.pos = 0
+        self.size = 0
+        self.full = False
+        self.current_episode_id = 0
+        self.episode_to_indices = {}
+
+    def __len__(self):
+        return self.size
+
+    def _remove_index_from_episode_mapping(self, idx):
+        old_ep = self.episode_id[idx]
+        if old_ep in self.episode_to_indices:
+            try:
+                self.episode_to_indices[old_ep].remove(idx)
+                if len(self.episode_to_indices[old_ep]) == 0:
+                    del self.episode_to_indices[old_ep]
+            except ValueError:
+                pass
+
+    def add_transition(
+        self,
+        obs,
+        action,
+        reward,
+        next_obs,
+        terminated,
+        truncated=False,
+        episode_id=None,
+        timestep=None,
+    ):
+        idx = self.pos
+
+        if self.full:
+            self._remove_index_from_episode_mapping(idx)
+
+        if episode_id is None:
+            ep_id = self.current_episode_id
+            self.current_episode_id += 1
+        else:
+            ep_id = int(episode_id)
+            if ep_id >= self.current_episode_id:
+                self.current_episode_id = ep_id + 1
+
+        t = 0 if timestep is None else int(timestep)
+
+        self.obs[idx] = np.asarray(obs, dtype=np.float32)
+        self.actions[idx] = int(action)
+        self.rewards[idx] = np.asarray([reward], dtype=np.float32)
+        self.next_obs[idx] = np.asarray(next_obs, dtype=np.float32)
+        self.terminated[idx] = np.asarray([terminated], dtype=np.float32)
+        self.truncated[idx] = np.asarray([truncated], dtype=np.float32)
+        self.episode_id[idx] = ep_id
+        self.timestep[idx] = t
+
+        if ep_id not in self.episode_to_indices:
+            self.episode_to_indices[ep_id] = []
+        self.episode_to_indices[ep_id].append(idx)
+
+        self.pos = (self.pos + 1) % self.capacity
+        if self.size < self.capacity:
+            self.size += 1
+        else:
+            self.full = True
+
+    def sample(self, batch_size):
+        assert self.size > 0, "Buffer is empty"
+        idxs = np.random.randint(0, self.size, size=int(batch_size))
+        return ReplayBatch(
+            obs=torch.tensor(self.obs[idxs], device=self.device),
+            actions=torch.tensor(self.actions[idxs], device=self.device),
+            rewards=torch.tensor(self.rewards[idxs], device=self.device),
+            next_obs=torch.tensor(self.next_obs[idxs], device=self.device),
+            terminated=torch.tensor(self.terminated[idxs], device=self.device),
+            truncated=torch.tensor(self.truncated[idxs], device=self.device),
+            episode_id=torch.tensor(self.episode_id[idxs], device=self.device),
+            timestep=torch.tensor(self.timestep[idxs], device=self.device),
+            indices=torch.tensor(idxs, device=self.device),
+        )
+
+    def stats(self):
+        return {
+            "size": self.size,
+            "capacity": self.capacity,
+            "num_episodes": len(self.episode_to_indices),
+            "current_episode_id": self.current_episode_id,
+            "obs_shape": self.obs_shape,
+        }
+
+@dataclass
+class HERBatch:
+    obs: torch.Tensor
+    actions: torch.Tensor
+    rewards: torch.Tensor
+    next_obs: torch.Tensor
+    terminated: torch.Tensor
+    truncated: torch.Tensor
+    episode_id: torch.Tensor
+    timestep: torch.Tensor
+    indices: torch.Tensor
+    goals: torch.Tensor
+    achieved_goals: torch.Tensor
+    next_achieved_goals: torch.Tensor
+    goal_indices: torch.Tensor
+
+    def __len__(self):
+        return self.obs.shape[0]
+
+
+@dataclass
+class HERBatch:
+    obs: torch.Tensor
+    actions: torch.Tensor
+    rewards: torch.Tensor
+    next_obs: torch.Tensor
+    terminated: torch.Tensor
+    truncated: torch.Tensor
+    episode_id: torch.Tensor
+    timestep: torch.Tensor
+    indices: torch.Tensor
+    goals: torch.Tensor
+    achieved_goals: torch.Tensor
+    next_achieved_goals: torch.Tensor
+    goal_indices: torch.Tensor
+
+    def __len__(self):
+        return self.obs.shape[0]
+
+
+class HERTrajectoryReplayBuffer(TrajectoryReplayBuffer):
+    def __init__(
+        self,
+        capacity,
+        obs_dim,
+        action_dim,
+        goal_dim=3,
+        device="cpu",
+        goal_radius=0.05,
+    ):
+        super().__init__(capacity, obs_dim, action_dim, device=device)
+        self.goal_dim = int(goal_dim)
+        self.goal_radius = float(goal_radius)
+
+        self.achieved_goals = np.zeros((capacity, goal_dim), dtype=np.float32)
+        self.desired_goals = np.zeros((capacity, goal_dim), dtype=np.float32)
+        self.next_achieved_goals = np.zeros((capacity, goal_dim), dtype=np.float32)
+
+    def _compute_reward(self, achieved, desired):
+        dist = np.linalg.norm(achieved - desired)
+        return 1.0 if dist <= self.goal_radius else 0.0
+
+    def add_transition(
+        self,
+        obs,
+        action,
+        reward,
+        next_obs,
+        terminated,
+        truncated=False,
+        episode_id=None,
+        timestep=None,
+        desired_goal=None,
+        achieved_goal=None,
+        next_achieved_goal=None,
+    ):
+        idx = self.pos
+
+        if self.full:
+            self._remove_index_from_episode_mapping(idx)
+
+        if episode_id is None:
+            ep_id = self.current_episode_id
+            self.current_episode_id += 1
+        else:
+            ep_id = int(episode_id)
+            if ep_id >= self.current_episode_id:
+                self.current_episode_id = ep_id + 1
+
+        t = 0 if timestep is None else int(timestep)
+
+        obs = np.asarray(obs, dtype=np.float32).ravel()
+        next_obs = np.asarray(next_obs, dtype=np.float32).ravel()
+        action = np.asarray(action, dtype=np.float32).ravel()
+
+        if achieved_goal is None:
+            raise ValueError("achieved_goal is required for HER buffer")
+        if next_achieved_goal is None:
+            raise ValueError("next_achieved_goal is required for HER buffer")
+        if desired_goal is None:
+            raise ValueError("desired_goal is required for HER buffer")
+
+        achieved_goal = np.asarray(achieved_goal, dtype=np.float32).ravel()
+        next_achieved_goal = np.asarray(next_achieved_goal, dtype=np.float32).ravel()
+        desired_goal = np.asarray(desired_goal, dtype=np.float32).ravel()
+
+        self.obs[idx] = obs
+        self.actions[idx] = action
+        self.rewards[idx] = np.asarray([reward], dtype=np.float32)
+        self.next_obs[idx] = next_obs
+        self.terminated[idx] = np.asarray([terminated], dtype=np.float32)
+        self.truncated[idx] = np.asarray([truncated], dtype=np.float32)
+
+        self.episode_id[idx] = ep_id
+        self.timestep[idx] = t
+
+        self.achieved_goals[idx] = achieved_goal
+        self.desired_goals[idx] = desired_goal
+        self.next_achieved_goals[idx] = next_achieved_goal
+
+        if ep_id not in self.episode_to_indices:
+            self.episode_to_indices[ep_id] = []
+        self.episode_to_indices[ep_id].append(idx)
+
+        self.pos = (self.pos + 1) % self.capacity
+
+        if self.size < self.capacity:
+            self.size += 1
+        else:
+            self.full = True
+
+    def sample(self, batch_size):
+        return super().sample(batch_size)
+
+    def sample_future_goal_pairs(self, batch_size, min_k=1, max_k=None, gamma=0.99):
+        assert self.size > 0, "Buffer is empty"
+        assert 0.0 <= gamma < 1.0, "gamma must be in [0, 1)"
+
+        valid_indices = []
+        future_goal_indices = []
+        tries = 0
+        max_tries = batch_size * 200
+
+        while len(valid_indices) < batch_size and tries < max_tries:
+            idx = np.random.randint(0, self.size)
+            ep_id = self.episode_id[idx]
+            t = self.timestep[idx]
+
+            if ep_id == -1 or ep_id not in self.episode_to_indices:
+                tries += 1
+                continue
+
+            ep_idxs = self.episode_to_indices[ep_id]
+            ep_len = len(ep_idxs)
+
+            if t >= ep_len - 1:
+                tries += 1
+                continue
+
+            max_valid_k = ep_len - 1 - t
+            if max_k is not None:
+                max_valid_k = min(max_valid_k, max_k)
+
+            if max_valid_k < min_k:
+                tries += 1
+                continue
+
+            ks = np.arange(min_k, max_valid_k + 1, dtype=np.int64)
+
+            if gamma == 0.0:
+                probs = np.zeros_like(ks, dtype=np.float64)
+                probs[0] = 1.0
+            else:
+                log_weights = (ks - 1) * np.log(gamma)
+                log_weights -= np.max(log_weights)
+                weights = np.exp(log_weights)
+                probs = weights / weights.sum()
+
+            k = np.random.choice(ks, p=probs)
+            future_t = t + k
+            future_idx = ep_idxs[future_t]
+
+            valid_indices.append(idx)
+            future_goal_indices.append(future_idx)
+            tries += 1
+
+        assert len(valid_indices) == batch_size, (
+            f"Could only sample {len(valid_indices)} valid transitions out of "
+            f"requested {batch_size}."
+        )
+
+        idxs = np.array(valid_indices, dtype=np.int64)
+        g_idxs = np.array(future_goal_indices, dtype=np.int64)
+
+        return {
+            "obs": torch.tensor(self.obs[idxs], device=self.device),
+            "actions": torch.tensor(self.actions[idxs], device=self.device),
+            "next_obs": torch.tensor(self.next_obs[idxs], device=self.device),
+            "goals": torch.tensor(self.next_achieved_goals[g_idxs], device=self.device),
+            "rewards": torch.tensor(self.rewards[idxs], device=self.device),
+            "terminated": torch.tensor(self.terminated[idxs], device=self.device),
+            "truncated": torch.tensor(self.truncated[idxs], device=self.device),
+            "episode_id": torch.tensor(self.episode_id[idxs], device=self.device),
+            "timestep": torch.tensor(self.timestep[idxs], device=self.device),
+            "future_timestep": torch.tensor(self.timestep[g_idxs], device=self.device),
+            "indices": torch.tensor(idxs, device=self.device),
+            "goal_indices": torch.tensor(g_idxs, device=self.device),
+        }
+
+    def sample_her_batch(self, batch_size, her_ratio=0.8):
+        assert self.size > 0, "Buffer is empty"
+
+        idxs = np.random.randint(0, self.size, size=batch_size)
+        her_mask = np.random.rand(batch_size) < her_ratio
+
+        goals = self.desired_goals[idxs].copy()
+        rewards = self.rewards[idxs].copy()
+
+        for i in range(batch_size):
+            if not her_mask[i]:
+                continue
+
+            ep_id = self.episode_id[idxs[i]]
+            t = self.timestep[idxs[i]]
+
+            if ep_id == -1 or ep_id not in self.episode_to_indices:
+                continue
+
+            ep_idxs = self.episode_to_indices[ep_id]
+            future_candidates = [j for j in ep_idxs if self.timestep[j] > t]
+
+            if len(future_candidates) == 0:
+                continue
+
+            g_idx = np.random.choice(future_candidates)
+            goals[i] = self.next_achieved_goals[g_idx]
+
+            achieved = self.next_achieved_goals[idxs[i]]
+            rewards[i] = np.array([self._compute_reward(achieved, goals[i])], dtype=np.float32)
+
+        return {
+            "obs": torch.tensor(self.obs[idxs], device=self.device),
+            "actions": torch.tensor(self.actions[idxs], device=self.device),
+            "next_obs": torch.tensor(self.next_obs[idxs], device=self.device),
+            "goals": torch.tensor(goals, device=self.device),
+            "rewards": torch.tensor(rewards, device=self.device),
+            "terminated": torch.tensor(self.terminated[idxs], device=self.device),
+            "truncated": torch.tensor(self.truncated[idxs], device=self.device),
+            "episode_id": torch.tensor(self.episode_id[idxs], device=self.device),
+            "timestep": torch.tensor(self.timestep[idxs], device=self.device),
+            "indices": torch.tensor(idxs, device=self.device),
+        }
+
+    def stats(self):
+        base = super().stats()
+        base.update(
+            {
+                "goal_dim": self.goal_dim,
+                "goal_radius": self.goal_radius,
+            }
+        )
+        return base
