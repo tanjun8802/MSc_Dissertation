@@ -203,3 +203,40 @@ def goal_memory_contrastive_loss(
 
     return loss
 
+def goal_prototype_anchor_loss(
+    q_network,
+    goal_batch,
+    prototype,
+):
+    """
+    Forces the current goal encoder output to match
+    the retrieved prototype embedding.
+    """
+
+    if prototype is None:
+        return torch.zeros(
+            (),
+            device=goal_batch.device,
+        )
+
+    current_embedding = (
+        q_network.encode_goal(
+            goal_batch
+        )
+    )
+
+    prototype_tensor = torch.as_tensor(
+        prototype,
+        dtype=current_embedding.dtype,
+        device=current_embedding.device,
+    )
+
+    prototype_tensor = prototype_tensor.view(
+        1,
+        -1,
+    ).expand_as(current_embedding)
+
+    return F.mse_loss(
+        current_embedding,
+        prototype_tensor,
+    )

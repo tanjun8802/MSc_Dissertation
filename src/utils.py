@@ -1544,3 +1544,507 @@ class HERTrajectoryReplayBuffer(TrajectoryReplayBuffer):
             }
         )
         return base
+
+
+def _as_float_vector(x):
+    """
+    Convert a task descriptor or encoder output into a 1-D
+    NumPy float vector.
+    """
+
+    if torch.is_tensor(x):
+        x = x.detach().cpu().numpy()
+
+    x = np.asarray(
+        x,
+        dtype=np.float32,
+    )
+
+    return x.reshape(-1)
+
+
+def _cosine_similarity_np(x, y):
+    x = _as_float_vector(x)
+    y = _as_float_vector(y)
+
+    x_norm = np.linalg.norm(x)
+    y_norm = np.linalg.norm(y)
+
+    if x_norm < 1e-8 or y_norm < 1e-8:
+        return 0.0
+
+    return float(
+        np.dot(x, y)
+        / (x_norm * y_norm)
+    )
+
+
+def _negative_l2_similarity(x, y):
+    """
+    Larger values mean more similar.
+    """
+
+    x = _as_float_vector(x)
+    y = _as_float_vector(y)
+
+    return -float(
+        np.linalg.norm(x - y)
+    )
+
+
+def encode_task_for_similarity(
+    raw_task,
+    task_type,
+    task_similarity_encoder=None,
+    device=None,
+):
+    """
+    Convert a raw task into a representation used only
+    for similarity retrieval.
+
+    Supported task types:
+
+        "maze":
+            raw_task is a coordinate such as (x, y)
+
+        "vector":
+            raw_task is a numeric descriptor
+
+        "text":
+            task_similarity_encoder must encode text
+
+        "custom":
+            task_similarity_encoder must handle raw_task
+    """
+
+    task_type = task_type.lower()
+
+    if task_type == "maze":
+        return _as_float_vector(raw_task)
+
+    if task_type == "vector":
+        return _as_float_vector(raw_task)
+
+    if task_type in {"text", "prompt", "nlp", "custom"}:
+        if task_similarity_encoder is None:
+            raise ValueError(
+                f"A task_similarity_encoder is required "
+                f"for task_type='{task_type}'."
+            )
+
+        encoded = task_similarity_encoder(
+            raw_task
+        )
+
+        return _as_float_vector(encoded)
+
+    raise ValueError(
+        f"Unknown task_type: {task_type}"
+    )
+
+
+def compute_task_similarity(
+    new_raw_task,
+    old_raw_task,
+    task_type,
+    task_similarity_encoder=None,
+    maze_distance_fn=None,
+):
+    """
+    Return a similarity score where larger means more similar.
+
+    This function compares only the new task against one
+    previously learned task.
+    """
+
+    task_type = task_type.lower()
+
+    if task_type == "maze":
+
+        if maze_distance_fn is not None:
+            distance = maze_distance_fn(
+                new_raw_task,
+                old_raw_task,
+            )
+
+            return -float(distance)
+
+        # Baseline: Euclidean distance in maze coordinates.
+        return _negative_l2_similarity(
+            new_raw_task,
+            old_raw_task,
+        )
+
+    if task_type == "vector":
+        new_vector = encode_task_for_similarity(
+            new_raw_task,
+            task_type="vector",
+        )
+
+        old_vector = encode_task_for_similarity(
+            old_raw_task,
+            task_type="vector",
+        )
+
+        return _cosine_similarity_np(
+            new_vector,
+            old_vector,
+        )
+
+    if task_type in {
+        "text",
+        "prompt",
+        "nlp",
+        "custom",
+    }:
+        new_vector = encode_task_for_similarity(
+            new_raw_task,
+            task_type=task_type,
+            task_similarity_encoder=task_similarity_encoder,
+        )
+
+        old_vector = encode_task_for_similarity(
+            old_raw_task,
+            task_type=task_type,
+            task_similarity_encoder=task_similarity_encoder,
+        )
+
+        return _cosine_similarity_np(
+            new_vector,
+            old_vector,
+        )
+
+    raise ValueError(
+        f"Unknown task_type: {task_type}"
+    )
+
+def retrieve_similar_task_embeddings(
+    new_raw_task,
+    task_type,
+    task_memory,
+    top_k=3,
+    similarity_temperature=1.0,
+    minimum_similarity=None,
+    task_similarity_encoder=None,
+    maze_distance_fn=None,
+):
+    """
+    Retrieve the most similar tasks from task_memory and
+    construct a weighted prototype from their learned
+    task embeddings.
+
+    Only previously stored tasks are considered.
+
+    Returns:
+        None if task_memory is empty or no task passes
+        minimum_similarity.
+
+        Otherwise:
+        {
+            "prototype": np.ndarray,
+            "indices": np.ndarray,
+            "similarities": np.ndarray,
+            "weights": np.ndarray,
+            "retrieved_items": list,
+        }
+    """
+
+    if task_memory is None:
+        return None
+
+    if len(task_memory) == 0:
+        return None
+
+    similarities = []
+
+    for item in task_memory:
+
+        old_raw_task = item["raw_task"]
+
+        old_task_type = item.get(
+            "task_type",
+            task_type,
+        )
+
+        if old_task_type != task_type:
+            raise ValueError(
+                "New task type and stored task type "
+                "must match for this retrieval call."
+            )
+
+        similarity = compute_task_similarity(
+            new_raw_task=new_raw_task,
+            old_raw_task=old_raw_task,
+            task_type=task_type,
+            task_similarity_encoder=(
+                task_similarity_encoder
+            ),
+            maze_distance_fn=maze_distance_fn,
+        )
+
+        similarities.append(similarity)
+
+    similarities = np.asarray(
+        similarities,
+        dtype=np.float32,
+    )
+
+    if minimum_similarity is not None:
+        valid_indices = np.where(
+            similarities >= minimum_similarity
+        )[0]
+
+        if len(valid_indices) == 0:
+            return None
+
+    else:
+        valid_indices = np.arange(
+            len(task_memory)
+        )
+
+    # Sort only previous tasks that passed the threshold.
+    ranked_indices = valid_indices[
+        np.argsort(
+            similarities[valid_indices]
+        )[::-1]
+    ]
+
+    selected_indices = ranked_indices[
+        :top_k
+    ]
+
+    selected_similarities = similarities[
+        selected_indices
+    ]
+
+    temperature = max(
+        float(similarity_temperature),
+        1e-8,
+    )
+
+    # Larger similarity means higher retrieval weight.
+    logits = selected_similarities / temperature
+    logits = logits - logits.max()
+
+    weights = np.exp(logits)
+    weights = weights / (
+        weights.sum() + 1e-8
+    )
+
+    selected_embeddings = np.stack(
+        [
+            _as_float_vector(
+                task_memory[i]["task_embedding"]
+            )
+            for i in selected_indices
+        ],
+        axis=0,
+    )
+
+    prototype = (
+        weights[:, None]
+        * selected_embeddings
+    ).sum(axis=0)
+
+    prototype_norm = np.linalg.norm(
+        prototype
+    )
+
+    if prototype_norm > 1e-8:
+        prototype = (
+            prototype
+            / prototype_norm
+        )
+
+    return {
+        "prototype": prototype.astype(
+            np.float32
+        ),
+        "indices": selected_indices,
+        "similarities": selected_similarities,
+        "weights": weights.astype(
+            np.float32
+        ),
+        "retrieved_items": [
+            task_memory[i]
+            for i in selected_indices
+        ],
+    }
+
+
+def evaluate_model(
+    model,
+    env,
+    num_episodes=100,
+    goal=None,
+):
+    successes = []
+    returns = []
+    lengths = []
+    minimum_distances = []
+
+    for episode in range(num_episodes):
+        obs, info = env.reset(
+            seed=1_000 + episode,
+        )
+
+        terminated = False
+        truncated = False
+
+        episode_return = 0.0
+        episode_length = 0
+        minimum_distance = float("inf")
+        episode_success = False
+
+        while not (terminated or truncated):
+            action, _ = model.predict(
+                obs,
+                deterministic=True,
+            )
+
+            obs, reward, terminated, truncated, info = (
+                env.step(action)
+            )
+
+            episode_return += float(reward)
+            episode_length += 1
+
+            if "goal_dist" in info:
+                distance = float(
+                    info["goal_dist"]
+                )
+            else:
+                distance = float(
+                    np.linalg.norm(
+                        np.asarray(
+                            obs["achieved_goal"],
+                            dtype=np.float32,
+                        )
+                        - goal
+                    )
+                )
+
+            minimum_distance = min(
+                minimum_distance,
+                distance,
+            )
+
+            if "is_success" in info:
+                episode_success = bool(
+                    info["is_success"]
+                )
+            elif distance <= 0.05:
+                episode_success = True
+
+        successes.append(
+            float(episode_success)
+        )
+        returns.append(episode_return)
+        lengths.append(episode_length)
+        minimum_distances.append(
+            minimum_distance
+        )
+
+    return {
+        "goal": goal,
+        "success_rate": float(
+            np.mean(successes)
+        ),
+        "mean_return": float(
+            np.mean(returns)
+        ),
+        "return_std": float(
+            np.std(returns)
+        ),
+        "mean_episode_length": float(
+            np.mean(lengths)
+        ),
+        "mean_minimum_distance": float(
+            np.mean(minimum_distances)
+        ),
+        "best_minimum_distance": float(
+            np.min(minimum_distances)
+        ),
+    }
+
+def configure_factorised_learning_rates(
+    model,
+    actor_lr=1e-3,
+    phi_lr=1e-4,
+    goal_lr=1e-3,
+):
+    critic = model.critic
+
+    phi_params = []
+    goal_params = []
+
+    for name, parameter in (
+        critic.named_parameters()
+    ):
+        if "state_action_encoder" in name:
+            phi_params.append(parameter)
+
+        elif "goal_encoder" in name:
+            goal_params.append(parameter)
+
+        else:
+            raise RuntimeError(
+                "Unexpected critic parameter: "
+                f"{name}"
+            )
+
+    if len(phi_params) == 0:
+        raise RuntimeError(
+            "No parameters matched "
+            "'state_action_encoder'. "
+            "Check critic parameter names."
+        )
+
+    if len(goal_params) == 0:
+        raise RuntimeError(
+            "No parameters matched "
+            "'goal_encoder'. "
+            "Check critic parameter names."
+        )
+
+    # Replace the optimiser rather than mutating its
+    # existing groups. This prevents duplicated groups
+    # if the function is accidentally called twice.
+    critic.optimizer = torch.optim.Adam(
+        [
+            {
+                "params": phi_params,
+                "lr": phi_lr,
+            },
+            {
+                "params": goal_params,
+                "lr": goal_lr,
+            },
+        ],
+        eps=1e-5,
+    )
+
+    # The actor still uses one optimiser group.
+    for group in model.actor.optimizer.param_groups:
+        group["lr"] = actor_lr
+
+    print(
+        "Configured factorised learning rates:"
+    )
+
+    for idx, group in enumerate(
+        critic.optimizer.param_groups
+    ):
+        print(
+            f"critic group {idx}: "
+            f"lr={group['lr']}, "
+            f"n_params={len(group['params'])}"
+        )
+
+    for idx, group in enumerate(
+        model.actor.optimizer.param_groups
+    ):
+        print(
+            f"actor group {idx}: "
+            f"lr={group['lr']}"
+        )

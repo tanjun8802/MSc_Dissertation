@@ -98,27 +98,40 @@ class TD3_Actor(nn.Module):
 class SAC_Actor(nn.Module):
     def __init__(self, obs_dim, act_dim, hidden=256):
         super().__init__()
+
         self.net = nn.Sequential(
-            nn.Linear(obs_dim, hidden), nn.ReLU(),
-            nn.Linear(hidden, hidden), nn.ReLU(),
+            nn.Linear(obs_dim, hidden),
+            nn.ReLU(),
+            nn.Linear(hidden, hidden),
+            nn.ReLU(),
         )
+
         self.mu = nn.Linear(hidden, act_dim)
         self.log_std = nn.Linear(hidden, act_dim)
 
     def forward(self, obs):
         h = self.net(obs)
         mu = self.mu(h)
-        log_std = torch.clamp(self.log_std(h), -5, 2)
+        log_std = torch.clamp(self.log_std(h), -5.0, 2.0)
         return mu, log_std
 
     def sample(self, obs):
         mu, log_std = self(obs)
         std = log_std.exp()
-        dist = torch.distributions.Normal(mu, std)
-        z = dist.rsample()
-        a = torch.tanh(z)
-        logp = dist.log_prob(z) - torch.log(1 - a.pow(2) + 1e-6)
-        return a, logp.sum(-1, keepdim=True)
+
+        normal = torch.distributions.Normal(mu, std)
+        z = normal.rsample()
+        action = torch.tanh(z)
+
+        log_prob = normal.log_prob(z)
+        log_prob -= torch.log(1.0 - action.pow(2) + 1e-6)
+        log_prob = log_prob.sum(dim=-1, keepdim=True)
+
+        return action, log_prob
+
+    def deterministic_action(self, obs):
+        mu, _ = self(obs)
+        return torch.tanh(mu)
 
 class PPO_ActorCritic(nn.Module):
     def __init__(self, obs_dim, act_dim, hidden=256):

@@ -17,7 +17,10 @@ from utils import (
     build_goal_batch,
     extract_fixed_probe_sa_embedding_td3,
     extract_mean_sa_embedding_td3,
-    extract_sa_batch_for_isotropy_td3
+    extract_sa_batch_for_isotropy_td3,
+    encode_task_for_similarity,
+    compute_task_similarity,
+    retrieve_similar_task_embeddings
 )
 
 from loss_functions import (
@@ -26,7 +29,8 @@ from loss_functions import (
     orthogonal_loss,
     ewc_regulariser_loss,
     weight_regulariser_loss,
-    goal_memory_contrastive_loss
+    goal_memory_contrastive_loss,
+    goal_prototype_anchor_loss
 )
 
 
@@ -317,7 +321,8 @@ def dqn_train_multi_loss(
     q_target_network=None,
     env=None,
     buffer_capacity=None,
-    lr=None,
+    lr_sa=None,
+    lr_goal=None,   
     obs_dim=None,
     device=None,
     total_steps=100000,
@@ -359,8 +364,10 @@ def dqn_train_multi_loss(
         raise ValueError("goal must be provided")
     if buffer_capacity is None:
         raise ValueError("buffer_capacity must be provided")
-    if lr is None:
-        raise ValueError("lr must be provided")
+    if lr_sa is None:
+        raise ValueError("lr_sa must be provided")
+    if lr_goal is None:
+        raise ValueError("lr_goal must be provided")
     if make_env is None:
         raise ValueError("make_env function must be provided to create the evaluation environment.")
 
@@ -380,11 +387,11 @@ def dqn_train_multi_loss(
 
     if params is None:
         opt = optim.Adam([
-            {"params": q_network.sa_encoder.parameters(), "lr": lr},
-            {"params": q_network.goal_encoder.parameters(), "lr": lr},
+            {"params": q_network.sa_encoder.parameters(), "lr": lr_sa},
+            {"params": q_network.goal_encoder.parameters(), "lr": lr_goal},
         ])
     else:
-        opt = optim.Adam(params, lr=lr)
+        opt = optim.Adam(params, lr=lr_goal)
 
     buffer = TrajectoryReplayBufferDiscrete(buffer_capacity, obs_dim, 1, device=device)
 
@@ -432,7 +439,7 @@ def dqn_train_multi_loss(
         ).float()
 
         current_q = q_network(obs_t, act_onehot, goal_batch)
-        td_loss_local = F.mse_loss(current_q, target)
+        td_loss_local = F.smooth_l1_loss(current_q, target)
         return td_loss_local, obs_t, act_t, goal_batch
 
     while global_step < total_steps:
@@ -526,7 +533,7 @@ def dqn_train_multi_loss(
                         current_goal=goal,
                         memory_goals=memory_goals,
                         similarity_mode="euclidean",
-                        temperature=2.0,
+                        temperature=0.5,
                         pos_threshold=0.6,
                         neg_threshold=0.3,
                         margin=1.0,
@@ -574,10 +581,10 @@ def dqn_train_multi_loss(
             print(
                 f"[DQN-factorised] step={global_step:7d} | eps={eps:.3f} "
                 f"| eval_return={mean_ret:.3f} | eval_len={mean_len:.1f} "
-                f"| TD={td_loss.item():.3f} | ReplayTD={replay_td_loss_val.item():.3f} "
-                f"| Ortho={ortho_loss.item():.3f} | SigReg={sigreg_loss_val.item():.3f} "
-                f"| EWC={ewc_loss.item():.6f} | Loss={loss.item():.3f}"
-                f"| goal_reg_loss={goal_reg_loss.item():.4f}"
+                f"| TD={td_loss.item():.6f} | ReplayTD={replay_td_loss_val.item():.6f} "
+                f"| Ortho={ortho_loss.item():.6f} | SigReg={sigreg_loss_val.item():.6f} "
+                f"| EWC={ewc_loss.item():.6f} | Loss={loss.item():.6f}"
+                f"| goal_reg_loss={goal_reg_loss.item():.6f}"
             )
             if mean_ret >= early_stop_reward:
                 success_streak += 1
@@ -1406,7 +1413,8 @@ def dqn_train_new(
     q_target_network=None,
     env=None,
     buffer_capacity=None,
-    lr=None,
+    lr_sa=None,
+    lr_goal=None,
     obs_dim=None,
     device=None,
     total_steps=100000,
@@ -1427,62 +1435,104 @@ def dqn_train_new(
     early_stop_patience=3,
     enable_early_stop=True,
 
-    # New representation-stability settings
+    # SA representation-stability settings
     use_sa_stability=True,
     project_sa_gradients=True,
     lambda_sa_stability=1.0,
     sa_anchor_batch_size=128,
     sa_anchor_memory_per_goal=512,
     max_anchor_sets=20,
+
+    # Goal-similarity settings
+    retrieved_prototype=None,
+    use_goal_similarity_anchor=False,
+    goal_anchor_coef=0.05,
+    goal_anchor_steps=10000,
 ):
     if q_network is None:
         raise ValueError("q_network must be provided")
+
     if q_target_network is None:
         raise ValueError("q_target_network must be provided")
+
     if env is None:
         raise ValueError("env must be provided")
+
     if goal is None:
         raise ValueError("goal must be provided")
+
     if buffer_capacity is None:
         raise ValueError("buffer_capacity must be provided")
-    if lr is None:
-        raise ValueError("lr must be provided")
+
+    if lr_sa is None:
+        raise ValueError("lr_sa must be provided")
+
+    if lr_goal is None:
+        raise ValueError("lr_goal must be provided")
+
     if make_env is None:
         raise ValueError(
             "make_env function must be provided to create "
             "the evaluation environment."
         )
+
     if device is None:
         device = next(q_network.parameters()).device
+
     if obs_dim is None:
-        obs_dim = int(env.observation_space.shape[0])
+        obs_dim = int(
+            env.observation_space.shape[0]
+        )
+
     if embedding_memory is None:
         embedding_memory = {}
+
     if "sa_anchors" not in embedding_memory:
         embedding_memory["sa_anchors"] = []
 
+
     set_seed(seed)
+
+
+    # ---------------------------------------------------------
+    # Optimizer
+    # ---------------------------------------------------------
 
     if params is None:
         optimizer = optim.Adam(
             [
                 {
                     "params": q_network.sa_encoder.parameters(),
-                    "lr": lr,
+                    "lr": lr_sa,
                 },
                 {
                     "params": q_network.goal_encoder.parameters(),
-                    "lr": lr,
+                    "lr": lr_goal,
                 },
             ]
         )
     else:
         optimizer = optim.Adam(
             params,
-            lr=lr,
+            lr=lr_goal,
         )
 
-    buffer = TrajectoryReplayBufferDiscrete(buffer_capacity, obs_dim, 1, device=device)
+
+    # ---------------------------------------------------------
+    # Replay buffer
+    # ---------------------------------------------------------
+
+    buffer = TrajectoryReplayBufferDiscrete(
+        buffer_capacity,
+        obs_dim,
+        1,
+        device=device,
+    )
+
+
+    # ---------------------------------------------------------
+    # Goal setup
+    # ---------------------------------------------------------
 
     goal_arr = np.asarray(
         goal,
@@ -1495,15 +1545,14 @@ def dqn_train_new(
         device=device,
     ).unsqueeze(0)
 
-    # Number of discrete actions
     num_actions = env.action_space.n
 
+
     # ---------------------------------------------------------
-    # Nested helper functions
+    # Nested SA-stability helpers
     # ---------------------------------------------------------
-    def sample_old_sa_anchors(
-        batch_size,
-    ):
+
+    def sample_old_sa_anchors(batch_size):
         memories = embedding_memory.get(
             "sa_anchors",
             [],
@@ -1515,14 +1564,15 @@ def dqn_train_new(
         valid_memories = [
             memory
             for memory in memories
-            if memory is not None
-            and memory["states"].shape[0] > 0
+            if (
+                memory is not None
+                and memory["states"].shape[0] > 0
+            )
         ]
 
         if len(valid_memories) == 0:
             return None
 
-        # Sample one previous goal memory.
         selected_memory = valid_memories[
             np.random.randint(
                 low=0,
@@ -1530,7 +1580,10 @@ def dqn_train_new(
             )
         ]
 
-        num_available = selected_memory["states"].shape[0]
+        num_available = (
+            selected_memory["states"].shape[0]
+        )
+
         sample_size = min(
             batch_size,
             num_available,
@@ -1552,12 +1605,12 @@ def dqn_train_new(
             "features": old_features.to(device),
         }
 
-    def compute_sa_stability_loss(
-        anchor_batch,
-    ):
+
+    def compute_sa_stability_loss(anchor_batch):
         """
         Preserve phi(s,a) on old environment anchors.
         """
+
         if anchor_batch is None:
             return None
 
@@ -1570,13 +1623,13 @@ def dqn_train_new(
             num_classes=num_actions,
         ).float()
 
-        current_features = q_network.encode_state_action(
-            states,
-            action_onehot,
+        current_features = (
+            q_network.encode_state_action(
+                states,
+                action_onehot,
+            )
         )
 
-        # Normalize to focus on representational direction
-        # rather than arbitrary feature-scale changes.
         current_features = F.normalize(
             current_features,
             dim=-1,
@@ -1592,20 +1645,26 @@ def dqn_train_new(
             old_features,
         )
 
+
     def flatten_grads(parameters):
         """
         Flatten gradients into one vector.
         """
+
         flat_grads = []
 
         for parameter in parameters:
             if parameter.grad is None:
                 flat_grads.append(
-                    torch.zeros_like(parameter).reshape(-1)
+                    torch.zeros_like(
+                        parameter
+                    ).reshape(-1)
                 )
             else:
                 flat_grads.append(
-                    parameter.grad.detach().clone().reshape(-1)
+                    parameter.grad.detach()
+                    .clone()
+                    .reshape(-1)
                 )
 
         if len(flat_grads) == 0:
@@ -1616,13 +1675,15 @@ def dqn_train_new(
 
         return torch.cat(flat_grads)
 
+
     def assign_flat_grad(
         parameters,
         flat_grad,
     ):
         """
-        Assign flattened gradient back to parameters.
+        Assign a flattened gradient back to parameters.
         """
+
         offset = 0
 
         for parameter in parameters:
@@ -1630,21 +1691,27 @@ def dqn_train_new(
 
             parameter.grad = flat_grad[
                 offset:offset + numel
-            ].view_as(parameter).clone()
+            ].view_as(
+                parameter
+            ).clone()
 
             offset += numel
+
 
     def projected_gradient_step(
         new_loss,
         stability_loss,
     ):
         """
-        Compute the normal new-task gradient, compute the
-        stability gradient, and project only the SA-encoder
-        gradient if the two objectives conflict.
+        Compute the normal new-task gradient and the
+        stability gradient.
+
+        Project only the SA-encoder gradient if the
+        two objectives conflict.
 
         Goal-encoder gradients are not projected.
         """
+
         all_parameters = [
             parameter
             for parameter in q_network.parameters()
@@ -1660,6 +1727,7 @@ def dqn_train_new(
         # -----------------------------------------------------
         # 1. New-task gradients
         # -----------------------------------------------------
+
         optimizer.zero_grad(
             set_to_none=True,
         )
@@ -1685,6 +1753,7 @@ def dqn_train_new(
         # -----------------------------------------------------
         # 2. Stability gradients
         # -----------------------------------------------------
+
         optimizer.zero_grad(
             set_to_none=True,
         )
@@ -1699,6 +1768,7 @@ def dqn_train_new(
         # -----------------------------------------------------
         # 3. Conflict test
         # -----------------------------------------------------
+
         dot_product = torch.dot(
             new_sa_grad,
             stability_sa_grad,
@@ -1712,8 +1782,6 @@ def dqn_train_new(
         projected_sa_grad = new_sa_grad.clone()
         was_projected = False
 
-        # If dot_product < 0, the new-task update would
-        # increase the representation stability loss.
         if (
             dot_product < 0.0
             and stability_norm_sq > 1e-12
@@ -1734,19 +1802,21 @@ def dqn_train_new(
         # -----------------------------------------------------
         # 4. Restore normal new-task gradients
         # -----------------------------------------------------
+
         optimizer.zero_grad(
             set_to_none=True,
         )
 
         for parameter in all_parameters:
-            saved_grad = saved_new_grads[id(parameter)]
+            saved_grad = saved_new_grads[
+                id(parameter)
+            ]
 
             if saved_grad is None:
                 parameter.grad = None
             else:
                 parameter.grad = saved_grad.clone()
 
-        # Replace only SA gradients with projected gradients.
         assign_flat_grad(
             sa_parameters,
             projected_sa_grad,
@@ -1768,17 +1838,19 @@ def dqn_train_new(
             "was_projected": was_projected,
         }
 
+
     def create_anchor_memory():
         """
-        Create compact functional memory after training.
+        Create compact SA functional memory after training.
 
-        Stores only:
+        Stores:
             states
             actions
             phi(s,a)
 
-        It does not store a network checkpoint.
+        Does not store a network checkpoint.
         """
+
         if len(buffer) == 0:
             return None
 
@@ -1787,7 +1859,9 @@ def dqn_train_new(
             len(buffer),
         )
 
-        batch = buffer.sample(sample_size)
+        batch = buffer.sample(
+            sample_size
+        )
 
         states = batch.obs.detach().to(device)
         actions = batch.actions.long().detach().to(device)
@@ -1799,9 +1873,11 @@ def dqn_train_new(
         ).float()
 
         with torch.no_grad():
-            features = q_network.encode_state_action(
-                states,
-                action_onehot,
+            features = (
+                q_network.encode_state_action(
+                    states,
+                    action_onehot,
+                )
             )
 
         return {
@@ -1810,13 +1886,64 @@ def dqn_train_new(
             "features": features.detach().cpu(),
         }
 
+
+    # ---------------------------------------------------------
+    # Goal-similarity anchor helper
+    # ---------------------------------------------------------
+
+    def compute_goal_anchor_loss(
+        goal_batch,
+    ):
+        """
+        Match the current goal-encoder output to the
+        retrieved prototype embedding.
+
+        The retrieved prototype is treated as a fixed
+        target and receives no gradient.
+        """
+
+        if retrieved_prototype is None:
+            return torch.zeros(
+                (),
+                device=device,
+            )
+
+        current_goal_embedding = (
+            q_network.encode_goal(
+                goal_batch
+            )
+        )
+
+        prototype = torch.as_tensor(
+            retrieved_prototype,
+            dtype=current_goal_embedding.dtype,
+            device=device,
+        )
+
+        prototype = prototype.view(
+            1,
+            -1,
+        ).expand_as(
+            current_goal_embedding
+        )
+
+        prototype = prototype.detach()
+
+        return F.mse_loss(
+            current_goal_embedding,
+            prototype,
+        )
+
+
     # ---------------------------------------------------------
     # Training state
     # ---------------------------------------------------------
+
     obs, _ = env.reset()
 
     global_step = 0
     eval_returns = []
+    eval_returns_time = []
 
     start_time = time.perf_counter()
 
@@ -1825,15 +1952,23 @@ def dqn_train_new(
 
     success_streak = 0
 
-    loss = torch.tensor(
-        0.0,
+    loss = torch.zeros(
+        (),
         device=device,
     )
 
-    td_loss = torch.tensor(
-        0.0,
+    td_loss = torch.zeros(
+        (),
         device=device,
     )
+
+    goal_anchor_loss = torch.zeros(
+        (),
+        device=device,
+    )
+
+    goal_anchor_loss_value = 0.0
+    goal_anchor_weight = 0.0
 
     stability_loss = None
     stability_loss_value = 0.0
@@ -1841,13 +1976,18 @@ def dqn_train_new(
 
     has_old_sa_memory = (
         use_sa_stability
-        and len(embedding_memory["sa_anchors"]) > 0
+        and len(
+            embedding_memory["sa_anchors"]
+        ) > 0
     )
+
 
     # ---------------------------------------------------------
     # Main training loop
     # ---------------------------------------------------------
+
     while global_step < total_steps:
+
         frac = min(
             1.0,
             global_step / max(
@@ -1861,13 +2001,16 @@ def dqn_train_new(
             + frac * (eps_end - eps_start)
         )
 
+
         # -----------------------------------------------------
         # Action selection
         # -----------------------------------------------------
+
         if np.random.random() < eps:
             action = env.action_space.sample()
+
         else:
-            obs_t = torch.tensor(
+            obs_t_single = torch.tensor(
                 obs,
                 dtype=torch.float32,
                 device=device,
@@ -1876,7 +2019,7 @@ def dqn_train_new(
             with torch.no_grad():
                 q_values = (
                     q_network.q_val_for_argmax_action(
-                        obs_t,
+                        obs_t_single,
                         goal_t_single,
                     )
                 )
@@ -1887,9 +2030,11 @@ def dqn_train_new(
                     ).item()
                 )
 
+
         # -----------------------------------------------------
         # Environment transition
         # -----------------------------------------------------
+
         next_obs, reward, terminated, truncated, _ = (
             env.step(action)
         )
@@ -1911,14 +2056,18 @@ def dqn_train_new(
         if done:
             obs, _ = env.reset()
 
+
         # -----------------------------------------------------
         # Training update
         # -----------------------------------------------------
+
         if (
             len(buffer) >= warmup_steps
             and global_step % train_freq == 0
         ):
-            batch = buffer.sample(batch_size)
+            batch = buffer.sample(
+                batch_size
+            )
 
             obs_t = batch.obs
             act_t = batch.actions.long()
@@ -1926,16 +2075,22 @@ def dqn_train_new(
             next_obs_t = batch.next_obs
             term_t = batch.terminated
 
+            if rew_t.ndim == 1:
+                rew_t = rew_t.unsqueeze(-1)
+
+            if term_t.ndim == 1:
+                term_t = term_t.unsqueeze(-1)
+
             goal_batch = goal_t_single.expand(
                 obs_t.shape[0],
                 -1,
             )
 
-            batch_size_actual = obs_t.shape[0]
 
             # -------------------------------------------------
-            # Double-DQN-style target
+            # Double-DQN target
             # -------------------------------------------------
+
             with torch.no_grad():
                 next_q_online = (
                     q_network.q_val_for_argmax_action(
@@ -1960,6 +2115,11 @@ def dqn_train_new(
                     goal_batch,
                 )
 
+                if next_q_target.ndim == 1:
+                    next_q_target = (
+                        next_q_target.unsqueeze(-1)
+                    )
+
                 gamma_final = gamma ** td_steps
 
                 target = (
@@ -1969,9 +2129,11 @@ def dqn_train_new(
                     * next_q_target
                 )
 
+
             # -------------------------------------------------
             # Current Q-value
             # -------------------------------------------------
+
             act_onehot = F.one_hot(
                 act_t.squeeze(-1),
                 num_classes=num_actions,
@@ -1983,19 +2145,77 @@ def dqn_train_new(
                 goal_batch,
             )
 
+            if current_q.ndim == 1:
+                current_q = (
+                    current_q.unsqueeze(-1)
+                )
+
             td_loss = F.mse_loss(
                 current_q,
                 target,
             )
 
-            # -------------------------------------------------
-            # New-task loss
-            # -------------------------------------------------
-            loss = td_loss
 
             # -------------------------------------------------
-            # Old representation stability loss
+            # Goal-similarity anchor
             # -------------------------------------------------
+
+            goal_anchor_loss = torch.zeros(
+                (),
+                device=device,
+            )
+
+            goal_anchor_weight = 0.0
+
+            anchor_is_active = (
+                use_goal_similarity_anchor
+                and retrieved_prototype is not None
+                and goal_anchor_coef > 0.0
+                and goal_anchor_steps > 0
+                and global_step < goal_anchor_steps
+            )
+
+            if anchor_is_active:
+                anchor_progress = (
+                    global_step
+                    / float(goal_anchor_steps)
+                )
+
+                goal_anchor_weight = (
+                    goal_anchor_coef
+                    * max(
+                        0.0,
+                        1.0 - anchor_progress,
+                    )
+                )
+
+                if goal_anchor_weight > 0.0:
+                    goal_anchor_loss = (
+                        compute_goal_anchor_loss(
+                            goal_batch,
+                        )
+                    )
+
+            goal_anchor_loss_value = (
+                goal_anchor_loss.detach().item()
+            )
+
+
+            # -------------------------------------------------
+            # Combined new-task loss
+            # -------------------------------------------------
+
+            loss = (
+                td_loss
+                + goal_anchor_weight
+                * goal_anchor_loss
+            )
+
+
+            # -------------------------------------------------
+            # SA-stability loss
+            # -------------------------------------------------
+
             stability_loss = None
             stability_loss_value = 0.0
             projection_stats = None
@@ -2012,15 +2232,20 @@ def dqn_train_new(
                         )
                     )
 
-                    stability_loss = lambda_sa_stability * stability_loss
+                    stability_loss = (
+                        lambda_sa_stability
+                        * stability_loss
+                    )
 
                     stability_loss_value = (
                         stability_loss.detach().item()
                     )
 
+
             # -------------------------------------------------
-            # Update parameters
+            # Parameter update
             # -------------------------------------------------
+
             if (
                 project_sa_gradients
                 and stability_loss is not None
@@ -2053,9 +2278,11 @@ def dqn_train_new(
 
                 optimizer.step()
 
+
             # -------------------------------------------------
             # Soft target-network update
             # -------------------------------------------------
+
             with torch.no_grad():
                 for parameter, target_parameter in zip(
                     q_network.parameters(),
@@ -2069,9 +2296,11 @@ def dqn_train_new(
                         tau * parameter.data,
                     )
 
+
         # -----------------------------------------------------
         # Evaluation
         # -----------------------------------------------------
+
         if global_step % 1000 == 0:
             eval_env = make_env(goal)
 
@@ -2085,6 +2314,7 @@ def dqn_train_new(
                 dtype=torch.float32,
                 device=device,
             ).unsqueeze(0)
+
 
             def eval_policy(observation):
                 observation_t = torch.tensor(
@@ -2107,10 +2337,13 @@ def dqn_train_new(
                         ).item()
                     )
 
-            mean_return, mean_length = evaluate_policy(
-                eval_env,
-                eval_policy,
-                episodes=8,
+
+            mean_return, mean_length = (
+                evaluate_policy(
+                    eval_env,
+                    eval_policy,
+                    episodes=8,
+                )
             )
 
             eval_returns.append(
@@ -2119,6 +2352,15 @@ def dqn_train_new(
                     mean_return,
                 )
             )
+
+            eval_returns_time.append(
+                (
+                    time.perf_counter()
+                    - start_time,
+                    mean_return,
+                )
+            )
+
 
             if projection_stats is None:
                 projection_text = (
@@ -2136,6 +2378,7 @@ def dqn_train_new(
                     f"{projection_stats['stability_sa_grad_norm']:.3e}"
                 )
 
+
             print(
                 f"[DQN-factorised] "
                 f"step={global_step:7d} | "
@@ -2143,21 +2386,28 @@ def dqn_train_new(
                 f"eval_return={mean_return:.3f} | "
                 f"eval_len={mean_length:.1f} | "
                 f"TD={td_loss.item():.4e} | "
+                f"GoalAnchor="
+                f"{goal_anchor_loss_value:.4e} | "
+                f"AnchorWeight="
+                f"{goal_anchor_weight:.4e} | "
                 f"SA-stability="
                 f"{stability_loss_value:.4e} | "
                 f"{projection_text}"
             )
+
 
             if mean_return >= early_stop_reward:
                 success_streak += 1
             else:
                 success_streak = 0
 
+
             if (
                 enable_early_stop
                 and success_streak >= early_stop_patience
             ):
                 min_steps = global_step
+
                 min_time = (
                     time.perf_counter()
                     - start_time
@@ -2178,12 +2428,16 @@ def dqn_train_new(
                 eval_env.close()
                 break
 
+
             eval_env.close()
+
 
     # ---------------------------------------------------------
     # Final statistics
     # ---------------------------------------------------------
+
     min_steps = global_step
+
     min_time = (
         time.perf_counter()
         - start_time
@@ -2210,9 +2464,11 @@ def dqn_train_new(
             .numpy()
         )
 
+
     # ---------------------------------------------------------
-    # Save compact functional memory for this goal
+    # Save compact SA anchor memory
     # ---------------------------------------------------------
+
     anchor_memory = create_anchor_memory()
 
     if anchor_memory is not None:
@@ -2228,9 +2484,11 @@ def dqn_train_new(
                 [-max_anchor_sets:]
             )
 
+
     # ---------------------------------------------------------
-    # Existing embedding diagnostics
+    # SA embedding diagnostics
     # ---------------------------------------------------------
+
     obs_probe_np = np.array(
         [5.0, 5.0],
         dtype=np.float32,
@@ -2252,34 +2510,42 @@ def dqn_train_new(
         "Up",
     )
 
-    sa_embedding_mean = extract_mean_sa_embedding(
-        q_network=q_network,
-        buffer=buffer,
-        num_actions=num_actions,
-        batch_size=256,
-        device=device,
-        as_numpy=True,
+    sa_embedding_mean = (
+        extract_mean_sa_embedding(
+            q_network=q_network,
+            buffer=buffer,
+            num_actions=num_actions,
+            batch_size=256,
+            device=device,
+            as_numpy=True,
+        )
     )
 
-    sa_embedding_fixed = extract_fixed_probe_sa_embedding(
-        q_network=q_network,
-        obs_probe=obs_probe_np,
-        act_probe_idx=act_probe_idx,
-        num_actions=num_actions,
-        device=device,
-        as_numpy=True,
+    sa_embedding_fixed = (
+        extract_fixed_probe_sa_embedding(
+            q_network=q_network,
+            obs_probe=obs_probe_np,
+            act_probe_idx=act_probe_idx,
+            num_actions=num_actions,
+            device=device,
+            as_numpy=True,
+        )
     )
 
-    sa_batch_final = extract_sa_batch_for_isotropy(
-        q_network=q_network,
-        buffer=buffer,
-        num_actions=num_actions,
-        batch_size=1024,
-        device=device,
-        as_numpy=True,
+    sa_batch_final = (
+        extract_sa_batch_for_isotropy(
+            q_network=q_network,
+            buffer=buffer,
+            num_actions=num_actions,
+            batch_size=1024,
+            device=device,
+            as_numpy=True,
+        )
     )
+
 
     env.close()
+
 
     return (
         q_network,
