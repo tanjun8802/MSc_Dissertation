@@ -1,221 +1,488 @@
-# environments/atari_envs.py
+# ============================================================
+# Standalone Atari environment wrappers
+# ============================================================
+
+from __future__ import annotations
 
 import gymnasium as gym
 import numpy as np
 
 
 class AtariEnvWrapper(gym.Env):
-    metadata = {"render_modes": ["rgb_array"]}
+    """
+    Atari preprocessing wrapper.
+
+    Applies:
+        1. AtariPreprocessing
+        2. FrameStackObservation
+
+    This is an ordinary Atari environment wrapper. It is
+    independent of the manipulator wrappers and is not a
+    goal-conditioned HER environment.
+    """
+
+    metadata = {
+        "render_modes": [
+            "human",
+            "rgb_array",
+        ]
+    }
 
     def __init__(
         self,
-        env_id="ALE/Breakout-v5",
-        render_mode=None,
-        frame_stack=4,
-        max_episode_steps=108_000,
-        flatten_obs=True,
+        env_id: str = "ALE/Breakout-v5",
+        render_mode: str | None = None,
+        frame_stack: int = 4,
+        max_episode_steps: int | None = 108_000,
+        flatten_obs: bool = False,
     ):
         super().__init__()
 
-        base_env = gym.make(env_id, render_mode="rgb_array")
+        if frame_stack <= 0:
+            raise ValueError(
+                "frame_stack must be positive."
+            )
+
+        self.env_id = env_id
+        self.render_mode = render_mode
+        self.frame_stack = int(frame_stack)
+        self.flatten_obs = bool(flatten_obs)
+
+        # The underlying Gymnasium TimeLimit wrapper owns
+        # episode truncation. No second manual horizon is used.
+        base_env = gym.make(
+            env_id,
+            render_mode=render_mode,
+            max_episode_steps=max_episode_steps,
+            frameskip=1,
+        )
+
         base_env = gym.wrappers.AtariPreprocessing(
             base_env,
-            grayscale_obs=True,
-            scale_obs=False,
-            frame_skip=1,
+            noop_max=30,
+            frame_skip=4,
             screen_size=84,
+            terminal_on_life_loss=False,
+            grayscale_obs=True,
+            grayscale_newaxis=False,
+            scale_obs=False,
         )
-        base_env = gym.wrappers.FrameStackObservation(base_env, stack_size=frame_stack)
+
+        base_env = gym.wrappers.FrameStackObservation(
+            base_env,
+            stack_size=self.frame_stack,
+        )
 
         self.env = base_env
-        self.render_mode = render_mode
-        self.max_episode_steps = int(max_episode_steps)
-        self.flatten_obs = bool(flatten_obs)
-        self.step_count = 0
 
-        base_obs_space = self.env.observation_space
-        self.base_observation_space = base_obs_space
+        self.action_space = (
+            self.env.action_space
+        )
 
-        if self.flatten_obs:
-            obsdim = int(np.prod(base_obs_space.shape))
-            self.observation_space = gym.spaces.Box(
-                low=0.0,
-                high=255.0,
-                shape=(obsdim,),
-                dtype=np.float32,
-            )
-        else:
-            self.observation_space = gym.spaces.Box(
-                low=0.0,
-                high=255.0,
-                shape=base_obs_space.shape,
-                dtype=np.float32,
+        if not isinstance(
+            self.env.observation_space,
+            gym.spaces.Box,
+        ):
+            raise TypeError(
+                "Expected a Box observation space after "
+                "Atari preprocessing and frame stacking."
             )
 
-        self.action_space = self.env.action_space
-        self.action_names = [str(a) for a in range(self.action_space.n)]
+        self.base_observation_space = (
+            self.env.observation_space
+        )
 
-    def _format_obs(self, obs):
-        x = np.asarray(obs, dtype=np.float32)
+        self.observation_space = (
+            self._build_observation_space(
+                self.base_observation_space
+            )
+        )
+
+        self.action_names = [
+            str(action)
+            for action in range(
+                self.action_space.n
+            )
+        ]
+
+    def _build_observation_space(
+        self,
+        base_space: gym.spaces.Box,
+    ) -> gym.spaces.Box:
+        low = np.asarray(
+            base_space.low,
+            dtype=np.float32,
+        )
+
+        high = np.asarray(
+            base_space.high,
+            dtype=np.float32,
+        )
+
         if self.flatten_obs:
-            x = x.reshape(-1)
-        return x
+            low = low.reshape(-1)
+            high = high.reshape(-1)
 
-    def reset(self, *, seed=None, options=None):
-        obs, info = self.env.reset(seed=seed, options=options)
-        self.step_count = 0
-        return self._format_obs(obs), info
+        return gym.spaces.Box(
+            low=low,
+            high=high,
+            dtype=np.float32,
+        )
 
-    def step(self, action):
-        obs, reward, terminated, truncated, info = self.env.step(action)
-        self.step_count += 1
-        if self.step_count >= self.max_episode_steps:
-            truncated = True
-        return self._format_obs(obs), float(reward), terminated, truncated, info
+    def _format_obs(
+        self,
+        obs,
+    ) -> np.ndarray:
+        obs = np.asarray(
+            obs,
+            dtype=np.float32,
+        )
+
+        if self.flatten_obs:
+            obs = obs.reshape(-1)
+
+        return obs
+
+    def reset(
+        self,
+        *,
+        seed: int | None = None,
+        options: dict | None = None,
+    ):
+        obs, info = self.env.reset(
+            seed=seed,
+            options=options,
+        )
+
+        obs = self._format_obs(
+            obs
+        )
+
+        return obs, dict(info)
+
+    def step(
+        self,
+        action,
+    ):
+        action = int(action)
+
+        if not self.action_space.contains(
+            action
+        ):
+            raise ValueError(
+                f"Invalid Atari action: {action}"
+            )
+
+        (
+            obs,
+            reward,
+            terminated,
+            truncated,
+            info,
+        ) = self.env.step(action)
+
+        obs = self._format_obs(
+            obs
+        )
+
+        # Preserve the underlying terminated/truncated flags.
+        return (
+            obs,
+            float(reward),
+            bool(terminated),
+            bool(truncated),
+            dict(info),
+        )
 
     def render(self):
         return self.env.render()
 
     def close(self):
-        self.env.close()
+        return self.env.close()
 
-    def valid_action_mask(self, obs=None):
-        return np.ones(self.action_space.n, dtype=bool)
+    def valid_action_mask(
+        self,
+        obs=None,
+    ):
+        return np.ones(
+            self.action_space.n,
+            dtype=bool,
+        )
 
 
 def make_atari_env(
-    env_id="ALE/Breakout-v5",
-    frame_stack=4,
-    max_episode_steps=108_000,
-    flatten_obs=True,
+    env_id: str = "ALE/Breakout-v5",
+    frame_stack: int = 4,
+    max_episode_steps: int | None = 108_000,
+    flatten_obs: bool = False,
+    render_mode: str | None = None,
 ):
+    """
+    Creates a standalone preprocessed Atari environment.
+    """
+
     return AtariEnvWrapper(
         env_id=env_id,
+        render_mode=render_mode,
         frame_stack=frame_stack,
         max_episode_steps=max_episode_steps,
         flatten_obs=flatten_obs,
     )
 
 
-class AtariGoalWrapper(gym.Wrapper):
+class AtariScoreGoalWrapper(gym.Wrapper):
+    """
+    Adds a score threshold to an Atari environment.
+
+    The observation remains an ordinary ndarray.
+    This wrapper is independent of HER and does not expose
+    achieved_goal/desired_goal dictionary observations.
+    """
+
     def __init__(
         self,
-        env: AtariEnvWrapper,
-        goal_obs=None,
+        env: gym.Env,
+        goal_score: float | None = None,
         goal_reward: float = 1.0,
         step_reward: float = 0.0,
         reward_mode: str = "simple",
-        gamma: float = 0.99,
-        goal_radius: float = 100.0,
+        terminate_on_goal: bool = True,
     ):
         super().__init__(env)
-        self.goal_reward = float(goal_reward)
-        self.step_reward = float(step_reward)
-        self.reward_mode = str(reward_mode).lower()
-        self.gamma = float(gamma)
-        self.goal_radius = float(goal_radius)
 
-        self.observation_space = env.observation_space
-        self.action_space = env.action_space
+        self.goal_score = (
+            None
+            if goal_score is None
+            else float(goal_score)
+        )
 
-        self.goal = None
-        self.prev_phi = None
-        self.current_task = None
+        self.goal_reward = float(
+            goal_reward
+        )
 
-        if goal_obs is not None:
-            self.set_goal(goal_obs)
+        self.step_reward = float(
+            step_reward
+        )
 
-    def set_goal(self, goal_obs):
-        g = np.asarray(goal_obs, dtype=np.float32).reshape(-1)
-        if g.shape != self.observation_space.shape:
+        self.reward_mode = str(
+            reward_mode
+        ).lower()
+
+        if self.reward_mode not in {
+            "simple",
+            "native",
+        }:
             raise ValueError(
-                f"Goal obs shape {g.shape} != obs shape {self.observation_space.shape}"
+                "reward_mode must be either "
+                "'simple' or 'native'."
             )
-        self.goal = g.copy()
 
-    def sample_goal(self, num_steps=1000, seed=None):
-        rng = np.random.default_rng(seed)
-        obs, _ = self.env.reset(seed=seed)
-        last = np.asarray(obs, dtype=np.float32).reshape(-1)
-        for _ in range(num_steps):
-            a = int(rng.integers(self.action_space.n))
-            next_obs, _, terminated, truncated, _ = self.env.step(a)
-            last = np.asarray(next_obs, dtype=np.float32).reshape(-1)
-            if terminated or truncated:
-                break
-        self.set_goal(last)
-        return self.goal.copy()
+        self.terminate_on_goal = bool(
+            terminate_on_goal
+        )
 
-    def reset(self, *, seed=None, options=None):
-        obs, info = self.env.reset(seed=seed, options=options)
-        self.prev_phi = None
+        self.current_score = 0.0
+        self.goal_reached = False
+
+    def set_goal(
+        self,
+        goal_score,
+    ):
+        goal_array = np.asarray(
+            goal_score,
+            dtype=np.float32,
+        ).reshape(-1)
+
+        if goal_array.shape != (1,):
+            raise ValueError(
+                "Atari score goal must have shape "
+                "(1,)."
+            )
+
+        self.goal_score = float(
+            goal_array[0]
+        )
+
+        self.goal_reached = False
+
+    def reset(
+        self,
+        *,
+        seed=None,
+        options=None,
+    ):
+        obs, info = self.env.reset(
+            seed=seed,
+            options=options,
+        )
+
+        self.current_score = 0.0
+        self.goal_reached = False
+
         info = dict(info)
-        if self.goal is not None:
-            info["goal_obs"] = self.goal.copy()
+
+        info["goal_score"] = (
+            self.goal_score
+        )
+
+        info["current_score"] = (
+            self.current_score
+        )
+
+        info["reached"] = False
+        info["is_success"] = 0.0
+
         return obs, info
 
-    def step(self, action):
-        obs, env_reward, terminated, truncated, info = self.env.step(action)
-        s = np.asarray(obs, dtype=np.float32).reshape(-1)
+    def step(
+        self,
+        action,
+    ):
+        (
+            obs,
+            native_reward,
+            terminated,
+            truncated,
+            info,
+        ) = self.env.step(action)
 
-        if self.goal is None:
-            reward = float(env_reward)
-            reached = False
-            dist = np.nan
-        else:
-            dist = float(np.linalg.norm(s - self.goal))
-            reached = dist <= self.goal_radius
-
-            if self.reward_mode == "simple":
-                reward = self.goal_reward if reached else self.step_reward
-            elif self.reward_mode == "shaped":
-                phi = -dist
-                if self.prev_phi is None:
-                    shaping = 0.0
-                else:
-                    shaping = self.gamma * phi - self.prev_phi
-                base = self.goal_reward if reached else self.step_reward
-                reward = base + shaping
-                self.prev_phi = phi
-            else:
-                reward = float(env_reward)
-
-        if reached:
-            terminated = True
+        native_reward = float(
+            native_reward
+        )
 
         info = dict(info)
-        info["goal_dist"] = dist
-        info["reached"] = reached
-        if self.goal is not None:
-            info["goal_obs"] = self.goal.copy()
 
-        return obs, float(reward), terminated, truncated, info
+        # Breakout reward is the score increment.
+        self.current_score += (
+            native_reward
+        )
 
-    def valid_action_mask(self, obs=None):
-        if hasattr(self.env, "valid_action_mask"):
-            return self.env.valid_action_mask(obs)
-        return np.ones(self.action_space.n, dtype=bool)
+        if self.goal_score is None:
+            reached = False
+            reward = native_reward
+
+        else:
+            reached = (
+                self.current_score
+                >= self.goal_score
+            )
+
+            if self.reward_mode == "native":
+                reward = native_reward
+
+            else:
+                first_reach = (
+                    reached
+                    and not self.goal_reached
+                )
+
+                reward = (
+                    self.goal_reward
+                    if first_reach
+                    else self.step_reward
+                )
+
+        if reached:
+            self.goal_reached = True
+
+            if self.terminate_on_goal:
+                terminated = True
+
+        info["current_score"] = (
+            self.current_score
+        )
+
+        info["goal_score"] = (
+            self.goal_score
+        )
+
+        info["reached"] = bool(
+            reached
+        )
+
+        info["is_success"] = float(
+            reached
+        )
+
+        return (
+            obs,
+            float(reward),
+            bool(terminated),
+            bool(truncated),
+            info,
+        )
+
+    def valid_action_mask(
+        self,
+        obs=None,
+    ):
+        if hasattr(
+            self.env,
+            "valid_action_mask",
+        ):
+            return self.env.valid_action_mask(
+                obs
+            )
+
+        return np.ones(
+            self.action_space.n,
+            dtype=bool,
+        )
 
 
 def make_atari_goal_env(
-    env_id="ALE/Breakout-v5",
-    frame_stack=4,
+    env_id: str = "ALE/Breakout-v5",
+    frame_stack: int = 4,
     goal_obs=None,
-    reward_mode="simple",
-    goal_radius=100.0,
-    max_episode_steps=108_000,
-    flatten_obs=False,
+    reward_mode: str = "simple",
+    max_episode_steps: int | None = 108_000,
+    render_mode: str | None = None,
+    terminate_on_goal: bool = True,
 ):
-    base = AtariEnvWrapper(
+    """
+    Creates an Atari environment with an optional score goal.
+
+    Parameters
+    ----------
+    goal_obs:
+        None, or a one-element array such as:
+        np.array([25.0], dtype=np.float32)
+    """
+
+    base_env = make_atari_env(
         env_id=env_id,
         frame_stack=frame_stack,
         max_episode_steps=max_episode_steps,
-        flatten_obs=flatten_obs,
+        flatten_obs=False,
+        render_mode=render_mode,
     )
-    env = AtariGoalWrapper(
-        base,
-        goal_obs=goal_obs,
+
+    goal_score = None
+
+    if goal_obs is not None:
+        goal_array = np.asarray(
+            goal_obs,
+            dtype=np.float32,
+        ).reshape(-1)
+
+        if goal_array.shape != (1,):
+            raise ValueError(
+                "Breakout goal must have shape "
+                "(1,), for example "
+                "np.array([25.0])."
+            )
+
+        goal_score = float(
+            goal_array[0]
+        )
+
+    return AtariScoreGoalWrapper(
+        env=base_env,
+        goal_score=goal_score,
+        goal_reward=1.0,
+        step_reward=0.0,
         reward_mode=reward_mode,
-        goal_radius=goal_radius,
+        terminate_on_goal=terminate_on_goal,
     )
-    return env
+
+

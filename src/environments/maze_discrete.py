@@ -170,7 +170,7 @@ class MazeGoalWrapper(gym.Wrapper):
         step_reward=0.0,
         slip_prob=0.0,
         reward_mode="goal",
-        wall_penalty=-0.1,
+        wall_penalty=-0.01,
         gamma=0.99,
         track_coverage=True,
     ):
