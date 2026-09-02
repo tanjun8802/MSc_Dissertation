@@ -10,6 +10,10 @@ from utils import collect_valid_states_fourrooms
 from pathlib import Path
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+from matplotlib.lines import Line2D
+from mpl_toolkits.mplot3d import Axes3D
+from matplotlib.patches import Circle
+
 
 
 def _to_coord_set(cells):
@@ -1300,193 +1304,786 @@ def visualise_embeddings(
     import torch.nn.functional as F
     import matplotlib.pyplot as plt
 
+    # ------------------------------------------------------------
+    # Device selection
+    # ------------------------------------------------------------
     if device is None:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    if make_env is None:
-        raise ValueError("make_env function must be provided to create the evaluation environment.")
+        if torch.cuda.is_available():
+            device = torch.device("cuda")
 
-    eval_env_first = make_env(goal=goal)
-    base_goal = np.array(goal, dtype=np.float32)
-    base_goal_t = torch.tensor(base_goal, dtype=torch.float32, device=device).unsqueeze(0)
-
-    states_base, coords_base = collect_valid_states_fourrooms(eval_env_first)
-    obs_base_t = torch.tensor(states_base, dtype=torch.float32, device=device)
-
-    q_network.eval()
-    if actor is not None:
-        actor.eval()
-
-    with torch.no_grad():
-        psi_z_base = q_network.encode_goal(base_goal_t).cpu().numpy()  # [1, D_goal_like]
-
-        if action_mode == "auto":
-            if hasattr(q_network, "num_actions"):
-                action_mode = "all_discrete"
-            elif actor is not None:
-                action_mode = "actor"
-            else:
-                raise ValueError(
-                    "Could not infer action_mode. Provide actor for continuous mode "
-                    "or set action_mode explicitly."
-                )
-
-        # ---------------------------------------------------
-        # Discrete mode: enumerate all actions
-        # ---------------------------------------------------
-        if action_mode == "all_discrete":
-            if not hasattr(q_network, "num_actions"):
-                raise ValueError("q_network.num_actions is required for discrete action analysis.")
-            if not hasattr(q_network, "obs_dim"):
-                raise ValueError("q_network.obs_dim is required for discrete action analysis.")
-            if not hasattr(q_network, "rep_dim"):
-                raise ValueError("q_network.rep_dim is required for discrete action analysis.")
-
-            N = obs_base_t.shape[0]
-            A = q_network.num_actions
-            action_dim = getattr(q_network, "action_dim", q_network.num_actions)
-
-            act_onehot = F.one_hot(
-                torch.arange(A, device=device),
-                num_classes=action_dim
-            ).float()
-
-            obs_rep = obs_base_t.unsqueeze(1).expand(-1, A, -1)
-            act_rep = act_onehot.unsqueeze(0).expand(N, -1, -1)
-
-            obs_flat = obs_rep.reshape(N * A, q_network.obs_dim)
-            act_flat = act_rep.reshape(N * A, action_dim)
-
-            phi_sa_base = q_network.encode_state_action(obs_flat, act_flat).cpu().numpy()
-            phi_sa_base = phi_sa_base.reshape(N, A, -1)
-            phi_sa_base_flat = phi_sa_base.reshape(N * A, -1)
-
-            print("Embedding mode: all_discrete")
-            print("states_base:", states_base.shape)
-            print("coords_base:", coords_base.shape)
-            print("phi(s,a) base:", phi_sa_base.shape)
-            print("psi(z) / task code base:", psi_z_base.shape)
-
-        # ---------------------------------------------------
-        # Continuous mode: actor action for each state
-        # ---------------------------------------------------
-        elif action_mode == "actor":
-            if actor is None:
-                raise ValueError("actor must be provided when action_mode='actor'.")
-
-            N = obs_base_t.shape[0]
-            goal_batch = base_goal_t.expand(N, -1)
-
-            act_base = actor(obs_base_t, goal_batch)
-            phi_sa_base = q_network.encode_state_action(obs_base_t, act_base).cpu().numpy()
-            phi_sa_base_flat = phi_sa_base
-
-            print("Embedding mode: actor")
-            print("states_base:", states_base.shape)
-            print("coords_base:", coords_base.shape)
-            print("actions from actor:", act_base.shape)
-            print("phi(s, pi(s,g)) base:", phi_sa_base.shape)
-            print("psi(z) / task code base:", psi_z_base.shape)
-
-        # ---------------------------------------------------
-        # Continuous mode: fixed probe actions
-        # ---------------------------------------------------
-        elif action_mode == "probe":
-            if probe_actions is None:
-                raise ValueError("probe_actions must be provided when action_mode='probe'.")
-
-            probe_actions_t = torch.tensor(np.asarray(probe_actions), dtype=torch.float32, device=device)
-            N = obs_base_t.shape[0]
-            K = probe_actions_t.shape[0]
-
-            obs_rep = obs_base_t.unsqueeze(1).expand(-1, K, -1)
-            act_rep = probe_actions_t.unsqueeze(0).expand(N, -1, -1)
-
-            obs_flat = obs_rep.reshape(N * K, obs_base_t.shape[1])
-            act_flat = act_rep.reshape(N * K, probe_actions_t.shape[1])
-
-            phi_sa_base = q_network.encode_state_action(obs_flat, act_flat).cpu().numpy()
-            phi_sa_base = phi_sa_base.reshape(N, K, -1)
-            phi_sa_base_flat = phi_sa_base.reshape(N * K, -1)
-
-            print("Embedding mode: probe")
-            print("states_base:", states_base.shape)
-            print("coords_base:", coords_base.shape)
-            print("probe_actions:", probe_actions_t.shape)
-            print("phi(s,a_probe) base:", phi_sa_base.shape)
-            print("psi(z) / task code base:", psi_z_base.shape)
+        elif (
+            hasattr(torch.backends, "mps")
+            and torch.backends.mps.is_available()
+        ):
+            device = torch.device("mps")
 
         else:
-            raise ValueError(f"Unknown action_mode: {action_mode}")
+            device = torch.device("cpu")
 
-    # --------------------------------------------
-    # Shared diagnostics
-    # --------------------------------------------
-    phisa_t = torch.tensor(phi_sa_base_flat, dtype=torch.float32)
-    psi_t = torch.tensor(psi_z_base.squeeze(0), dtype=torch.float32)
-
-    norms = phisa_t.norm(dim=-1)
-    print(f"phi(s,a) norms: mean={norms.mean().item():.4f}, std={norms.std().item():.4f}")
-
-    phisa_centered = phisa_t - phisa_t.mean(dim=0, keepdim=True)
-    U, S, Vh = torch.linalg.svd(phisa_centered, full_matrices=False)
-    S_np = S.cpu().numpy()
-    explained = (S_np ** 2) / (S_np ** 2).sum()
-    cumulative = explained.cumsum()
-
-    print("top 5 singular values:", S_np[:5])
-    print("cumulative variance (first 5 dims):", cumulative[:5])
-
-    can_compare_cosine = (phisa_t.shape[-1] == psi_t.shape[-1])
-
-    if can_compare_cosine:
-        psi_unit = psi_t / (psi_t.norm() + 1e-8)
-        phisa_unit = phisa_t / (phisa_t.norm(dim=-1, keepdim=True) + 1e-8)
-        cos = phisa_unit @ psi_unit
-        cos_np = cos.cpu().numpy()
-        print(f"cos(phi(s,a), psi/task): mean={cos_np.mean():.4f}, std={cos_np.std():.4f}")
     else:
-        cos_np = None
+        device = torch.device(device)
+
+    if make_env is None:
+        raise ValueError(
+            "make_env function must be provided to create "
+            "the evaluation environment."
+        )
+
+    eval_env_first = make_env(goal=goal)
+
+    try:
+        # --------------------------------------------------------
+        # Prepare goal and evaluation states
+        # --------------------------------------------------------
+        base_goal = np.asarray(
+            goal,
+            dtype=np.float32,
+        )
+
+        base_goal_t = torch.tensor(
+            base_goal,
+            dtype=torch.float32,
+            device=device,
+        ).unsqueeze(0)
+
+        states_base, coords_base = (
+            collect_valid_states_fourrooms(
+                eval_env_first
+            )
+        )
+
+        obs_base_t = torch.tensor(
+            states_base,
+            dtype=torch.float32,
+            device=device,
+        )
+
+        # --------------------------------------------------------
+        # Preserve training states
+        # --------------------------------------------------------
+        q_network_was_training = q_network.training
+        actor_was_training = (
+            actor.training
+            if actor is not None
+            else None
+        )
+
+        q_network.eval()
+
+        if actor is not None:
+            actor.eval()
+
+        # --------------------------------------------------------
+        # Encode embeddings
+        # --------------------------------------------------------
+        with torch.no_grad():
+            psi_z_base_t = q_network.encode_goal(
+                base_goal_t
+            )
+
+            psi_z_base = (
+                psi_z_base_t
+                .detach()
+                .cpu()
+                .numpy()
+            )
+
+            # ----------------------------------------------------
+            # Infer action mode
+            # ----------------------------------------------------
+            if action_mode == "auto":
+                if hasattr(q_network, "num_actions"):
+                    action_mode = "all_discrete"
+
+                elif actor is not None:
+                    action_mode = "actor"
+
+                else:
+                    raise ValueError(
+                        "Could not infer action_mode. "
+                        "Provide actor for continuous mode "
+                        "or set action_mode explicitly."
+                    )
+
+            # ----------------------------------------------------
+            # Discrete mode: enumerate all actions
+            # ----------------------------------------------------
+            if action_mode == "all_discrete":
+                if not hasattr(
+                    q_network,
+                    "num_actions",
+                ):
+                    raise ValueError(
+                        "q_network.num_actions is required "
+                        "for discrete action analysis."
+                    )
+
+                if not hasattr(
+                    q_network,
+                    "obs_dim",
+                ):
+                    raise ValueError(
+                        "q_network.obs_dim is required "
+                        "for discrete action analysis."
+                    )
+
+                if not hasattr(
+                    q_network,
+                    "rep_dim",
+                ):
+                    raise ValueError(
+                        "q_network.rep_dim is required "
+                        "for discrete action analysis."
+                    )
+
+                n_states = obs_base_t.shape[0]
+                n_actions = q_network.num_actions
+
+                action_dim = getattr(
+                    q_network,
+                    "action_dim",
+                    q_network.num_actions,
+                )
+
+                act_onehot = F.one_hot(
+                    torch.arange(
+                        n_actions,
+                        device=device,
+                    ),
+                    num_classes=action_dim,
+                ).float()
+
+                obs_rep = (
+                    obs_base_t
+                    .unsqueeze(1)
+                    .expand(
+                        -1,
+                        n_actions,
+                        -1,
+                    )
+                )
+
+                act_rep = (
+                    act_onehot
+                    .unsqueeze(0)
+                    .expand(
+                        n_states,
+                        -1,
+                        -1,
+                    )
+                )
+
+                obs_flat = obs_rep.reshape(
+                    n_states * n_actions,
+                    q_network.obs_dim,
+                )
+
+                act_flat = act_rep.reshape(
+                    n_states * n_actions,
+                    action_dim,
+                )
+
+                phi_sa_base_t = (
+                    q_network.encode_state_action(
+                        obs_flat,
+                        act_flat,
+                    )
+                )
+
+                phi_sa_base = (
+                    phi_sa_base_t
+                    .detach()
+                    .cpu()
+                    .numpy()
+                )
+
+                phi_sa_base = phi_sa_base.reshape(
+                    n_states,
+                    n_actions,
+                    -1,
+                )
+
+                phi_sa_base_flat = (
+                    phi_sa_base.reshape(
+                        n_states * n_actions,
+                        -1,
+                    )
+                )
+
+                print(
+                    "Embedding mode: all_discrete"
+                )
+
+                print(
+                    "states_base:",
+                    states_base.shape,
+                )
+
+                print(
+                    "coords_base:",
+                    coords_base.shape,
+                )
+
+                print(
+                    "phi(s,a) base:",
+                    phi_sa_base.shape,
+                )
+
+                print(
+                    "psi(z) / task code base:",
+                    psi_z_base.shape,
+                )
+
+            # ----------------------------------------------------
+            # Continuous mode: actor action per state
+            # ----------------------------------------------------
+            elif action_mode == "actor":
+                if actor is None:
+                    raise ValueError(
+                        "actor must be provided when "
+                        "action_mode='actor'."
+                    )
+
+                n_states = obs_base_t.shape[0]
+
+                goal_batch = base_goal_t.expand(
+                    n_states,
+                    -1,
+                )
+
+                act_base = actor(
+                    obs_base_t,
+                    goal_batch,
+                )
+
+                phi_sa_base_t = (
+                    q_network.encode_state_action(
+                        obs_base_t,
+                        act_base,
+                    )
+                )
+
+                phi_sa_base = (
+                    phi_sa_base_t
+                    .detach()
+                    .cpu()
+                    .numpy()
+                )
+
+                phi_sa_base_flat = phi_sa_base
+
+                print(
+                    "Embedding mode: actor"
+                )
+
+                print(
+                    "states_base:",
+                    states_base.shape,
+                )
+
+                print(
+                    "coords_base:",
+                    coords_base.shape,
+                )
+
+                print(
+                    "actions from actor:",
+                    act_base.shape,
+                )
+
+                print(
+                    "phi(s, pi(s,g)) base:",
+                    phi_sa_base.shape,
+                )
+
+                print(
+                    "psi(z) / task code base:",
+                    psi_z_base.shape,
+                )
+
+            # ----------------------------------------------------
+            # Continuous mode: fixed probe actions
+            # ----------------------------------------------------
+            elif action_mode == "probe":
+                if probe_actions is None:
+                    raise ValueError(
+                        "probe_actions must be provided when "
+                        "action_mode='probe'."
+                    )
+
+                probe_actions_t = torch.tensor(
+                    np.asarray(probe_actions),
+                    dtype=torch.float32,
+                    device=device,
+                )
+
+                n_states = obs_base_t.shape[0]
+                n_probe_actions = (
+                    probe_actions_t.shape[0]
+                )
+
+                obs_rep = (
+                    obs_base_t
+                    .unsqueeze(1)
+                    .expand(
+                        -1,
+                        n_probe_actions,
+                        -1,
+                    )
+                )
+
+                act_rep = (
+                    probe_actions_t
+                    .unsqueeze(0)
+                    .expand(
+                        n_states,
+                        -1,
+                        -1,
+                    )
+                )
+
+                obs_flat = obs_rep.reshape(
+                    n_states * n_probe_actions,
+                    obs_base_t.shape[1],
+                )
+
+                act_flat = act_rep.reshape(
+                    n_states * n_probe_actions,
+                    probe_actions_t.shape[1],
+                )
+
+                phi_sa_base_t = (
+                    q_network.encode_state_action(
+                        obs_flat,
+                        act_flat,
+                    )
+                )
+
+                phi_sa_base = (
+                    phi_sa_base_t
+                    .detach()
+                    .cpu()
+                    .numpy()
+                )
+
+                phi_sa_base = phi_sa_base.reshape(
+                    n_states,
+                    n_probe_actions,
+                    -1,
+                )
+
+                phi_sa_base_flat = (
+                    phi_sa_base.reshape(
+                        n_states * n_probe_actions,
+                        -1,
+                    )
+                )
+
+                print(
+                    "Embedding mode: probe"
+                )
+
+                print(
+                    "states_base:",
+                    states_base.shape,
+                )
+
+                print(
+                    "coords_base:",
+                    coords_base.shape,
+                )
+
+                print(
+                    "probe_actions:",
+                    probe_actions_t.shape,
+                )
+
+                print(
+                    "phi(s,a_probe) base:",
+                    phi_sa_base.shape,
+                )
+
+                print(
+                    "psi(z) / task code base:",
+                    psi_z_base.shape,
+                )
+
+            else:
+                raise ValueError(
+                    f"Unknown action_mode: {action_mode}"
+                )
+
+        # ========================================================
+        # Move all diagnostics explicitly to CPU
+        # ========================================================
+        #
+        # The encoder forward passes can use MPS/CUDA, while all
+        # diagnostic operations are performed on CPU. This prevents
+        # CPU/MPS matrix multiplication errors and makes SVD and
+        # plotting more robust.
+        # ========================================================
+
+        phisa_t = torch.as_tensor(
+            phi_sa_base_flat,
+            dtype=torch.float32,
+            device="cpu",
+        )
+
+        psi_t = torch.as_tensor(
+            psi_z_base.squeeze(0),
+            dtype=torch.float32,
+            device="cpu",
+        )
+
         print(
-            f"Skipping cosine histogram: phi dim = {phisa_t.shape[-1]}, "
-            f"goal/task dim = {psi_t.shape[-1]}"
+            "\nDiagnostic tensor devices:",
+            f"phi={phisa_t.device},",
+            f"psi={psi_t.device}",
         )
 
-    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+        # ========================================================
+        # State-action encoder diagnostics
+        # ========================================================
 
-    axes[0].plot(cumulative, marker="o")
-    axes[0].set_xlabel("Number of components")
-    axes[0].set_ylabel("Cumulative variance explained")
-    axes[0].set_title(f"Variance spectrum of phi(s,a) [{goal}]")
-    axes[0].grid(alpha=0.3)
+        sa_norms = phisa_t.norm(dim=-1)
 
-    if cos_np is not None:
-        axes[1].hist(cos_np, bins=40, alpha=0.7)
-        axes[1].set_xlabel("cos(phi(s,a), psi/task)")
-        axes[1].set_ylabel("count")
-        axes[1].set_title(f"Cosine histo phi(s,a) vs psi/task [{goal}]")
-        axes[1].grid(alpha=0.3)
-    else:
-        psi_np = psi_t.cpu().numpy()
-        axes[1].hist(psi_np, bins=40, alpha=0.7)
-        axes[1].set_xlabel("task code value")
-        axes[1].set_ylabel("count")
-        axes[1].set_title(f"Task-code histogram [{goal}]")
-        axes[1].grid(alpha=0.3)
-        axes[1].text(
-            0.5, 0.95,
-            f"phi dim={phisa_t.shape[-1]}, task dim={psi_t.shape[-1]}",
-            ha="center", va="top",
-            transform=axes[1].transAxes, fontsize=10
+        print(
+            "\nState-action encoder statistics"
         )
 
-    plt.tight_layout()
-    plt.show()
+        print(
+            "phi(s,a) norms: "
+            f"mean={sa_norms.mean().item():.4f}, "
+            f"std={sa_norms.std().item():.4f}, "
+            f"min={sa_norms.min().item():.4f}, "
+            f"max={sa_norms.max().item():.4f}"
+        )
 
-    eval_env_first.close()
+        phisa_centered = (
+            phisa_t
+            - phisa_t.mean(
+                dim=0,
+                keepdim=True,
+            )
+        )
 
-    q_network.train()
-    if actor is not None:
-        actor.train()
+        _, sa_singular_values, _ = (
+            torch.linalg.svd(
+                phisa_centered,
+                full_matrices=False,
+            )
+        )
+
+        sa_singular_values_np = (
+            sa_singular_values.numpy()
+        )
+
+        sa_variance = (
+            sa_singular_values_np ** 2
+        )
+
+        sa_variance_total = (
+            sa_variance.sum()
+        )
+
+        if sa_variance_total > 1e-12:
+            sa_explained = (
+                sa_variance
+                / sa_variance_total
+            )
+
+            sa_cumulative = (
+                sa_explained.cumsum()
+            )
+
+        else:
+            sa_explained = np.zeros_like(
+                sa_variance
+            )
+
+            sa_cumulative = np.zeros_like(
+                sa_explained
+            )
+
+        print(
+            "top 5 singular values:",
+            sa_singular_values_np[:5],
+        )
+
+        print(
+            "cumulative variance "
+            "(first 5 dimensions):",
+            sa_cumulative[:5],
+        )
+
+        # ========================================================
+        # Goal encoder diagnostics for the current goal
+        # ========================================================
+
+        psi_norm = psi_t.norm()
+
+        print(
+            "\nGoal encoder statistics"
+        )
+
+        print(
+            "psi(z) / task-code norm: "
+            f"{psi_norm.item():.4f}"
+        )
+
+        print(
+            "psi(z) dimension values: "
+            f"mean={psi_t.mean().item():.4f}, "
+            f"std={psi_t.std().item():.4f}, "
+            f"min={psi_t.min().item():.4f}, "
+            f"max={psi_t.max().item():.4f}"
+        )
+
+        psi_np = psi_t.numpy()
+
+        psi_squared = psi_np ** 2
+        psi_squared_total = psi_squared.sum()
+
+        if psi_squared_total > 1e-12:
+            goal_explained = (
+                psi_squared
+                / psi_squared_total
+            )
+
+            goal_cumulative = (
+                goal_explained.cumsum()
+            )
+
+        else:
+            goal_explained = np.zeros_like(
+                psi_squared
+            )
+
+            goal_cumulative = np.zeros_like(
+                goal_explained
+            )
+
+        print(
+            "goal-code dimension magnitudes:",
+            np.abs(psi_np)[:5],
+        )
+
+        print(
+            "goal-code cumulative squared "
+            "magnitude (first 5 dimensions):",
+            goal_cumulative[:5],
+        )
+
+        # ========================================================
+        # Cosine similarity diagnostics
+        # ========================================================
+
+        can_compare_cosine = (
+            phisa_t.shape[-1]
+            == psi_t.shape[-1]
+        )
+
+        if can_compare_cosine:
+            psi_unit = psi_t / (
+                psi_t.norm()
+                + 1e-8
+            )
+
+            phisa_unit = phisa_t / (
+                phisa_t.norm(
+                    dim=-1,
+                    keepdim=True,
+                )
+                + 1e-8
+            )
+
+            # Both tensors are explicitly on CPU.
+            cos = phisa_unit @ psi_unit
+
+            cos_np = cos.numpy()
+
+            print(
+                "\nCosine similarity statistics"
+            )
+
+            print(
+                "cos(phi(s,a), psi/task): "
+                f"mean={cos_np.mean():.4f}, "
+                f"std={cos_np.std():.4f}, "
+                f"min={cos_np.min():.4f}, "
+                f"max={cos_np.max():.4f}"
+            )
+
+        else:
+            cos_np = None
+
+            print(
+                "\nSkipping cosine histogram: "
+                f"phi dim={phisa_t.shape[-1]}, "
+                f"goal/task dim={psi_t.shape[-1]}"
+            )
+
+        # ========================================================
+        # Plot diagnostics
+        # ========================================================
+
+        fig, axes = plt.subplots(
+            1,
+            3,
+            figsize=(18, 4),
+        )
+
+        # --------------------------------------------------------
+        # Plot 1: state-action variance spectrum
+        # --------------------------------------------------------
+
+        axes[0].plot(
+            np.arange(
+                1,
+                len(sa_cumulative) + 1,
+            ),
+            sa_cumulative,
+            marker="o",
+            markersize=3,
+        )
+
+        axes[0].set_xlabel(
+            "Number of components"
+        )
+
+        axes[0].set_ylabel(
+            "Cumulative variance explained"
+        )
+
+        axes[0].set_title(
+            f"State-action embedding variance [{goal}]"
+        )
+
+        axes[0].set_ylim(
+            0.0,
+            1.05,
+        )
+
+        axes[0].grid(alpha=0.3)
+
+        # --------------------------------------------------------
+        # Plot 2: current goal-code coordinate spectrum
+        # --------------------------------------------------------
+
+        axes[1].plot(
+            np.arange(
+                1,
+                len(goal_cumulative) + 1,
+            ),
+            goal_cumulative,
+            marker="o",
+            markersize=3,
+            color="tab:orange",
+        )
+
+        axes[1].set_xlabel(
+            "Goal-embedding dimensions"
+        )
+
+        axes[1].set_ylabel(
+            "Cumulative squared magnitude"
+        )
+
+        axes[1].set_title(
+            f"Current goal-code spectrum [{goal}]"
+        )
+
+        axes[1].set_ylim(
+            0.0,
+            1.05,
+        )
+
+        axes[1].grid(alpha=0.3)
+
+        # --------------------------------------------------------
+        # Plot 3: cosine similarity or task-code histogram
+        # --------------------------------------------------------
+
+        if cos_np is not None:
+            axes[2].hist(
+                cos_np,
+                bins=40,
+                alpha=0.7,
+                color="tab:green",
+            )
+
+            axes[2].set_xlabel(
+                "cos(phi(s,a), psi/task)"
+            )
+
+            axes[2].set_ylabel(
+                "Count"
+            )
+
+            axes[2].set_title(
+                f"Cosine similarity [{goal}]"
+            )
+
+            axes[2].grid(alpha=0.3)
+
+        else:
+            axes[2].hist(
+                psi_np,
+                bins=40,
+                alpha=0.7,
+                color="tab:green",
+            )
+
+            axes[2].set_xlabel(
+                "Task-code value"
+            )
+
+            axes[2].set_ylabel(
+                "Count"
+            )
+
+            axes[2].set_title(
+                f"Task-code histogram [{goal}]"
+            )
+
+            axes[2].grid(alpha=0.3)
+
+            axes[2].text(
+                0.5,
+                0.95,
+                (
+                    f"phi dim={phisa_t.shape[-1]}, "
+                    f"task dim={psi_t.shape[-1]}"
+                ),
+                ha="center",
+                va="top",
+                transform=axes[2].transAxes,
+                fontsize=10,
+            )
+
+        plt.tight_layout()
+        plt.show()
+
+    finally:
+        # --------------------------------------------------------
+        # Close evaluation environment
+        # --------------------------------------------------------
+        eval_env_first.close()
+
+        # --------------------------------------------------------
+        # Restore original training/evaluation states
+        # --------------------------------------------------------
+        if "q_network_was_training" in locals():
+            if q_network_was_training:
+                q_network.train()
+            else:
+                q_network.eval()
+
+        if actor is not None:
+            if actor_was_training:
+                actor.train()
+            else:
+                actor.eval()
 
 
 
@@ -2207,8 +2804,7 @@ def plot_full_embedding_dashboard_2d_html(
         },
     }
 
-def plot_min_steps_and_min_time(overall_results, seeds=None):  
-
+def plot_min_steps_and_min_time(overall_results, seeds=None):
     goals = list(overall_results.keys())
 
     mean_steps_per_goal = []
@@ -2219,13 +2815,13 @@ def plot_min_steps_and_min_time(overall_results, seeds=None):
 
     for goal in goals:
         steps_raw = overall_results[goal]["min_steps"]
-        time_raw  = overall_results[goal]["min_time"]
+        time_raw = overall_results[goal]["min_time"]
 
         steps_arr = np.array(
             [np.nan if x is None else x for x in steps_raw],
             dtype=float
         )
-        time_arr  = np.array(
+        time_arr = np.array(
             [np.nan if x is None else x for x in time_raw],
             dtype=float
         )
@@ -2249,24 +2845,28 @@ def plot_min_steps_and_min_time(overall_results, seeds=None):
     x = np.arange(len(used_goals))
 
     mean_steps_per_goal = np.array(mean_steps_per_goal)
-    std_steps_per_goal  = np.array(std_steps_per_goal)
-    mean_time_per_goal  = np.array(mean_time_per_goal)
-    std_time_per_goal   = np.array(std_time_per_goal)
+    std_steps_per_goal = np.array(std_steps_per_goal)
+    mean_time_per_goal = np.array(mean_time_per_goal)
+    std_time_per_goal = np.array(std_time_per_goal)
 
-    fig, (ax1, ax2) = plt.subplots(
-        1, 2,
-        figsize=(14, 5)
-    )
+    # Compute cumulative metrics
+    cum_steps = np.nancumsum(mean_steps_per_goal)
+    cum_time = np.nancumsum(mean_time_per_goal)
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
 
     # --- Left subplot: steps ---
     steps_color = "tab:blue"
+    cum_steps_color = "tab:red"
+
+    # Per-goal steps
     ax1.plot(
         x,
         mean_steps_per_goal,
         color=steps_color,
         marker="o",
         linewidth=2.5,
-        label="Mean Min Steps"
+        label="Mean Min Steps (per goal)"
     )
     ax1.fill_between(
         x,
@@ -2276,7 +2876,19 @@ def plot_min_steps_and_min_time(overall_results, seeds=None):
         alpha=0.2,
         label="±1 std"
     )
-    ax1.set_title(F"Minimum Steps Across {len(seeds)} Seeds")
+
+    # Cumulative steps
+    # ax1.plot(
+    #     x,
+    #     cum_steps,
+    #     color=cum_steps_color,
+    #     marker="s",
+    #     linewidth=2.5,
+    #     linestyle="--",
+    #     label="Cumulative Steps"
+    # )
+
+    ax1.set_title(f"Number of Steps taken to Achieve Goals Across {len(seeds)} Seeds")
     ax1.set_xlabel("Goal Index")
     ax1.set_ylabel("Steps")
     ax1.set_xticks(x)
@@ -2286,13 +2898,16 @@ def plot_min_steps_and_min_time(overall_results, seeds=None):
 
     # --- Right subplot: time ---
     time_color = "tab:orange"
+    cum_time_color = "tab:green"
+
+    # Per-goal time
     ax2.plot(
         x,
         mean_time_per_goal,
         color=time_color,
         marker="o",
         linewidth=2.5,
-        label="Mean Min Time"
+        label="Mean Min Time (per goal)"
     )
     ax2.fill_between(
         x,
@@ -2302,7 +2917,19 @@ def plot_min_steps_and_min_time(overall_results, seeds=None):
         alpha=0.2,
         label="±1 std"
     )
-    ax2.set_title(F"Minimum Time Across {len(seeds)} Seeds")
+
+    # Cumulative time
+    # ax2.plot(
+    #     x,
+    #     cum_time,
+    #     color=cum_time_color,
+    #     marker="s",
+    #     linewidth=2.5,
+    #     linestyle="--",
+    #     label="Cumulative Time"
+    # )
+
+    ax2.set_title(f"Minimum Time Across {len(seeds)} Seeds")
     ax2.set_xlabel("Goal Index")
     ax2.set_ylabel("Time")
     ax2.set_xticks(x)
@@ -2312,4 +2939,961 @@ def plot_min_steps_and_min_time(overall_results, seeds=None):
 
     fig.suptitle("Mean ± Std per Goal", fontsize=14)
     fig.tight_layout()
+    plt.show()
+
+
+def plot_embedding_evolution(
+    goal_embeddings,
+    sa_embeddings,
+    goal_radius,
+    sa_radius,
+    goal_labels=None,
+    title=None,
+    projection="pca",
+    elev=22,
+    azim=38,
+):
+    """
+    Plot goal and state-action embeddings inside separate 3-D balls.
+
+    Parameters
+    ----------
+    goal_embeddings:
+        Tensor or array with shape (N_goals, D).
+        One row per goal seen so far.
+
+    sa_embeddings:
+        Tensor or array with shape (N_sa, D).
+        Probed state-action embeddings.
+
+    goal_radius:
+        Soft norm-bound radius for psi(g).
+
+    sa_radius:
+        Soft norm-bound radius for phi(s, a).
+
+    goal_labels:
+        Optional list of goal names/IDs with length N_goals.
+
+    projection:
+        "pca" fits one joint PCA projection to both embedding sets.
+        "first3" uses the first three coordinates directly.
+
+    Notes
+    -----
+    The balls are 3-D visualisations of the projected embeddings.
+    If D > 3, the original norm constraints still apply in D dimensions.
+    """
+
+    def to_numpy(x):
+        if isinstance(x, torch.Tensor):
+            x = x.detach().cpu().float().numpy()
+
+        return np.asarray(x, dtype=np.float64)
+
+    goals = to_numpy(goal_embeddings)
+    sa = to_numpy(sa_embeddings)
+
+    if goals.ndim != 2:
+        raise ValueError(
+            "goal_embeddings must have shape (N_goals, D)"
+        )
+
+    if sa.ndim != 2:
+        raise ValueError(
+            "sa_embeddings must have shape (N_sa, D)"
+        )
+
+    if goals.shape[1] != sa.shape[1]:
+        raise ValueError(
+            "Goal and state-action embeddings must have "
+            "the same dimension."
+        )
+
+    if goals.shape[1] < 3:
+        raise ValueError(
+            "The embedding dimension must be at least 3."
+        )
+
+    if goal_labels is None:
+        goal_labels = [
+            f"goal_{i}"
+            for i in range(len(goals))
+        ]
+
+    if len(goal_labels) != len(goals):
+        raise ValueError(
+            "goal_labels must have one label per goal."
+        )
+
+    all_embeddings = np.concatenate(
+        [
+            goals,
+            sa,
+        ],
+        axis=0,
+    )
+
+    joint_mean = all_embeddings.mean(
+        axis=0,
+        keepdims=True,
+    )
+
+    centred = all_embeddings - joint_mean
+
+    if projection == "pca" and centred.shape[1] > 3:
+        _, _, vh = np.linalg.svd(
+            centred,
+            full_matrices=False,
+        )
+
+        components = vh[:3].T
+
+        projected = centred @ components
+
+    elif projection == "first3":
+        projected = centred[:, :3]
+
+    else:
+        projected = centred[:, :3]
+
+    projected_goals = projected[:len(goals)]
+    projected_sa = projected[len(goals):]
+
+    def make_sphere(radius, resolution=60):
+        u = np.linspace(
+            0.0,
+            2.0 * np.pi,
+            resolution,
+        )
+
+        v = np.linspace(
+            0.0,
+            np.pi,
+            resolution,
+        )
+
+        x = radius * np.outer(
+            np.cos(u),
+            np.sin(v),
+        )
+
+        y = radius * np.outer(
+            np.sin(u),
+            np.sin(v),
+        )
+
+        z = radius * np.outer(
+            np.ones_like(u),
+            np.cos(v),
+        )
+
+        return x, y, z
+
+    def draw_ball(
+        ax,
+        radius,
+        colour,
+        label,
+    ):
+        x, y, z = make_sphere(radius)
+
+        ax.plot_surface(
+            x,
+            y,
+            z,
+            color=colour,
+            alpha=0.10,
+            linewidth=0,
+            shade=True,
+        )
+
+        ax.plot_wireframe(
+            x[::6],
+            y[::6],
+            z[::6],
+            color=colour,
+            alpha=0.25,
+            linewidth=0.5,
+        )
+
+        ax.plot(
+            [],
+            [],
+            [],
+            color=colour,
+            alpha=0.45,
+            label=label,
+        )
+
+    def draw_embedding_lines(
+        ax,
+        points,
+        colours,
+        labels,
+        linestyle="-",
+        linewidth=1.8,
+        marker_size=45,
+        alpha=0.9,
+    ):
+        for point, colour, label in zip(
+            points,
+            colours,
+            labels,
+        ):
+            ax.plot(
+                [0.0, point[0]],
+                [0.0, point[1]],
+                [0.0, point[2]],
+                color=colour,
+                linestyle=linestyle,
+                linewidth=linewidth,
+                alpha=alpha,
+            )
+
+            ax.scatter(
+                point[0],
+                point[1],
+                point[2],
+                color=colour,
+                s=marker_size,
+                alpha=alpha,
+                edgecolors="black",
+                linewidths=0.5,
+            )
+
+            ax.text(
+                point[0],
+                point[1],
+                point[2],
+                f"  {label}",
+                color=colour,
+                fontsize=9,
+            )
+
+    goal_colours = plt.cm.tab10(
+        np.linspace(
+            0.0,
+            1.0,
+            max(len(projected_goals), 1),
+        )
+    )
+
+    sa_colours = plt.cm.viridis(
+        np.linspace(
+            0.0,
+            1.0,
+            max(len(projected_sa), 1),
+        )
+    )
+
+    fig = plt.figure(
+        figsize=(16, 7),
+        constrained_layout=True,
+    )
+
+    ax_goal = fig.add_subplot(
+        121,
+        projection="3d",
+    )
+
+    draw_ball(
+        ax_goal,
+        goal_radius,
+        "tab:blue",
+        rf"$\psi$ ball, $R_\psi={goal_radius:g}$",
+    )
+
+    draw_embedding_lines(
+        ax_goal,
+        projected_goals,
+        goal_colours,
+        goal_labels,
+    )
+
+    ax_goal.set_title(
+        "Goal embeddings seen so far"
+    )
+
+    ax_goal.set_xlabel("Projected dimension 1")
+    ax_goal.set_ylabel("Projected dimension 2")
+    ax_goal.set_zlabel("Projected dimension 3")
+
+    goal_legend_handles = [
+        Line2D(
+            [0],
+            [0],
+            color=colour,
+            marker="o",
+            linewidth=1.8,
+            label=label,
+        )
+        for colour, label in zip(
+            goal_colours,
+            goal_labels,
+        )
+    ]
+
+    goal_legend_handles.insert(
+        0,
+        Line2D(
+            [0],
+            [0],
+            color="tab:blue",
+            alpha=0.5,
+            label=rf"$\psi$ bounding ball, "
+                  rf"$R_\psi={goal_radius:g}$",
+        ),
+    )
+
+    ax_goal.legend(
+        handles=goal_legend_handles,
+        loc="upper left",
+        fontsize=8,
+    )
+
+    ax_sa = fig.add_subplot(
+        122,
+        projection="3d",
+    )
+
+    draw_ball(
+        ax_sa,
+        sa_radius,
+        "tab:orange",
+        rf"$\phi$ ball, $R_\phi={sa_radius:g}$",
+    )
+
+    sa_labels = [
+        f"sa_{i}"
+        for i in range(len(projected_sa))
+    ]
+
+    draw_embedding_lines(
+        ax_sa,
+        projected_sa,
+        sa_colours,
+        sa_labels,
+        linestyle="--",
+        linewidth=1.2,
+        marker_size=25,
+        alpha=0.65,
+    )
+
+    ax_sa.set_title(
+        "Probed state-action embeddings"
+    )
+
+    ax_sa.set_xlabel("Projected dimension 1")
+    ax_sa.set_ylabel("Projected dimension 2")
+    ax_sa.set_zlabel("Projected dimension 3")
+
+    ax_sa.legend(
+        loc="upper left",
+        fontsize=8,
+    )
+
+    plot_radius = max(
+        float(goal_radius),
+        float(sa_radius),
+        1.0,
+    )
+
+    for ax in [ax_goal, ax_sa]:
+        ax.set_xlim(
+            -plot_radius,
+            plot_radius,
+        )
+
+        ax.set_ylim(
+            -plot_radius,
+            plot_radius,
+        )
+
+        ax.set_zlim(
+            -plot_radius,
+            plot_radius,
+        )
+
+        ax.set_box_aspect(
+            (1.0, 1.0, 1.0)
+        )
+
+        ax.view_init(
+            elev=elev,
+            azim=azim,
+        )
+
+    if title is not None:
+        fig.suptitle(
+            title,
+            fontsize=14,
+        )
+
+    plt.show()
+
+
+def plot_embedding_evolution_2d(
+    goal_embeddings,
+    sa_embeddings,
+    goal_radius,
+    sa_radius,
+    goal_labels=None,
+    title=None,
+    projection="pca",
+    display_radius=1.0,
+    display_mode="direction",
+    figsize=(15, 5),
+):
+    """
+    Plot goal and state-action embeddings in 2D.
+
+    display_mode="direction":
+        Normalises each projected embedding independently so that
+        every embedding remains visible.
+
+    display_mode="norm":
+        Preserves the relative projected norm.
+
+    The original full-dimensional norms are shown in each label.
+    """
+
+    def to_numpy(x):
+        if isinstance(x, torch.Tensor):
+            x = x.detach().cpu().float().numpy()
+
+        return np.asarray(x, dtype=np.float64)
+
+    goals = to_numpy(goal_embeddings)
+    sa = to_numpy(sa_embeddings)
+
+    if goals.ndim != 2:
+        raise ValueError(
+            "goal_embeddings must have shape (N_goals, D)"
+        )
+
+    if sa.ndim != 2:
+        raise ValueError(
+            "sa_embeddings must have shape (N_sa, D)"
+        )
+
+    if goals.shape[1] != sa.shape[1]:
+        raise ValueError(
+            "Goal and state-action embeddings must have "
+            "the same dimension."
+        )
+
+    if goals.shape[1] < 2:
+        raise ValueError(
+            "The embedding dimension must be at least 2."
+        )
+
+    if goal_labels is None:
+        goal_labels = [
+            f"goal_{i}"
+            for i in range(len(goals))
+        ]
+
+    if len(goal_labels) != len(goals):
+        raise ValueError(
+            "goal_labels must have one label per goal."
+        )
+
+    all_embeddings = np.concatenate(
+        [goals, sa],
+        axis=0,
+    )
+
+    joint_mean = all_embeddings.mean(
+        axis=0,
+        keepdims=True,
+    )
+
+    centred = all_embeddings - joint_mean
+
+    true_norms = np.linalg.norm(
+        centred,
+        axis=1,
+    )
+
+    if projection == "pca" and centred.shape[1] > 2:
+        _, _, vh = np.linalg.svd(
+            centred,
+            full_matrices=False,
+        )
+
+        components = vh[:2].T
+        projected = centred @ components
+
+    elif projection == "first2":
+        projected = centred[:, :2]
+
+    else:
+        projected = centred[:, :2]
+
+    projected_norms = np.linalg.norm(
+        projected,
+        axis=1,
+        keepdims=True,
+    )
+
+    if display_mode == "direction":
+        display_points = (
+            projected
+            / np.maximum(projected_norms, 1e-8)
+        ) * display_radius
+
+    elif display_mode == "norm":
+        display_points = projected.copy()
+
+    else:
+        raise ValueError(
+            "display_mode must be 'direction' or 'norm'."
+        )
+
+    display_goals = display_points[:len(goals)]
+    display_sa = display_points[len(goals):]
+
+    goal_true_norms = true_norms[:len(goals)]
+    sa_true_norms = true_norms[len(goals):]
+
+    def draw_circle(
+        ax,
+        radius,
+        colour,
+        label,
+    ):
+        circle = Circle(
+            (0.0, 0.0),
+            radius=radius,
+            facecolor=colour,
+            edgecolor=colour,
+            alpha=0.10,
+            linewidth=2.0,
+        )
+
+        ax.add_patch(circle)
+
+        ax.plot(
+            [],
+            [],
+            color=colour,
+            alpha=0.6,
+            linewidth=2.0,
+            label=label,
+        )
+
+    def draw_embedding_lines(
+        ax,
+        points,
+        colours,
+        labels,
+        true_norms_for_labels,
+        linestyle="-",
+        linewidth=1.8,
+        marker_size=45,
+        alpha=0.9,
+    ):
+        for point, colour, label, true_norm in zip(
+            points,
+            colours,
+            labels,
+            true_norms_for_labels,
+        ):
+            label_with_norm = (
+                f"{label} "
+                f"(\u2016z\u2016={true_norm:.3f})"
+            )
+
+            ax.plot(
+                [0.0, point[0]],
+                [0.0, point[1]],
+                color=colour,
+                linestyle=linestyle,
+                linewidth=linewidth,
+                alpha=alpha,
+            )
+
+            ax.scatter(
+                point[0],
+                point[1],
+                color=colour,
+                s=marker_size,
+                alpha=alpha,
+                edgecolors="black",
+                linewidths=0.5,
+            )
+
+            ax.text(
+                point[0],
+                point[1],
+                f"  {label}",
+                color=colour,
+                fontsize=9,
+                ha="left",
+                va="center",
+            )
+
+    goal_colours = plt.cm.tab10(
+        np.linspace(
+            0.0,
+            1.0,
+            max(len(display_goals), 1),
+        )
+    )
+
+    sa_colours = plt.cm.viridis(
+        np.linspace(
+            0.0,
+            1.0,
+            max(len(display_sa), 1),
+        )
+    )
+
+    fig, axes = plt.subplots(
+        1,
+        2,
+        figsize=figsize,
+        constrained_layout=True,
+    )
+
+    ax_goal, ax_sa = axes
+
+
+    # ---------------------------------------------------------
+    # State-action embeddings
+    # ---------------------------------------------------------
+
+    draw_circle(
+        ax_sa,
+        display_radius,
+        "tab:orange",
+        rf"$\phi$ display circle",
+    )
+
+    sa_labels = [
+        f"sa_{i}"
+        for i in range(len(display_sa))
+    ]
+
+    draw_embedding_lines(
+        ax=ax_sa,
+        points=display_sa,
+        colours=sa_colours,
+        labels=sa_labels,
+        true_norms_for_labels=sa_true_norms,
+        linestyle="-",
+        linewidth=1.2,
+        marker_size=25,
+        alpha=0.65,
+    )
+
+    ax_sa.scatter(
+        0.0,
+        0.0,
+        color="black",
+        s=35,
+        marker="x",
+        linewidths=1.5,
+    )
+
+    ax_sa.set_title(
+        "Fixed phi(s,a) embeddings "
+    )
+
+    ax_sa.set_xlabel(
+        "Projected direction 1"
+    )
+
+    ax_sa.set_ylabel(
+        "Projected direction 2"
+    )
+
+    ax_sa.set_aspect(
+        "equal",
+        adjustable="box",
+    )
+
+    ax_sa.grid(
+        True,
+        alpha=0.25,
+    )
+
+    ax_sa.legend(
+        loc="upper left",
+        fontsize=8,
+    )
+
+
+    # ---------------------------------------------------------
+    # Goal embeddings
+    # ---------------------------------------------------------
+
+    draw_circle(
+        ax_goal,
+        display_radius,
+        "tab:blue",
+        rf"$\psi$ display circle",
+    )
+
+    draw_embedding_lines(
+        ax=ax_goal,
+        points=display_goals,
+        colours=goal_colours,
+        labels=goal_labels,
+        true_norms_for_labels=goal_true_norms,
+    )
+
+    ax_goal.scatter(
+        0.0,
+        0.0,
+        color="black",
+        s=35,
+        marker="x",
+        linewidths=1.5,
+    )
+
+    ax_goal.set_title(
+        "Goal embeddings psi(g)"
+    )
+
+    ax_goal.set_xlabel(
+        "Projected direction 1"
+    )
+
+    ax_goal.set_ylabel(
+        "Projected direction 2"
+    )
+
+    ax_goal.set_aspect(
+        "equal",
+        adjustable="box",
+    )
+
+    ax_goal.grid(
+        True,
+        alpha=0.25,
+    )
+
+    ax_goal.legend(
+        loc="upper left",
+        fontsize=8,
+    )
+
+    # ---------------------------------------------------------
+    # Common display limits
+    # ---------------------------------------------------------
+
+    plot_limit = display_radius * 1.20
+
+    for ax in [ax_goal, ax_sa]:
+        ax.set_xlim(
+            -plot_limit,
+            plot_limit,
+        )
+
+        ax.set_ylim(
+            -plot_limit,
+            plot_limit,
+        )
+
+        ax.axhline(
+            0.0,
+            color="black",
+            linewidth=0.5,
+            alpha=0.3,
+        )
+
+        ax.axvline(
+            0.0,
+            color="black",
+            linewidth=0.5,
+        )
+
+    if title is not None:
+        fig.suptitle(
+            title,
+            fontsize=14,
+        )
+
+    plt.show()
+    
+def plot_psi_embeddings_2d(
+    psi_embeddings,
+    goal_labels=None,
+    true_norms=None,
+    title=None,
+    projection="pca",
+    display_radius=1.0,
+    display_mode="direction",
+    figsize=(6, 5),
+    cmap="tab10",
+):
+    """
+    Plot goal embeddings psi(g) in 2D, in the same style as your DQN plot.
+
+    Parameters
+    ----------
+    psi_embeddings : np.ndarray or torch.Tensor
+        Shape (N_goals, D). Raw psi embeddings for each goal.
+    goal_labels : list[str] or None
+        One label per goal. If None, uses "goal_0", "goal_1", ...
+    true_norms : np.ndarray or None
+        Shape (N_goals,). Optional precomputed norms ||psi||.
+        If None, computed from psi_embeddings.
+    title : str or None
+        Optional figure title.
+    projection : {"pca", "first2"}
+        How to reduce to 2D.
+    display_radius : float
+        Radius of the display circle.
+    display_mode : {"direction", "norm"}
+        "direction": normalise each projected vector to display_radius.
+        "norm": preserve relative projected norms.
+    figsize : tuple
+        Figure size.
+    cmap : str
+        Matplotlib colormap for goal colours.
+    """
+
+    def to_numpy(x):
+        if isinstance(x, torch.Tensor):
+            x = x.detach().cpu().float().numpy()
+        return np.asarray(x, dtype=np.float64)
+
+    psi = to_numpy(psi_embeddings)
+
+    if psi.ndim != 2:
+        raise ValueError("psi_embeddings must have shape (N_goals, D).")
+
+    if psi.shape[0] < 1:
+        raise ValueError("At least one goal embedding is required.")
+
+    if psi.shape[1] < 2:
+        raise ValueError("Embedding dimension must be at least 2.")
+
+    N, D = psi.shape
+
+    if goal_labels is None:
+        goal_labels = [f"goal_{i}" for i in range(N)]
+
+    if len(goal_labels) != N:
+        raise ValueError("goal_labels must have one label per goal.")
+
+    if true_norms is None:
+        true_norms = np.linalg.norm(psi, axis=1)
+    else:
+        true_norms = to_numpy(true_norms)
+        if true_norms.shape != (N,):
+            raise ValueError("true_norms must have shape (N_goals,).")
+
+    # Centre embeddings (optional, but matches your DQN style)
+    mean_psi = psi.mean(axis=0, keepdims=True)
+    centred = psi - mean_psi
+
+    # 2D projection
+    if projection == "pca" and D > 2:
+        _, _, vh = np.linalg.svd(centred, full_matrices=False)
+        components = vh[:2].T
+        projected = centred @ components
+    elif projection == "first2":
+        projected = centred[:, :2]
+    else:
+        projected = centred[:, :2]
+
+    projected_norms = np.linalg.norm(projected, axis=1, keepdims=True)
+
+    if display_mode == "direction":
+        display_points = (
+            projected
+            / np.maximum(projected_norms, 1e-8)
+        ) * display_radius
+    elif display_mode == "norm":
+        display_points = projected.copy()
+    else:
+        raise ValueError("display_mode must be 'direction' or 'norm'.")
+
+    # Colours
+    colours = plt.cm.get_cmap(cmap)(
+        np.linspace(0.0, 1.0, max(N, 1))
+    )
+
+    fig, ax = plt.subplots(1, 1, figsize=figsize, constrained_layout=True)
+
+    # Display circle
+    circle = Circle(
+        (0.0, 0.0),
+        radius=display_radius,
+        facecolor="tab:blue",
+        edgecolor="tab:blue",
+        alpha=0.10,
+        linewidth=2.0,
+    )
+    ax.add_patch(circle)
+    ax.plot([], [], color="tab:blue", alpha=0.6, linewidth=2.0, label=r"$\psi$ display circle")
+
+    # Draw rays + labels
+    for point, colour, label, true_norm in zip(
+        display_points, colours, goal_labels, true_norms
+    ):
+        label_with_norm = f"{label} (‖ψ‖={true_norm:.3f})"
+
+        # Ray from origin
+        ax.plot(
+            [0.0, point[0]],
+            [0.0, point[1]],
+            color=colour,
+            linestyle="-",
+            linewidth=1.8,
+            alpha=0.9,
+        )
+
+        # Tip marker
+        ax.scatter(
+            point[0],
+            point[1],
+            color=colour,
+            s=45,
+            alpha=0.9,
+            edgecolors="black",
+            linewidths=0.5,
+        )
+
+        # Label
+        ax.text(
+            point[0],
+            point[1],
+            f"  {label}",
+            color=colour,
+            fontsize=9,
+            ha="left",
+            va="center",
+        )
+
+    # Origin
+    ax.scatter(
+        0.0,
+        0.0,
+        color="black",
+        s=35,
+        marker="x",
+        linewidths=1.5,
+    )
+
+    ax.set_title("Goal embeddings ψ(g)")
+    ax.set_xlabel("Projected direction 1")
+    ax.set_ylabel("Projected direction 2")
+    ax.set_aspect("equal", adjustable="box")
+    ax.grid(True, alpha=0.25)
+    ax.legend(loc="upper left", fontsize=8)
+
+    plot_limit = display_radius * 1.20
+    ax.set_xlim(-plot_limit, plot_limit)
+    ax.set_ylim(-plot_limit, plot_limit)
+    ax.axhline(0.0, color="black", linewidth=0.5, alpha=0.3)
+    ax.axvline(0.0, color="black", linewidth=0.5)
+
+    if title is not None:
+        fig.suptitle(title, fontsize=14)
+
     plt.show()

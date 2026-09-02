@@ -240,3 +240,98 @@ def goal_prototype_anchor_loss(
         current_embedding,
         prototype_tensor,
     )
+
+def online_goal_separation_loss(
+    q_network,
+    task_goals,
+    device,
+    target_cosine=0.85,
+):
+    task_ids = sorted(
+        task_goals.keys()
+    )
+
+    if len(task_ids) < 2:
+        return torch.zeros(
+            (),
+            device=device,
+        )
+
+    goal_batch = torch.as_tensor(
+        np.asarray(
+            [
+                task_goals[task_id]
+                for task_id in task_ids
+            ],
+            dtype=np.float32,
+        ),
+        dtype=torch.float32,
+        device=device,
+    )
+
+    psi = q_network.encode_goal(
+        goal_batch
+    )
+
+    psi = F.normalize(
+        psi,
+        p=2,
+        dim=-1,
+    )
+
+    cosine_matrix = (
+        psi @ psi.T
+    )
+
+    pair_mask = torch.triu(
+        torch.ones_like(
+            cosine_matrix,
+        ),
+        diagonal=1,
+    ).bool()
+
+    pairwise_cosines = (
+        cosine_matrix[pair_mask]
+    )
+
+    return F.relu(
+        pairwise_cosines
+        - target_cosine
+    ).pow(2).mean(), cosine_matrix
+
+
+def norm_penalty_loss_l2(
+    raw_embedding,
+    target_norm=1.0,
+):
+    raw_norms = torch.linalg.vector_norm(
+        raw_embedding,
+        ord=2,
+        dim=-1,
+    )
+
+    return F.relu(
+        raw_norms
+        - target_norm
+    ).pow(2).mean()
+
+
+def norm_penalty_loss_l1(
+    raw_embedding,
+    target_norm=1.0,
+):
+    raw_norms = torch.linalg.vector_norm(
+        raw_embedding,
+        ord=2,
+        dim=-1,
+    )
+
+    excess = F.relu(
+        raw_norms
+        - target_norm
+    )
+
+    return F.smooth_l1_loss(
+        excess,
+        torch.zeros_like(excess),
+    )
