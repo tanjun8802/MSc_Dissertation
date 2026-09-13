@@ -157,13 +157,13 @@ def _overlay_blocked(ax, blocked_cells, facecolor="gray", alpha=0.85):
         )
 
 
-def _draw_goal(ax, goal_pos, goal_size=120, color="green", edgecolors="black"):
+def _draw_goal(ax, goal_pos, goal_size=120, color="green", edgecolors="black", is_discrete=True):
     if goal_pos is None:
         return
 
     ax.scatter(
-        goal_pos[0] + 0.5,
-        goal_pos[1] + 0.5,
+        goal_pos[0] + 0.5 if is_discrete else goal_pos[0],
+        goal_pos[1] + 0.5 if is_discrete else goal_pos[1],
         c=color,
         marker="*",
         s=goal_size,
@@ -262,7 +262,7 @@ def plot_policy_rollouts(
 
         _setup_grid_ax(ax, width, height)
         _overlay_blocked(ax, blocked_cells)
-        _draw_goal(ax, goal_pos, goal_size=goal_size)
+        _draw_goal(ax, goal_pos, goal_size=goal_size, is_discrete=is_discrete)
 
         traj = trajectories[i]
         xs, ys = _cell_centers(traj, is_discrete=is_discrete)
@@ -362,7 +362,7 @@ def plot_q_diagnostics(
             interpolation="nearest",
         )
         _overlay_blocked(axes[0], blocked_cells, facecolor="black", alpha=1.0)
-        _draw_goal(axes[0], goal_pos, goal_size=100, color="red", edgecolors="black")
+        _draw_goal(axes[0], goal_pos, goal_size=100, color="red", edgecolors="black", is_discrete=is_discrete)
         _setup_grid_ax(axes[0], width, height, "Max Q(s, a)")
         fig.colorbar(im0, ax=axes[0], shrink=0.9, label="Q value")
 
@@ -384,7 +384,7 @@ def plot_q_diagnostics(
             interpolation="nearest",
         )
         _overlay_blocked(axes[1], blocked_cells, facecolor="black", alpha=1.0)
-        _draw_goal(axes[1], goal_pos, goal_size=100, color="white", edgecolors="black")
+        _draw_goal(axes[1], goal_pos, goal_size=100, color="white", edgecolors="black", is_discrete=is_discrete)
         _setup_grid_ax(axes[1], width, height, "Greedy action argmax_a Q(s,a)")
 
         cbar = fig.colorbar(im1, ax=axes[1], shrink=0.9, ticks=list(range(num_actions)))
@@ -443,7 +443,7 @@ def plot_q_diagnostics(
             interpolation="nearest",
         )
         _overlay_blocked(axes[0], blocked_cells, facecolor="black", alpha=1.0)
-        _draw_goal(axes[0], goal_pos, goal_size=100, color="red", edgecolors="black")
+        _draw_goal(axes[0], goal_pos, goal_size=100, color="red", edgecolors="black", is_discrete=is_discrete)
         _setup_grid_ax(axes[0], width, height, "State value V(s) / Q(s, π(s))")
         fig.colorbar(im0, ax=axes[0], shrink=0.9, label="Value")
 
@@ -471,7 +471,7 @@ def plot_q_diagnostics(
                 alpha=0.75,
                 zorder=4,
             )
-            _draw_goal(axes[1], goal_pos, goal_size=100, color="green", edgecolors="black")
+            _draw_goal(axes[1], goal_pos, goal_size=100, color="green", edgecolors="black", is_discrete=is_discrete)
         else:
             axes[1].text(0.5, 0.5, "No actor_fn provided", ha="center", va="center")
             axes[1].set_axis_off()

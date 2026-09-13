@@ -33,19 +33,92 @@ def repulsion_loss_to_memory(psi_new, memory, margin=1.0):
     loss = loss_mat.mean()                                # scalar
     return loss
 
-def sigreg_loss(representation_network, sketch_dim=64, eps=1e-6):
+# def sigreg_loss(representation_network, sketch_dim=64, eps=1e-6):
+#     B, D = representation_network.shape
+#     z = representation_network - representation_network.mean(dim=0, keepdim=True)
+
+#     if D > sketch_dim:
+#         S = torch.randn(D, sketch_dim, device=z.device, dtype=z.dtype) / (D ** 0.5)
+#         z = z @ S
+#         D = sketch_dim
+
+#     cov = (z.T @ z) / (B - 1 + eps)
+
+#     I = torch.eye(D, device=z.device, dtype=z.dtype)
+#     loss = ((cov - I) ** 2).sum() / D
+#     return loss
+
+def sigreg_loss(
+    representation_network,
+    sketch_dim=64,
+    eps=1e-6,
+):
     B, D = representation_network.shape
-    z = representation_network - representation_network.mean(dim=0, keepdim=True)
+
+    if B < 2:
+        return representation_network.new_zeros()
+
+    z = (
+        representation_network
+        - representation_network.mean(
+            dim=0,
+            keepdim=True,
+        )
+    )
 
     if D > sketch_dim:
-        S = torch.randn(D, sketch_dim, device=z.device, dtype=z.dtype) / (D ** 0.5)
+        if not hasattr(
+            sigreg_loss,
+            "projection",
+        ):
+            sigreg_loss.projection = (
+                torch.randn(
+                    D,
+                    sketch_dim,
+                )
+                / (D ** 0.5)
+            )
+
+        S = sigreg_loss.projection.to(
+            device=z.device,
+            dtype=z.dtype,
+        )
+
+        if S.shape != (
+            D,
+            sketch_dim,
+        ):
+            sigreg_loss.projection = (
+                torch.randn(
+                    D,
+                    sketch_dim,
+                    device=z.device,
+                    dtype=z.dtype,
+                )
+                / (D ** 0.5)
+            )
+
+            S = sigreg_loss.projection
+
         z = z @ S
         D = sketch_dim
 
-    cov = (z.T @ z) / (B - 1 + eps)
+    cov = (
+        z.T @ z
+    ) / (
+        B - 1 + eps
+    )
 
-    I = torch.eye(D, device=z.device, dtype=z.dtype)
-    loss = ((cov - I) ** 2).sum() / D
+    I = torch.eye(
+        D,
+        device=z.device,
+        dtype=z.dtype,
+    )
+
+    loss = (
+        cov - I
+    ).pow(2).sum() / D
+
     return loss
 
 

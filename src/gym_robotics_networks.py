@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Dict, Any
+from itertools import chain
 
 # ============================================================
 # Dot-product factorised Q-network
@@ -765,6 +766,26 @@ class FactorisedTwinCriticFetch(nn.Module):
             ),
         }
 
+    def critic1_parameters(self):
+        """
+        Return all trainable parameters belonging to critic 1:
+            phi1, psi1 (and q1 if you later add an explicit head).
+        """
+        return chain(
+            self.phi1.parameters(),
+            self.psi1.parameters(),
+        )
+
+    def critic2_parameters(self):
+        """
+        Return all trainable parameters belonging to critic 2:
+            phi2, psi2 (and q2 if you later add an explicit head).
+        """
+        return chain(
+            self.phi2.parameters(),
+            self.psi2.parameters(),
+        )
+
 class MLPPolicyActor(nn.Module):
     """
     Deterministic goal-conditioned TD3 actor.
@@ -1336,3 +1357,124 @@ class RunningMeanStd:
         ) / torch.sqrt(self.var + eps)
 
         return z.clamp(-clip, clip)
+class DeterministicPolicyActorTD3(nn.Module):
+    """
+    Goal-conditioned deterministic actor for TD3.
+
+    Input:
+        state: [B, state_dim]
+        goal:  [B, goal_dim]
+
+    Output:
+        action: [B, action_dim] in [-1, 1] via tanh(mu).
+
+    For FetchPush, action space is normally [-1, 1]^4.
+    """
+
+    def __init__(
+        self,
+        state_dim: int,
+        action_dim: int,
+        goal_dim: int,
+        net_arch: list[int] = [256, 256],
+        activation_fn: type[nn.Module] = nn.ReLU,
+    ):
+        super().__init__()
+
+        self.state_dim = int(state_dim)
+        self.action_dim = int(action_dim)
+        self.goal_dim = int(goal_dim)
+
+        input_dim = self.state_dim + self.goal_dim
+
+        modules = []
+        last_dim = input_dim
+
+        for hidden_dim in net_arch:
+            modules.append(nn.Linear(last_dim, hidden_dim))
+            modules.append(activation_fn())
+            last_dim = hidden_dim
+
+        self.backbone = nn.Sequential(*modules)
+
+        self.mu_layer = nn.Linear(
+            last_dim,
+            self.action_dim,
+        )
+
+    def _validate_inputs(
+        self,
+        state: torch.Tensor,
+        goal: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if state.ndim == 1:
+            state = state.unsqueeze(0)
+
+        if goal.ndim == 1:
+            goal = goal.unsqueeze(0)
+
+        if state.ndim != 2:
+            raise ValueError(
+                "state must have shape [B, state_dim]. "
+                f"Got {tuple(state.shape)}."
+            )
+
+        if goal.ndim != 2:
+            raise ValueError(
+                "goal must have shape [B, goal_dim]. "
+                f"Got {tuple(goal.shape)}."
+            )
+
+        if state.shape[0] != goal.shape[0]:
+            raise ValueError(
+                "State and goal batch dimensions must match: "
+                f"{state.shape[0]} vs {goal.shape[0]}."
+            )
+
+        if state.shape[-1] != self.state_dim:
+            raise ValueError(
+                f"Expected state dimension {self.state_dim}, "
+                f"got {state.shape[-1]}."
+            )
+
+        if goal.shape[-1] != self.goal_dim:
+            raise ValueError(
+                f"Expected goal dimension {self.goal_dim}, "
+                f"got {goal.shape[-1]}."
+            )
+
+        return state, goal
+
+    def forward(
+        self,
+        state: torch.Tensor,
+        goal: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Returns:
+            mean: [B, action_dim] (pre-tanh)
+        """
+        state, goal = self._validate_inputs(state, goal)
+
+        x = torch.cat(
+            [state, goal],
+            dim=-1,
+        )
+
+        x = self.backbone(x)
+
+        mean = self.mu_layer(x)
+
+        return mean
+
+    def deterministic(
+        self,
+        state: torch.Tensor,
+        goal: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Deterministic tanh(mean) action for TD3.
+        Returns action in [-1, 1]^action_dim.
+        """
+        mean = self.forward(state, goal)
+        return torch.tanh(mean)

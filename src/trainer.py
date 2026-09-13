@@ -6,6 +6,8 @@ import torch.optim as optim
 import time
 import random
 from typing import Optional, Dict, Any
+from itertools import chain
+
 
 from utils import (
     TrajectoryReplayBufferDiscrete,
@@ -26,6 +28,7 @@ from utils import (
     retrieve_similar_task_embeddings,
     inspect_raw_phi_norms,
     evaluate_policy_with_success,
+    evaluate_maze_policy_with_success,
 )
 
 from loss_functions import (
@@ -4570,70 +4573,6 @@ def dqn_train_phi_psi_adjustment(
             psi,
             normalize_embedding=False,
         )
-
-    # def moving_td_target(
-    #     batch,
-    #     batch_goal,
-    # ):
-    #     rewards = batch.rewards
-    #     next_obs = batch.next_obs
-
-    #     terminated = (
-    #         batch.terminated.float()
-    #     )
-
-    #     truncated = (
-    #         batch.truncated.float()
-    #     )
-
-    #     if rewards.ndim == 1:
-    #         rewards = rewards.unsqueeze(-1)
-
-    #     if terminated.ndim == 1:
-    #         terminated = terminated.unsqueeze(-1)
-
-    #     if truncated.ndim == 1:
-    #         truncated = truncated.unsqueeze(-1)
-
-    #     next_goal_batch = goal_batch_for(
-    #         batch_goal,
-    #         next_obs.shape[0],
-    #         next_obs.device,
-    #     )
-
-    #     with torch.no_grad():
-    #         next_q_values = (
-    #             q_all_actions_from_goal(
-    #                 q_target_network,
-    #                 next_obs,
-    #                 next_goal_batch,
-    #             )
-    #         )
-
-    #         next_q = next_q_values.max(
-    #             dim=-1,
-    #             keepdim=True,
-    #         ).values
-
-    #         if bootstrap_on_truncation:
-    #             bootstrap_mask = (
-    #                 1.0 - terminated
-    #             )
-
-    #         else:
-    #             done = torch.clamp(
-    #                 terminated + truncated,
-    #                 min=0.0,
-    #                 max=1.0,
-    #             )
-
-    #             bootstrap_mask = (
-    #                 1.0 - done
-    #             )
-
-    #         return rewards + (
-    #             gamma ** td_steps
-    #         ) * bootstrap_mask * next_q
 
     def moving_td_target(batch, batch_goal):
         """
@@ -9734,7 +9673,7 @@ def sac_train_standard(
     )
 
 
-def sac_train_tbtrl_v1(
+def sac_train_tbtrl_separated(
     seed: int = 42,
     actor: nn.Module = None,
     critic: nn.Module = None,
@@ -9760,10 +9699,7 @@ def sac_train_tbtrl_v1(
     make_env=None,
     env_id: str = None,
 
-    # {task_id: retained old-task replay buffer}
     replay_task_buffers: Optional[Dict[int, Any]] = None,
-
-    # {task_id: fixed goal np.ndarray}
     task_goals: Optional[Dict[int, np.ndarray]] = None,
 
     replay_ratio: float = 0.0,
@@ -9783,10 +9719,7 @@ def sac_train_tbtrl_v1(
     early_stop_patience: int = 5,
     enable_early_stop: bool = True,
 
-    # =========================================================
-    # TBTRL critic-only regularisation
-    # =========================================================
-
+    # TBTRL critic-only regularisation.
     sigreg_coef: float = 0.0,
     sketch_dim: int = 64,
 
@@ -9799,33 +9732,49 @@ def sac_train_tbtrl_v1(
     phi_norm_target: float | None = None,
     psi_norm_target: float | None = None,
 
-    # =========================================================
-    # Performance / resume controls
-    # =========================================================
+    initial_alpha: float = 1.0,
 
-    # Apply expensive TBTRL penalties every N critic updates.
-    # E.g. frequency=4 computes them every fourth update.
-    # Their contribution is multiplied by this value when run,
-    # retaining approximately the same average penalty strength.
-    tbtrl_reg_freq: int = 4,
-
-    # Print profiling data every N updates; None/0 disables it.
-    profile_freq: int | None = None,
-
-    # Important for crash recovery:
-    # False preserves the checkpoint's existing target critic.
     reset_target_from_critic: bool = True,
 ):
     """
-    Optimised factorised SAC-TBTRL trainer.
+    Factorised SAC-TBTRL trainer with independent critic branches.
 
-    Performance changes relative to the original version:
-    - Old-task samples are concatenated and processed in one TD pass.
-    - phi1/phi2 and psi1/psi2 embeddings are computed once per
-      regularisation update and reused across relevant penalties.
-    - Expensive TBTRL regularisers run every tbtrl_reg_freq updates.
-    - Q(data) logging forward passes occur only at evaluation frequency.
-    - reset_target_from_critic is honoured for checkpoint recovery.
+    SAC bootstrap target:
+        y = r + gamma * mask *
+            [min(Q1_target(s', a', g), Q2_target(s', a', g))
+             - alpha * log pi(a' | s', g)]
+
+    Critic 1:
+        L1 = TD1_current
+           + replay_loss_coef * TD1_replay
+           + sigreg_coef * SIGReg(phi1)
+           + goal_separation_coef * GoalSeparation(psi1)
+           + phi_raw_norm_coef * Norm(phi1)
+           + psi_raw_norm_coef * Norm(psi1)
+
+    Critic 2:
+        L2 = TD2_current
+           + replay_loss_coef * TD2_replay
+           + sigreg_coef * SIGReg(phi2)
+           + goal_separation_coef * GoalSeparation(psi2)
+           + phi_raw_norm_coef * Norm(phi2)
+           + psi_raw_norm_coef * Norm(psi2)
+
+    Required factorised critic API:
+        critic.q1_forward(state, action, goal)
+        critic.q2_forward(state, action, goal)
+
+        critic.phi1_forward(state, action)
+        critic.psi1_forward(goal)
+
+        critic.phi2_forward(state, action)
+        critic.psi2_forward(goal)
+
+    Strongly recommended extra API:
+        critic.critic1_parameters()
+        critic.critic2_parameters()
+
+    Those methods must return disjoint parameter iterables.
     """
 
     # =========================================================
@@ -9871,9 +9820,6 @@ def sac_train_tbtrl_v1(
     if gradient_steps < 1:
         raise ValueError("gradient_steps must be >= 1.")
 
-    if tbtrl_reg_freq < 1:
-        raise ValueError("tbtrl_reg_freq must be >= 1.")
-
     if not 0.0 < tau <= 1.0:
         raise ValueError("tau must be in (0, 1].")
 
@@ -9888,7 +9834,7 @@ def sac_train_tbtrl_v1(
             "ent_coef must be a positive float or 'auto'."
         )
 
-    if isinstance(ent_coef, (int, float)) and ent_coef <= 0.0:
+    if isinstance(ent_coef, (float, int)) and ent_coef <= 0.0:
         raise ValueError(
             "Fixed ent_coef must be positive."
         )
@@ -9913,11 +9859,12 @@ def sac_train_tbtrl_v1(
 
     if not -1.0 <= goal_separation_target_cosine <= 1.0:
         raise ValueError(
-            "goal_separation_target_cosine must be within [-1, 1]."
+            "goal_separation_target_cosine must be "
+            "within [-1, 1]."
         )
 
     # =========================================================
-    # Device, dimensions, task state
+    # Device, dimensions, seed
     # =========================================================
 
     if device is None:
@@ -9927,15 +9874,27 @@ def sac_train_tbtrl_v1(
 
     if obs_dim is None:
         obs_dim = (
-            int(env.observation_space["observation"].shape[0])
-            + int(env.observation_space["achieved_goal"].shape[0])
+            int(
+                env.observation_space[
+                    "observation"
+                ].shape[0]
+            )
+            + int(
+                env.observation_space[
+                    "achieved_goal"
+                ].shape[0]
+            )
         )
 
     if action_dim is None:
-        action_dim = int(env.action_space.shape[0])
+        action_dim = int(
+            env.action_space.shape[0]
+        )
 
     goal_dim = int(
-        env.observation_space["desired_goal"].shape[0]
+        env.observation_space[
+            "desired_goal"
+        ].shape[0]
     )
 
     set_seed(seed)
@@ -9963,8 +9922,14 @@ def sac_train_tbtrl_v1(
     critic = critic.to(device)
     critic_target = critic_target.to(device)
 
+    # =========================================================
+    # Target critic setup
+    # =========================================================
+
     if reset_target_from_critic:
-        critic_target.load_state_dict(critic.state_dict())
+        critic_target.load_state_dict(
+            critic.state_dict()
+        )
 
     actor.train()
     critic.train()
@@ -9974,38 +9939,29 @@ def sac_train_tbtrl_v1(
         parameter.requires_grad_(False)
 
     # =========================================================
-    # Factorised critic API validation
+    # Validate factorised critic API
     # =========================================================
 
-    tbtrl_active = any(
-        coefficient > 0.0
-        for coefficient in (
-            sigreg_coef,
-            goal_separation_coef,
-            phi_raw_norm_coef,
-            psi_raw_norm_coef,
+    required_methods = [
+        "q1_forward",
+        "q2_forward",
+        "phi1_forward",
+        "psi1_forward",
+        "phi2_forward",
+        "psi2_forward",
+    ]
+
+    missing_methods = [
+        method_name
+        for method_name in required_methods
+        if not hasattr(critic, method_name)
+    ]
+
+    if len(missing_methods) > 0:
+        raise AttributeError(
+            "Factorised critic is missing required methods: "
+            f"{missing_methods}."
         )
-    )
-
-    if tbtrl_active:
-        required_methods = [
-            "phi1_forward",
-            "psi1_forward",
-            "phi2_forward",
-            "psi2_forward",
-        ]
-
-        missing_methods = [
-            method_name
-            for method_name in required_methods
-            if not hasattr(critic, method_name)
-        ]
-
-        if missing_methods:
-            raise AttributeError(
-                "TBTRL regularisers require critic methods: "
-                f"{missing_methods}."
-            )
 
     # =========================================================
     # Action bounds
@@ -10043,16 +9999,139 @@ def sac_train_tbtrl_v1(
         )
 
     # =========================================================
+    # Independent critic parameter groups
+    # =========================================================
+
+    def unique_parameters(parameters):
+        seen_parameter_ids = set()
+        unique = []
+
+        for parameter in parameters:
+            if not parameter.requires_grad:
+                continue
+
+            parameter_id = id(parameter)
+
+            if parameter_id not in seen_parameter_ids:
+                unique.append(parameter)
+                seen_parameter_ids.add(parameter_id)
+
+        return unique
+
+    def critic_parameter_groups():
+        """
+        Preferred design: define these in the critic class:
+
+            def critic1_parameters(self):
+                return chain(
+                    self.phi1_encoder.parameters(),
+                    self.psi1_encoder.parameters(),
+                    self.q1_head.parameters(),
+                )
+
+            def critic2_parameters(self):
+                return chain(
+                    self.phi2_encoder.parameters(),
+                    self.psi2_encoder.parameters(),
+                    self.q2_head.parameters(),
+                )
+        """
+
+        if (
+            hasattr(critic, "critic1_parameters")
+            and hasattr(critic, "critic2_parameters")
+        ):
+            critic1_params = unique_parameters(
+                list(critic.critic1_parameters())
+            )
+
+            critic2_params = unique_parameters(
+                list(critic.critic2_parameters())
+            )
+
+        else:
+            raise AttributeError(
+                "The critic must expose critic1_parameters() "
+                "and critic2_parameters() returning the two "
+                "disjoint parameter groups. This is required "
+                "to guarantee branch-specific optimisation."
+            )
+
+        if len(critic1_params) == 0:
+            raise RuntimeError(
+                "critic1_parameters() returned no trainable "
+                "parameters."
+            )
+
+        if len(critic2_params) == 0:
+            raise RuntimeError(
+                "critic2_parameters() returned no trainable "
+                "parameters."
+            )
+
+        critic1_ids = {
+            id(parameter)
+            for parameter in critic1_params
+        }
+
+        critic2_ids = {
+            id(parameter)
+            for parameter in critic2_params
+        }
+
+        shared_ids = critic1_ids.intersection(
+            critic2_ids
+        )
+
+        if len(shared_ids) > 0:
+            raise RuntimeError(
+                "Critic 1 and critic 2 share trainable "
+                "parameters. Fully separate phi1/psi1/q1 "
+                "from phi2/psi2/q2 before using independent "
+                "TBTRL losses."
+            )
+
+        all_critic_ids = {
+            id(parameter)
+            for parameter in critic.parameters()
+            if parameter.requires_grad
+        }
+
+        grouped_ids = critic1_ids.union(critic2_ids)
+        missing_ids = all_critic_ids.difference(
+            grouped_ids
+        )
+
+        if len(missing_ids) > 0:
+            raise RuntimeError(
+                "Some trainable critic parameters are absent "
+                "from both critic parameter groups. Put every "
+                "critic parameter in exactly one branch, or "
+                "make it non-trainable."
+            )
+
+        return critic1_params, critic2_params
+
+    critic1_params, critic2_params = (
+        critic_parameter_groups()
+    )
+
+    # =========================================================
     # Optimisers and replay buffer
     # =========================================================
 
-    opt_actor = optim.Adam(
+    opt_actor = optim.AdamW(
         actor.parameters(),
         lr=lr_actor,
     )
 
-    opt_critic = optim.Adam(
-        critic.parameters(),
+    opt_critic1 = optim.AdamW(
+        critic1_params,
+        lr=lr_critic,
+    )
+
+    opt_critic2 = optim.AdamW(
+        critic2_params,
         lr=lr_critic,
     )
 
@@ -10063,12 +10142,16 @@ def sac_train_tbtrl_v1(
         device=device,
     )
 
+    # =========================================================
+    # Entropy coefficient
+    # =========================================================
+
     if target_entropy is None:
         target_entropy = -float(action_dim)
 
     if ent_coef == "auto":
-        log_ent_coef = torch.zeros(
-            1,
+        log_ent_coef = torch.tensor(
+            np.log(initial_alpha),
             dtype=torch.float32,
             device=device,
             requires_grad=True,
@@ -10126,7 +10209,10 @@ def sac_train_tbtrl_v1(
         )
 
         state = np.concatenate(
-            [observation, achieved_goal],
+            [
+                observation,
+                achieved_goal,
+            ],
             axis=-1,
         ).astype(np.float32)
 
@@ -10144,7 +10230,10 @@ def sac_train_tbtrl_v1(
             )
         else:
             goal_batch = torch.as_tensor(
-                np.asarray(goal_value, dtype=np.float32),
+                np.asarray(
+                    goal_value,
+                    dtype=np.float32,
+                ),
                 dtype=torch.float32,
                 device=target_device,
             )
@@ -10154,7 +10243,8 @@ def sac_train_tbtrl_v1(
 
         if goal_batch.ndim != 2:
             raise ValueError(
-                "Goal must have shape [goal_dim] or [B, goal_dim]. "
+                "Goal must be [goal_dim] or "
+                "[B, goal_dim]. "
                 f"Got {tuple(goal_batch.shape)}."
             )
 
@@ -10166,7 +10256,8 @@ def sac_train_tbtrl_v1(
 
         elif goal_batch.shape[0] != requested_batch_size:
             raise ValueError(
-                "Goal batch size does not match transition batch size."
+                "Goal batch size does not match "
+                "transition batch size."
             )
 
         return goal_batch
@@ -10199,6 +10290,20 @@ def sac_train_tbtrl_v1(
 
         return fixed_ent_coef
 
+    def zero_scalar() -> torch.Tensor:
+        return torch.zeros(
+            (),
+            dtype=torch.float32,
+            device=device,
+        )
+
+    def set_requires_grad(
+        parameters,
+        requires_grad: bool,
+    ) -> None:
+        for parameter in parameters:
+            parameter.requires_grad_(requires_grad)
+
     def polyak_update_critic() -> None:
         with torch.no_grad():
             for online_parameter, target_parameter in zip(
@@ -10209,6 +10314,140 @@ def sac_train_tbtrl_v1(
                     online_parameter,
                     alpha=tau,
                 )
+
+    # =========================================================
+    # SAC target and independent TD losses
+    # =========================================================
+
+    def td_target(
+        batch,
+        raw_goal_batch: torch.Tensor,
+        ent_coef_tensor: torch.Tensor,
+    ) -> torch.Tensor:
+        rewards = batch.rewards
+        terminated = batch.terminated
+
+        if rewards.ndim == 1:
+            rewards = rewards.unsqueeze(-1)
+
+        if terminated.ndim == 1:
+            terminated = terminated.unsqueeze(-1)
+
+        next_state = normalize_state(
+            batch.next_obs
+        )
+
+        next_goal = normalize_goal(
+            goal_batch_for(
+                raw_goal_batch,
+                batch.next_obs.shape[0],
+                batch.next_obs.device,
+            )
+        )
+
+        # The target uses both target critics numerically but
+        # has no gradient path to online critic 1 or critic 2.
+        with torch.no_grad():
+            next_action, next_log_prob, _ = actor.sample(
+                next_state,
+                next_goal,
+            )
+
+            next_q1 = critic_target.q1_forward(
+                next_state,
+                next_action,
+                next_goal,
+            )
+
+            next_q2 = critic_target.q2_forward(
+                next_state,
+                next_action,
+                next_goal,
+            )
+
+            next_q = torch.minimum(
+                next_q1,
+                next_q2,
+            )
+
+            next_soft_value = (
+                next_q
+                - ent_coef_tensor * next_log_prob
+            )
+
+            if bootstrap_on_truncation:
+                bootstrap_mask = (
+                    1.0 - terminated.float()
+                )
+
+            else:
+                truncated = batch.truncated
+
+                if truncated.ndim == 1:
+                    truncated = truncated.unsqueeze(-1)
+
+                done = torch.logical_or(
+                    terminated.bool(),
+                    truncated.bool(),
+                ).float()
+
+                bootstrap_mask = 1.0 - done
+
+            target = (
+                rewards
+                + gamma
+                * bootstrap_mask
+                * next_soft_value
+            )
+
+        return target
+
+    def critic_td_losses(
+        batch,
+        raw_goal_batch: torch.Tensor,
+        ent_coef_tensor: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        target = td_target(
+            batch,
+            raw_goal_batch,
+            ent_coef_tensor,
+        )
+
+        state = normalize_state(batch.obs)
+        goal_batch = normalize_goal(raw_goal_batch)
+
+        q1 = critic.q1_forward(
+            state,
+            batch.actions,
+            goal_batch,
+        )
+
+        q2 = critic.q2_forward(
+            state,
+            batch.actions,
+            goal_batch,
+        )
+
+        if q1.shape != target.shape:
+            raise RuntimeError(
+                f"Q1 shape {q1.shape} does not match "
+                f"target shape {target.shape}."
+            )
+
+        if q2.shape != target.shape:
+            raise RuntimeError(
+                f"Q2 shape {q2.shape} does not match "
+                f"target shape {target.shape}."
+            )
+
+        td_loss1 = F.mse_loss(q1, target)
+        td_loss2 = F.mse_loss(q2, target)
+
+        return td_loss1, td_loss2
+
+    # =========================================================
+    # TBTRL helpers: fully branch-separated
+    # =========================================================
 
     def seen_goals_tensor() -> torch.Tensor:
         seen_task_ids = sorted(task_goals.keys())
@@ -10257,7 +10496,8 @@ def sac_train_tbtrl_v1(
 
         if target <= 0.0:
             raise ValueError(
-                f"{name}_norm_target must be positive, got {target}."
+                f"{name}_norm_target must be positive, "
+                f"got {target}."
             )
 
         return target
@@ -10266,8 +10506,13 @@ def sac_train_tbtrl_v1(
         embeddings: torch.Tensor,
         target_norm: float,
     ) -> torch.Tensor:
+        norms = embeddings.norm(
+            p=2,
+            dim=-1,
+        )
+
         return F.relu(
-            embeddings.norm(p=2, dim=-1) - target_norm
+            norms - target_norm
         ).mean()
 
     def head_goal_separation_loss(
@@ -10276,7 +10521,7 @@ def sac_train_tbtrl_v1(
         n_goals = psi.shape[0]
 
         if n_goals < 2:
-            return zero, zero
+            return zero_scalar(), zero_scalar()
 
         normalized_psi = F.normalize(
             psi,
@@ -10285,7 +10530,9 @@ def sac_train_tbtrl_v1(
             eps=1e-8,
         )
 
-        cosine_matrix = normalized_psi @ normalized_psi.T
+        cosine_matrix = (
+            normalized_psi @ normalized_psi.T
+        )
 
         off_diagonal_mask = ~torch.eye(
             n_goals,
@@ -10302,174 +10549,199 @@ def sac_train_tbtrl_v1(
             - goal_separation_target_cosine
         ).mean()
 
-        return separation_loss, off_diagonal_cosines.max()
+        return (
+            separation_loss,
+            off_diagonal_cosines.max().detach(),
+        )
 
-    def td_target(
-        batch,
-        normalized_goal_batch: torch.Tensor,
-        ent_coef_tensor: torch.Tensor,
-    ) -> torch.Tensor:
-        rewards = batch.rewards
-        terminated = batch.terminated
+    def tbtrl_sigreg_losses(
+        state: torch.Tensor,
+        action: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if sigreg_coef <= 0.0:
+            return zero_scalar(), zero_scalar()
 
-        if rewards.ndim == 1:
-            rewards = rewards.unsqueeze(-1)
+        phi1 = critic.phi1_forward(
+            state,
+            action,
+        )
 
-        if terminated.ndim == 1:
-            terminated = terminated.unsqueeze(-1)
+        phi2 = critic.phi2_forward(
+            state,
+            action,
+        )
 
-        next_state = normalize_state(batch.next_obs)
+        sigreg1 = sigreg_loss(
+            phi1,
+            sketch_dim=sketch_dim,
+        )
 
-        with torch.no_grad():
-            next_action, next_log_prob, _ = actor.sample(
-                next_state,
-                normalized_goal_batch,
-            )
+        sigreg2 = sigreg_loss(
+            phi2,
+            sketch_dim=sketch_dim,
+        )
 
-            next_q1 = critic_target.q1_forward(
-                next_state,
-                next_action,
-                normalized_goal_batch,
-            )
+        return sigreg1, sigreg2
 
-            next_q2 = critic_target.q2_forward(
-                next_state,
-                next_action,
-                normalized_goal_batch,
-            )
+    def mixed_phi_regularisation_batch(
+        current_batch,
+        replay_batches,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Return the union of all (state, action) samples participating
+        in TD learning at this update: the current task batch plus each
+        selected old-task replay batch.
 
-            next_q = torch.minimum(next_q1, next_q2)
+        The order does not matter for the phi-norm loss. It does matter
+        only as ordinary batch ordering for SIGReg, not task identity.
+        """
+        state_chunks = [current_batch.obs]
+        action_chunks = [current_batch.actions]
 
-            next_soft_value = (
-                next_q - ent_coef_tensor * next_log_prob
-            )
+        for _, old_batch in replay_batches:
+            state_chunks.append(old_batch.obs)
+            action_chunks.append(old_batch.actions)
 
-            if bootstrap_on_truncation:
-                bootstrap_mask = 1.0 - terminated.float()
+        mixed_states = torch.cat(state_chunks, dim=0)
+        mixed_actions = torch.cat(action_chunks, dim=0)
 
-            else:
-                truncated = batch.truncated
+        return normalize_state(mixed_states), mixed_actions
 
-                if truncated.ndim == 1:
-                    truncated = truncated.unsqueeze(-1)
-
-                done = torch.logical_or(
-                    terminated.bool(),
-                    truncated.bool(),
-                ).float()
-
-                bootstrap_mask = 1.0 - done
-
+    def tbtrl_goal_separation_losses() -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+    ]:
+        if (
+            goal_separation_coef <= 0.0
+            or len(task_goals) <= 1
+        ):
             return (
-                rewards
-                + gamma * bootstrap_mask * next_soft_value
+                zero_scalar(),
+                zero_scalar(),
+                zero_scalar(),
+                zero_scalar(),
             )
 
-    def critic_td_loss(
-        batch,
-        raw_goal_batch: torch.Tensor,
-        ent_coef_tensor: torch.Tensor,
-    ) -> torch.Tensor:
-        normalized_goal_batch = normalize_goal(
-            raw_goal_batch
+        all_seen_goals = normalize_goal(
+            seen_goals_tensor()
         )
 
-        target = td_target(
-            batch,
-            normalized_goal_batch,
-            ent_coef_tensor,
+        psi1_all = critic.psi1_forward(
+            all_seen_goals
         )
 
-        state = normalize_state(batch.obs)
+        psi2_all = critic.psi2_forward(
+            all_seen_goals
+        )
 
-        q1 = critic.q1_forward(
+        goal_sep1, max_cosine1 = (
+            head_goal_separation_loss(psi1_all)
+        )
+
+        goal_sep2, max_cosine2 = (
+            head_goal_separation_loss(psi2_all)
+        )
+
+        return (
+            goal_sep1,
+            goal_sep2,
+            max_cosine1,
+            max_cosine2,
+        )
+
+    def tbtrl_norm_losses(
+        state: torch.Tensor,
+        action: torch.Tensor,
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        dict[str, torch.Tensor],
+    ]:
+        phi1 = critic.phi1_forward(
             state,
-            batch.actions,
-            normalized_goal_batch,
+            action,
         )
 
-        q2 = critic.q2_forward(
+        phi2 = critic.phi2_forward(
             state,
-            batch.actions,
-            normalized_goal_batch,
+            action,
         )
 
-        if q1.shape != target.shape:
-            raise RuntimeError(
-                f"Q1 shape {q1.shape} does not match "
-                f"target shape {target.shape}."
-            )
-
-        if q2.shape != target.shape:
-            raise RuntimeError(
-                f"Q2 shape {q2.shape} does not match "
-                f"target shape {target.shape}."
-            )
-
-        return 0.5 * (
-            F.mse_loss(q1, target)
-            + F.mse_loss(q2, target)
+        all_seen_goals = normalize_goal(
+            seen_goals_tensor()
         )
 
-    def concatenate_batches(batches):
-        """
-        Concatenate sampled old-task batches into a single ReplayBatch.
-
-        Matches your ReplayBatch signature:
-        obs, actions, rewards, next_obs, terminated, truncated,
-        episode_id, timestep, indices
-        """
-        if len(batches) == 0:
-            return None
-
-        if len(batches) == 1:
-            return batches[0]
-
-        return type(batches[0])(
-            obs=torch.cat(
-                [batch.obs for batch in batches],
-                dim=0,
-            ),
-            actions=torch.cat(
-                [batch.actions for batch in batches],
-                dim=0,
-            ),
-            rewards=torch.cat(
-                [batch.rewards for batch in batches],
-                dim=0,
-            ),
-            next_obs=torch.cat(
-                [batch.next_obs for batch in batches],
-                dim=0,
-            ),
-            terminated=torch.cat(
-                [batch.terminated for batch in batches],
-                dim=0,
-            ),
-            truncated=torch.cat(
-                [batch.truncated for batch in batches],
-                dim=0,
-            ),
-            episode_id=torch.cat(
-                [batch.episode_id for batch in batches],
-                dim=0,
-            ),
-            timestep=torch.cat(
-                [batch.timestep for batch in batches],
-                dim=0,
-            ),
-            indices=torch.cat(
-                [batch.indices for batch in batches],
-                dim=0,
-            ),
+        psi1_all = critic.psi1_forward(
+            all_seen_goals
         )
 
-    def device_synchronize() -> None:
-        if device.type == "cuda":
-            torch.cuda.synchronize(device)
+        psi2_all = critic.psi2_forward(
+            all_seen_goals
+        )
 
-        elif device.type == "mps":
-            torch.mps.synchronize()
+        phi_target = resolve_norm_target(
+            "phi",
+            phi_norm_target,
+        )
+
+        psi_target = resolve_norm_target(
+            "psi",
+            psi_norm_target,
+        )
+
+        phi_norm1 = soft_excess_norm_loss(
+            phi1,
+            phi_target,
+        )
+
+        psi_norm1 = soft_excess_norm_loss(
+            psi1_all,
+            psi_target,
+        )
+
+        phi_norm2 = soft_excess_norm_loss(
+            phi2,
+            phi_target,
+        )
+
+        psi_norm2 = soft_excess_norm_loss(
+            psi2_all,
+            psi_target,
+        )
+
+        statistics = {
+            "phi1_norm": phi1.norm(
+                p=2,
+                dim=-1,
+            ).mean().detach(),
+
+            "phi2_norm": phi2.norm(
+                p=2,
+                dim=-1,
+            ).mean().detach(),
+
+            "psi1_norm": psi1_all.norm(
+                p=2,
+                dim=-1,
+            ).mean().detach(),
+
+            "psi2_norm": psi2_all.norm(
+                p=2,
+                dim=-1,
+            ).mean().detach(),
+        }
+
+        return (
+            phi_norm1,
+            psi_norm1,
+            phi_norm2,
+            psi_norm2,
+            statistics,
+        )
 
     # =========================================================
     # Training state
@@ -10490,20 +10762,28 @@ def sac_train_tbtrl_v1(
     min_steps = None
     min_time = None
 
-    zero = torch.zeros(
-        (),
-        dtype=torch.float32,
-        device=device,
-    )
+    zero = zero_scalar()
 
-    current_critic_loss_value = zero
-    old_replay_loss_value = zero
+    current_td_loss1_value = zero
+    current_td_loss2_value = zero
+
+    old_replay_loss1_value = zero
+    old_replay_loss2_value = zero
+
+    current_critic1_total_value = zero
+    current_critic2_total_value = zero
+
+    current_critic1_grad_norm_value = zero
+    current_critic2_grad_norm_value = zero
+
     current_actor_loss_value = zero
+
     current_ent_coef_value = torch.ones(
         (),
         dtype=torch.float32,
         device=device,
     )
+
     current_ent_coef_loss_value = zero
     current_log_prob_value = zero
     current_entropy_value = zero
@@ -10513,10 +10793,17 @@ def sac_train_tbtrl_v1(
     current_pi_saturation_value = zero
     current_actor_grad_norm_value = zero
 
-    current_sigreg_value = zero
-    current_goal_separation_value = zero
-    current_phi_raw_norm_value = zero
-    current_psi_raw_norm_value = zero
+    current_sigreg1_value = zero
+    current_sigreg2_value = zero
+
+    current_goal_separation1_value = zero
+    current_goal_separation2_value = zero
+
+    current_phi_norm1_value = zero
+    current_phi_norm2_value = zero
+
+    current_psi_norm1_value = zero
+    current_psi_norm2_value = zero
 
     current_phi1_norm_value = zero
     current_phi2_norm_value = zero
@@ -10526,18 +10813,37 @@ def sac_train_tbtrl_v1(
     current_psi1_max_cosine_value = zero
     current_psi2_max_cosine_value = zero
 
-    replay_tasks_used = 0
-
     # =========================================================
-    # Main training loop
+    # Main SAC training loop
     # =========================================================
 
     while global_step < total_steps:
+
         # -----------------------------------------------------
         # Data collection
         # -----------------------------------------------------
 
-        state, current_goal = split_fetch_obs(obs_dict)
+        state, current_goal = split_fetch_obs(
+            obs_dict
+        )
+
+        state_t = torch.as_tensor(
+            state,
+            dtype=torch.float32,
+            device=device,
+        ).unsqueeze(0)
+
+        goal_t = torch.as_tensor(
+            current_goal,
+            dtype=torch.float32,
+            device=device,
+        ).unsqueeze(0)
+
+        with torch.no_grad():
+            state_rms.update(state_t)
+
+            if normalize_goal_inputs:
+                goal_rms.update(goal_t)
 
         if global_step < warmup_steps:
             action = env.action_space.sample().astype(
@@ -10545,18 +10851,6 @@ def sac_train_tbtrl_v1(
             )
 
         else:
-            state_t = torch.as_tensor(
-                state,
-                dtype=torch.float32,
-                device=device,
-            ).unsqueeze(0)
-
-            goal_t = torch.as_tensor(
-                current_goal,
-                dtype=torch.float32,
-                device=device,
-            ).unsqueeze(0)
-
             with torch.no_grad():
                 action_t, _, _ = actor.sample(
                     normalize_state(state_t),
@@ -10582,42 +10876,23 @@ def sac_train_tbtrl_v1(
             next_obs_dict
         )
 
-        # Only create/update RMS tensors when normalisation is enabled.
-        if normalize_state_inputs:
-            with torch.no_grad():
-                state_rms.update(
-                    torch.as_tensor(
-                        state,
-                        dtype=torch.float32,
-                        device=device,
-                    ).unsqueeze(0)
-                )
+        with torch.no_grad():
+            next_state_t = torch.as_tensor(
+                next_state,
+                dtype=torch.float32,
+                device=device,
+            ).unsqueeze(0)
 
-                state_rms.update(
-                    torch.as_tensor(
-                        next_state,
-                        dtype=torch.float32,
-                        device=device,
-                    ).unsqueeze(0)
-                )
+            state_rms.update(next_state_t)
 
-        if normalize_goal_inputs:
-            with torch.no_grad():
-                goal_rms.update(
-                    torch.as_tensor(
-                        current_goal,
-                        dtype=torch.float32,
-                        device=device,
-                    ).unsqueeze(0)
-                )
+            if normalize_goal_inputs:
+                next_goal_t = torch.as_tensor(
+                    next_goal,
+                    dtype=torch.float32,
+                    device=device,
+                ).unsqueeze(0)
 
-                goal_rms.update(
-                    torch.as_tensor(
-                        next_goal,
-                        dtype=torch.float32,
-                        device=device,
-                    ).unsqueeze(0)
-                )
+                goal_rms.update(next_goal_t)
 
         buffer.add_transition(
             obs=state,
@@ -10645,13 +10920,6 @@ def sac_train_tbtrl_v1(
         # -----------------------------------------------------
 
         for _ in range(gradient_steps):
-            if (
-                profile_freq is not None
-                and profile_freq > 0
-                and update_count % profile_freq == 0
-            ):
-                device_synchronize()
-                profile_start = time.perf_counter()
 
             current_batch = buffer.sample(batch_size)
 
@@ -10662,35 +10930,40 @@ def sac_train_tbtrl_v1(
             )
 
             # -------------------------------------------------
-            # Build one concatenated old-task replay batch
+            # Select old-task replay batches
             # -------------------------------------------------
 
-            eligible_old_task_ids = [
-                old_task_id
-                for old_task_id, old_buffer in (
-                    replay_task_buffers.items()
-                )
-                if (
-                    old_buffer is not None
-                    and len(old_buffer) > 0
-                )
-            ]
+            eligible_old_task_ids = []
 
-            for old_task_id in eligible_old_task_ids:
+            for old_task_id, old_buffer in (
+                replay_task_buffers.items()
+            ):
+                if old_buffer is None:
+                    continue
+
+                if len(old_buffer) < 1:
+                    continue
+
                 if old_task_id not in task_goals:
                     raise KeyError(
                         f"Missing goal for replay task "
                         f"{old_task_id}."
                     )
 
-            selected_old_task_ids = []
+                eligible_old_task_ids.append(
+                    old_task_id
+                )
+
+            replay_batches = []
 
             if (
-                replay_ratio > 0.0
-                and len(eligible_old_task_ids) > 0
+                len(eligible_old_task_ids) > 0
+                and replay_ratio > 0.0
             ):
                 if replay_tasks_per_batch is None:
-                    n_old_tasks = len(eligible_old_task_ids)
+                    n_old_tasks = len(
+                        eligible_old_task_ids
+                    )
                 else:
                     n_old_tasks = min(
                         int(replay_tasks_per_batch),
@@ -10711,16 +10984,12 @@ def sac_train_tbtrl_v1(
                     ordered_old_task_ids[:n_old_tasks]
                 )
 
-            old_batches = []
-            old_goal_batches = []
-
-            if len(selected_old_task_ids) > 0:
                 replay_batch_size = max(
                     1,
                     int(
                         batch_size
                         * replay_ratio
-                        / len(selected_old_task_ids)
+                        / n_old_tasks
                     ),
                 )
 
@@ -10736,237 +11005,171 @@ def sac_train_tbtrl_v1(
                         replay_batch_size
                     )
 
-                    old_goal_tensor = goal_batch_for(
-                        task_goals[old_task_id],
-                        old_batch.obs.shape[0],
-                        device,
+                    old_goal = task_goals[old_task_id]
+
+                    replay_batches.append(
+                        (
+                            old_goal,
+                            old_batch,
+                        )
                     )
 
-                    old_batches.append(old_batch)
-                    old_goal_batches.append(old_goal_tensor)
+            # -------------------------------------------------
+            # Independent TD losses, common detached target
+            # -------------------------------------------------
 
-            replay_tasks_used = len(old_batches)
-
-            concatenated_old_batch = concatenate_batches(
-                old_batches
+            ent_coef_tensor = (
+                current_ent_coef().detach()
             )
 
-            if len(old_goal_batches) > 0:
-                concatenated_old_goals = torch.cat(
-                    old_goal_batches,
-                    dim=0,
-                )
-            else:
-                concatenated_old_goals = None
-
-            # -------------------------------------------------
-            # Critic TD losses
-            # -------------------------------------------------
-
-            ent_coef_tensor = current_ent_coef().detach()
-
-            current_td_loss = critic_td_loss(
+            (
+                current_td_loss1,
+                current_td_loss2,
+            ) = critic_td_losses(
                 current_batch,
                 current_goal_tensor,
                 ent_coef_tensor,
             )
 
-            if concatenated_old_batch is not None:
-                old_replay_td_loss = critic_td_loss(
-                    concatenated_old_batch,
-                    concatenated_old_goals,
-                    ent_coef_tensor,
-                )
-            else:
-                old_replay_td_loss = zero
+            old_td_losses1 = []
+            old_td_losses2 = []
 
-            # -------------------------------------------------
-            # TBTRL regularisers
-            # -------------------------------------------------
-
-            run_tbtrl_regularisers = (
-                tbtrl_active
-                and update_count % tbtrl_reg_freq == 0
-            )
-
-            if run_tbtrl_regularisers:
-                state_for_reg = normalize_state(
-                    current_batch.obs
+            for old_goal, old_batch in replay_batches:
+                old_goal_tensor = goal_batch_for(
+                    old_goal,
+                    old_batch.obs.shape[0],
+                    device,
                 )
 
-                phi1 = critic.phi1_forward(
-                    state_for_reg,
-                    current_batch.actions,
+                old_td_loss1, old_td_loss2 = (
+                    critic_td_losses(
+                        old_batch,
+                        old_goal_tensor,
+                        ent_coef_tensor,
+                    )
                 )
 
-                phi2 = critic.phi2_forward(
-                    state_for_reg,
-                    current_batch.actions,
-                )
+                old_td_losses1.append(old_td_loss1)
+                old_td_losses2.append(old_td_loss2)
 
-                if sigreg_coef > 0.0:
-                    current_sigreg = 0.5 * (
-                        sigreg_loss(
-                            phi1,
-                            sketch_dim=sketch_dim,
-                        )
-                        + sigreg_loss(
-                            phi2,
-                            sketch_dim=sketch_dim,
-                        )
-                    )
-                else:
-                    current_sigreg = zero
+            if len(old_td_losses1) > 0:
+                old_replay_td_loss1 = torch.stack(
+                    old_td_losses1
+                ).mean()
 
-                phi_target = resolve_norm_target(
-                    "phi",
-                    phi_norm_target,
-                )
-
-                if phi_raw_norm_coef > 0.0:
-                    phi_raw_norm_loss = 0.5 * (
-                        soft_excess_norm_loss(
-                            phi1,
-                            phi_target,
-                        )
-                        + soft_excess_norm_loss(
-                            phi2,
-                            phi_target,
-                        )
-                    )
-                else:
-                    phi_raw_norm_loss = zero
-
-                psi_required = (
-                    goal_separation_coef > 0.0
-                    or psi_raw_norm_coef > 0.0
-                )
-
-                if psi_required:
-                    all_seen_goals = normalize_goal(
-                        seen_goals_tensor()
-                    )
-
-                    psi1_all = critic.psi1_forward(
-                        all_seen_goals
-                    )
-
-                    psi2_all = critic.psi2_forward(
-                        all_seen_goals
-                    )
-                else:
-                    psi1_all = None
-                    psi2_all = None
-
-                if (
-                    goal_separation_coef > 0.0
-                    and len(task_goals) > 1
-                ):
-                    separation_1, psi1_max_cosine = (
-                        head_goal_separation_loss(psi1_all)
-                    )
-
-                    separation_2, psi2_max_cosine = (
-                        head_goal_separation_loss(psi2_all)
-                    )
-
-                    current_goal_separation = 0.5 * (
-                        separation_1 + separation_2
-                    )
-
-                else:
-                    current_goal_separation = zero
-                    psi1_max_cosine = zero
-                    psi2_max_cosine = zero
-
-                psi_target = resolve_norm_target(
-                    "psi",
-                    psi_norm_target,
-                )
-
-                if psi_raw_norm_coef > 0.0:
-                    psi_raw_norm_loss = 0.5 * (
-                        soft_excess_norm_loss(
-                            psi1_all,
-                            psi_target,
-                        )
-                        + soft_excess_norm_loss(
-                            psi2_all,
-                            psi_target,
-                        )
-                    )
-                else:
-                    psi_raw_norm_loss = zero
-
-                current_phi1_norm_value = (
-                    phi1.norm(p=2, dim=-1).mean().detach()
-                )
-
-                current_phi2_norm_value = (
-                    phi2.norm(p=2, dim=-1).mean().detach()
-                )
-
-                if psi1_all is not None:
-                    current_psi1_norm_value = (
-                        psi1_all.norm(
-                            p=2,
-                            dim=-1,
-                        ).mean().detach()
-                    )
-
-                    current_psi2_norm_value = (
-                        psi2_all.norm(
-                            p=2,
-                            dim=-1,
-                        ).mean().detach()
-                    )
-                else:
-                    current_psi1_norm_value = zero
-                    current_psi2_norm_value = zero
-
-                # Because penalties are computed intermittently,
-                # scale their active-update contribution to retain
-                # approximately the original average strength.
-                regulariser_scale = float(tbtrl_reg_freq)
+                old_replay_td_loss2 = torch.stack(
+                    old_td_losses2
+                ).mean()
 
             else:
-                current_sigreg = zero
-                current_goal_separation = zero
-                phi_raw_norm_loss = zero
-                psi_raw_norm_loss = zero
-                psi1_max_cosine = zero
-                psi2_max_cosine = zero
-                regulariser_scale = 1.0
+                old_replay_td_loss1 = zero_scalar()
+                old_replay_td_loss2 = zero_scalar()
 
-            critic_total_loss = (
-                current_td_loss
-                + replay_loss_coef * old_replay_td_loss
-                + regulariser_scale
-                * sigreg_coef
-                * current_sigreg
-                + regulariser_scale
-                * goal_separation_coef
-                * current_goal_separation
-                + regulariser_scale
-                * phi_raw_norm_coef
-                * phi_raw_norm_loss
-                + regulariser_scale
-                * psi_raw_norm_coef
-                * psi_raw_norm_loss
+            # -------------------------------------------------
+            # Independent TBTRL regularisation losses
+            # -------------------------------------------------
+
+            state_for_phi_reg, action_for_phi_reg = (
+                mixed_phi_regularisation_batch(
+                    current_batch,
+                    replay_batches,
+                )
             )
 
-            opt_critic.zero_grad(set_to_none=True)
-            critic_total_loss.backward()
+            (
+                current_sigreg1,
+                current_sigreg2,
+            ) = tbtrl_sigreg_losses(
+                state_for_phi_reg,
+                action_for_phi_reg,
+            )
 
-            nn.utils.clip_grad_norm_(
-                critic.parameters(),
+            (
+                current_goal_separation1,
+                current_goal_separation2,
+                psi1_max_cosine,
+                psi2_max_cosine,
+            ) = tbtrl_goal_separation_losses()
+
+            (
+                phi_norm1,
+                psi_norm1,
+                phi_norm2,
+                psi_norm2,
+                norm_statistics,
+            ) = tbtrl_norm_losses(
+                state_for_phi_reg,
+                action_for_phi_reg,
+            )
+
+            # -------------------------------------------------
+            # Branch-specific critic objectives
+            # -------------------------------------------------
+
+            critic1_total_loss = (
+                current_td_loss1
+                + replay_loss_coef
+                * old_replay_td_loss1
+                + sigreg_coef
+                * current_sigreg1
+                + goal_separation_coef
+                * current_goal_separation1
+                + phi_raw_norm_coef
+                * phi_norm1
+                + psi_raw_norm_coef
+                * psi_norm1
+            )
+
+            critic2_total_loss = (
+                current_td_loss2
+                + replay_loss_coef
+                * old_replay_td_loss2
+                + sigreg_coef
+                * current_sigreg2
+                + goal_separation_coef
+                * current_goal_separation2
+                + phi_raw_norm_coef
+                * phi_norm2
+                + psi_raw_norm_coef
+                * psi_norm2
+            )
+
+            # -------------------------------------------------
+            # Critic 1 update: only phi1 / psi1 / Q1 params
+            # -------------------------------------------------
+
+            opt_critic1.zero_grad(set_to_none=True)
+
+            critic1_total_loss.backward()
+
+            critic1_grad_norm = nn.utils.clip_grad_norm_(
+                critic1_params,
                 max_norm=10.0,
             )
 
-            opt_critic.step()
+            opt_critic1.step()
 
             # -------------------------------------------------
-            # Actor update
+            # Critic 2 update: only phi2 / psi2 / Q2 params
+            # -------------------------------------------------
+
+            opt_critic2.zero_grad(set_to_none=True)
+
+            critic2_total_loss.backward()
+
+            critic2_grad_norm = nn.utils.clip_grad_norm_(
+                critic2_params,
+                max_norm=10.0,
+            )
+
+            opt_critic2.step()
+
+            # -------------------------------------------------
+            # SAC actor update
+            #
+            # Freeze all critic parameters: Q still supplies
+            # dQ/da to the actor, but critic weights receive no
+            # gradients or optimiser updates.
             # -------------------------------------------------
 
             state_batch = normalize_state(
@@ -10977,11 +11180,15 @@ def sac_train_tbtrl_v1(
                 current_goal_tensor
             )
 
-            # Freeze critic parameters while differentiating
-            # Q(s, pi(s)) with respect to actor parameters.
-            # This avoids allocating useless critic gradients.
-            for parameter in critic.parameters():
-                parameter.requires_grad_(False)
+            set_requires_grad(
+                critic1_params,
+                requires_grad=False,
+            )
+
+            set_requires_grad(
+                critic2_params,
+                requires_grad=False,
+            )
 
             sampled_actions, log_prob, _ = actor.sample(
                 state_batch,
@@ -11000,14 +11207,22 @@ def sac_train_tbtrl_v1(
                 goal_batch,
             )
 
-            min_q_pi = torch.minimum(q1_pi, q2_pi)
+            min_q_pi = torch.minimum(
+                q1_pi,
+                q2_pi,
+            )
+
+            ent_coef_tensor = (
+                current_ent_coef().detach()
+            )
 
             actor_loss = (
-                current_ent_coef().detach() * log_prob
+                ent_coef_tensor * log_prob
                 - min_q_pi
             ).mean()
 
             opt_actor.zero_grad(set_to_none=True)
+
             actor_loss.backward()
 
             actor_grad_norm = nn.utils.clip_grad_norm_(
@@ -11017,11 +11232,18 @@ def sac_train_tbtrl_v1(
 
             opt_actor.step()
 
-            for parameter in critic.parameters():
-                parameter.requires_grad_(True)
+            set_requires_grad(
+                critic1_params,
+                requires_grad=True,
+            )
+
+            set_requires_grad(
+                critic2_params,
+                requires_grad=True,
+            )
 
             # -------------------------------------------------
-            # Entropy coefficient
+            # SAC automatic entropy update
             # -------------------------------------------------
 
             if log_ent_coef is not None:
@@ -11033,26 +11255,91 @@ def sac_train_tbtrl_v1(
                     )
                 ).mean()
 
-                opt_ent_coef.zero_grad(set_to_none=True)
+                opt_ent_coef.zero_grad(
+                    set_to_none=True
+                )
+
                 ent_coef_loss.backward()
+
                 opt_ent_coef.step()
 
             else:
-                ent_coef_loss = zero
+                ent_coef_loss = zero_scalar()
 
             # -------------------------------------------------
-            # Target critic and cheap scalar logging state
+            # Target critic update
             # -------------------------------------------------
 
             polyak_update_critic()
+
             update_count += 1
 
-            current_critic_loss_value = (
-                current_td_loss.detach()
+            # -------------------------------------------------
+            # Diagnostics
+            # -------------------------------------------------
+
+            with torch.no_grad():
+                q_data_1 = critic.q1_forward(
+                    state_batch,
+                    current_batch.actions,
+                    goal_batch,
+                )
+
+                q_data_2 = critic.q2_forward(
+                    state_batch,
+                    current_batch.actions,
+                    goal_batch,
+                )
+
+                q_data = torch.minimum(
+                    q_data_1,
+                    q_data_2,
+                )
+
+                pi_abs = sampled_actions.abs().mean()
+
+                pi_saturation = (
+                    sampled_actions.abs() > 0.95
+                ).float().mean()
+
+            current_td_loss1_value = (
+                current_td_loss1.detach()
             )
 
-            old_replay_loss_value = (
-                old_replay_td_loss.detach()
+            current_td_loss2_value = (
+                current_td_loss2.detach()
+            )
+
+            old_replay_loss1_value = (
+                old_replay_td_loss1.detach()
+            )
+
+            old_replay_loss2_value = (
+                old_replay_td_loss2.detach()
+            )
+
+            current_critic1_total_value = (
+                critic1_total_loss.detach()
+            )
+
+            current_critic2_total_value = (
+                critic2_total_loss.detach()
+            )
+
+            current_critic1_grad_norm_value = (
+                torch.as_tensor(
+                    critic1_grad_norm,
+                    dtype=torch.float32,
+                    device=device,
+                ).detach()
+            )
+
+            current_critic2_grad_norm_value = (
+                torch.as_tensor(
+                    critic2_grad_norm,
+                    dtype=torch.float32,
+                    device=device,
+                ).detach()
             )
 
             current_actor_loss_value = actor_loss.detach()
@@ -11077,14 +11364,14 @@ def sac_train_tbtrl_v1(
                 min_q_pi.mean().detach()
             )
 
-            current_pi_abs_value = (
-                sampled_actions.abs().mean().detach()
+            current_q_data_value = (
+                q_data.mean().detach()
             )
 
+            current_pi_abs_value = pi_abs.detach()
+
             current_pi_saturation_value = (
-                (
-                    sampled_actions.abs() > 0.95
-                ).float().mean().detach()
+                pi_saturation.detach()
             )
 
             current_actor_grad_norm_value = (
@@ -11095,46 +11382,51 @@ def sac_train_tbtrl_v1(
                 ).detach()
             )
 
-            current_sigreg_value = current_sigreg.detach()
-
-            current_goal_separation_value = (
-                current_goal_separation.detach()
+            current_sigreg1_value = (
+                current_sigreg1.detach()
             )
 
-            current_phi_raw_norm_value = (
-                phi_raw_norm_loss.detach()
+            current_sigreg2_value = (
+                current_sigreg2.detach()
             )
 
-            current_psi_raw_norm_value = (
-                psi_raw_norm_loss.detach()
+            current_goal_separation1_value = (
+                current_goal_separation1.detach()
             )
+
+            current_goal_separation2_value = (
+                current_goal_separation2.detach()
+            )
+
+            current_phi_norm1_value = phi_norm1.detach()
+            current_phi_norm2_value = phi_norm2.detach()
+
+            current_psi_norm1_value = psi_norm1.detach()
+            current_psi_norm2_value = psi_norm2.detach()
+
+            current_phi1_norm_value = norm_statistics[
+                "phi1_norm"
+            ]
+
+            current_phi2_norm_value = norm_statistics[
+                "phi2_norm"
+            ]
+
+            current_psi1_norm_value = norm_statistics[
+                "psi1_norm"
+            ]
+
+            current_psi2_norm_value = norm_statistics[
+                "psi2_norm"
+            ]
 
             current_psi1_max_cosine_value = (
-                psi1_max_cosine.detach()
+                psi1_max_cosine
             )
 
             current_psi2_max_cosine_value = (
-                psi2_max_cosine.detach()
+                psi2_max_cosine
             )
-
-            if (
-                profile_freq is not None
-                and profile_freq > 0
-                and update_count % profile_freq == 0
-            ):
-                device_synchronize()
-
-                update_seconds = (
-                    time.perf_counter()
-                    - profile_start
-                )
-
-                print(
-                    "[SAC-TBTRL profile] "
-                    f"update={update_count} | "
-                    f"seconds={update_seconds:.4f} | "
-                    f"updates_per_sec={1.0 / update_seconds:.2f}"
-                )
 
         # -----------------------------------------------------
         # Evaluation
@@ -11172,10 +11464,10 @@ def sac_train_tbtrl_v1(
                 )
 
             return (
-                eval_action.squeeze(0)
+                eval_action
+                .squeeze(0)
                 .cpu()
                 .numpy()
-                .astype(np.float32)
             )
 
         (
@@ -11191,52 +11483,25 @@ def sac_train_tbtrl_v1(
         )
 
         eval_returns.append(
-            (global_step, mean_return)
+            (
+                global_step,
+                mean_return,
+            )
         )
 
         eval_success_rates.append(
-            (global_step, success_rate)
+            (
+                global_step,
+                success_rate,
+            )
         )
 
         eval_final_distances.append(
-            (global_step, mean_final_distance)
+            (
+                global_step,
+                mean_final_distance,
+            )
         )
-
-        # These quantities are useful, but were previously
-        # computed after every update. Compute them only here.
-        diagnostic_batch = buffer.sample(batch_size)
-
-        diagnostic_goal_batch = goal_batch_for(
-            training_goal,
-            diagnostic_batch.obs.shape[0],
-            device,
-        )
-
-        with torch.no_grad():
-            diagnostic_state_batch = normalize_state(
-                diagnostic_batch.obs
-            )
-
-            diagnostic_goal_batch = normalize_goal(
-                diagnostic_goal_batch
-            )
-
-            q_data_1 = critic.q1_forward(
-                diagnostic_state_batch,
-                diagnostic_batch.actions,
-                diagnostic_goal_batch,
-            )
-
-            q_data_2 = critic.q2_forward(
-                diagnostic_state_batch,
-                diagnostic_batch.actions,
-                diagnostic_goal_batch,
-            )
-
-            current_q_data_value = torch.minimum(
-                q_data_1,
-                q_data_2,
-            ).mean()
 
         if normalize_state_inputs:
             state_std = torch.sqrt(
@@ -11244,7 +11509,8 @@ def sac_train_tbtrl_v1(
             ).detach().cpu().numpy()
 
             state_norm_string = (
-                f"StateNormCount={state_rms.count.item():.0f} | "
+                f"StateNormCount="
+                f"{state_rms.count.item():.0f} | "
                 f"StateStdMin={state_std.min():.6f} | "
                 f"StateStdMax={state_std.max():.6f} | "
             )
@@ -11253,49 +11519,74 @@ def sac_train_tbtrl_v1(
             state_norm_string = ""
 
         print(
-            "[SAC-TBTRL] "
+            "[SAC-TBTRL-Independent] "
             f"step={global_step:7d} | "
             f"return={mean_return:.3f} | "
             f"len={mean_length:.1f} | "
             f"Success={success_rate:.3f} | "
             f"FinalDist={mean_final_distance:.4f} | "
-            f"CriticTD={current_critic_loss_value.item():.5f} | "
-            f"OldReplay={old_replay_loss_value.item():.5f} | "
-            f"SIGReg={current_sigreg_value.item():.6f} | "
-            f"GoalSep={current_goal_separation_value.item():.6f} | "
-            f"PhiNormReg={current_phi_raw_norm_value.item():.6f} | "
-            f"PsiNormReg={current_psi_raw_norm_value.item():.6f} | "
-            f"Phi1Norm={current_phi1_norm_value.item():.3f} | "
-            f"Phi2Norm={current_phi2_norm_value.item():.3f} | "
-            f"Psi1Norm={current_psi1_norm_value.item():.3f} | "
-            f"Psi2Norm={current_psi2_norm_value.item():.3f} | "
+            f"TD1={current_td_loss1_value.item():.5f} | "
+            f"TD2={current_td_loss2_value.item():.5f} | "
+            f"Replay1={old_replay_loss1_value.item():.5f} | "
+            f"Replay2={old_replay_loss2_value.item():.5f} | "
+            f"Critic1={current_critic1_total_value.item():.5f} | "
+            f"Critic2={current_critic2_total_value.item():.5f} | "
+            f"C1Grad={current_critic1_grad_norm_value.item():.5f} | "
+            f"C2Grad={current_critic2_grad_norm_value.item():.5f} | "
+            f"SIG1={current_sigreg1_value.item():.6f} | "
+            f"SIG2={current_sigreg2_value.item():.6f} | "
+            f"GoalSep1="
+            f"{current_goal_separation1_value.item():.6f} | "
+            f"GoalSep2="
+            f"{current_goal_separation2_value.item():.6f} | "
+            f"PhiNorm1="
+            f"{current_phi_norm1_value.item():.6f} | "
+            f"PhiNorm2="
+            f"{current_phi_norm2_value.item():.6f} | "
+            f"PsiNorm1="
+            f"{current_psi_norm1_value.item():.6f} | "
+            f"PsiNorm2="
+            f"{current_psi_norm2_value.item():.6f} | "
+            f"Phi1MeanNorm="
+            f"{current_phi1_norm_value.item():.3f} | "
+            f"Phi2MeanNorm="
+            f"{current_phi2_norm_value.item():.3f} | "
+            f"Psi1MeanNorm="
+            f"{current_psi1_norm_value.item():.3f} | "
+            f"Psi2MeanNorm="
+            f"{current_psi2_norm_value.item():.3f} | "
             f"PsiMaxCos=("
             f"{current_psi1_max_cosine_value.item():.3f},"
             f"{current_psi2_max_cosine_value.item():.3f}"
             f") | "
             f"ActorLoss={current_actor_loss_value.item():.5f} | "
             f"Alpha={current_ent_coef_value.item():.5f} | "
-            f"AlphaLoss={current_ent_coef_loss_value.item():.5f} | "
+            f"AlphaLoss="
+            f"{current_ent_coef_loss_value.item():.5f} | "
             f"LogProb={current_log_prob_value.item():.5f} | "
             f"Entropy={current_entropy_value.item():.5f} | "
             f"Qpi={current_q_pi_value.item():.5f} | "
             f"Qdata={current_q_data_value.item():.5f} | "
             f"MeanAbsPi={current_pi_abs_value.item():.5f} | "
             f"PiSat={current_pi_saturation_value.item():.3f} | "
-            f"ActorGrad={current_actor_grad_norm_value.item():.5f} | "
+            f"ActorGrad="
+            f"{current_actor_grad_norm_value.item():.5f} | "
             f"{state_norm_string}"
-            f"ReplayTasks={replay_tasks_used}"
+            f"ReplayTasks={len(replay_batches)}"
         )
 
         eval_env.close()
 
         if early_stop_success_rate is not None:
             criterion_met = (
-                success_rate >= early_stop_success_rate
+                success_rate
+                >= early_stop_success_rate
             )
+
         else:
             criterion_met = (
-                mean_return >= early_stop_reward
+                mean_return
+                >= early_stop_reward
             )
 
         if criterion_met:
@@ -11305,7 +11596,8 @@ def sac_train_tbtrl_v1(
 
         if (
             enable_early_stop
-            and success_streak >= early_stop_patience
+            and success_streak
+            >= early_stop_patience
         ):
             min_steps = global_step
 
@@ -11329,12 +11621,3920 @@ def sac_train_tbtrl_v1(
 
     if min_steps is None:
         min_steps = global_step
-        min_time = time.perf_counter() - start_time
+
+        min_time = (
+            time.perf_counter()
+            - start_time
+        )
 
     env.close()
 
     return (
         actor,
+        critic,
+        critic_target,
+        eval_returns,
+        eval_success_rates,
+        eval_final_distances,
+        min_steps,
+        min_time,
+        buffer,
+    )
+
+
+def sac_train_tbtrl_maze(
+    seed: int = 42,
+    actor: nn.Module = None,
+    critic: nn.Module = None,
+    critic_target: nn.Module = None,
+    env=None,
+    buffer_capacity: int = None,
+    lr_actor: float = 3e-4,
+    lr_critic: float = 3e-4,
+    lr_ent_coef: float = 3e-4,
+    obs_dim: int = None,
+    action_dim: int = None,
+    device: torch.device = None,
+    total_steps: int = 300_000,
+    warmup_steps: int = 25_000,
+    batch_size: int = 256,
+    eval_freq: int = 5_000,
+    gamma: float = 0.99,
+    tau: float = 0.005,
+    train_freq: int = 1,
+    gradient_steps: int = 1,
+    goal: np.ndarray = None,
+    task_id: int = None,
+    make_env=None,
+
+    replay_task_buffers: Optional[Dict[int, Any]] = None,
+    task_goals: Optional[Dict[int, np.ndarray]] = None,
+
+    replay_ratio: float = 0.0,
+    replay_tasks_per_batch: Optional[int] = None,
+    replay_loss_coef: float = 1.0,
+
+    bootstrap_on_truncation: bool = True,
+    ent_coef: str | float = "auto",
+    target_entropy: float | None = None,
+
+    normalize_state_inputs: bool = False,
+    normalize_goal_inputs: bool = False,
+    obs_norm_clip: float = 10.0,
+
+    early_stop_reward: float = -0.05,
+    early_stop_success_rate: float | None = None,
+    early_stop_patience: int = 5,
+    enable_early_stop: bool = True,
+
+    # TBTRL critic-only regularisation.
+    sigreg_coef: float = 0.0,
+    sketch_dim: int = 64,
+
+    goal_separation_coef: float = 0.0,
+    goal_separation_target_cosine: float = 0.85,
+
+    phi_raw_norm_coef: float = 0.0,
+    psi_raw_norm_coef: float = 0.0,
+
+    phi_norm_target: float | None = None,
+    psi_norm_target: float | None = None,
+
+    initial_alpha: float = 1.0,
+
+    reset_target_from_critic: bool = True,
+
+    q_target_min: float | None = None,
+    q_target_max: float | None = 5.0,
+    critic_grad_clip_norm: float = 10.0,
+    actor_grad_clip_norm: float = 10.0,
+):
+    """
+    Factorised SAC-TBTRL trainer with independent critic branches.
+
+    SAC bootstrap target:
+        y = r + gamma * mask *
+            [min(Q1_target(s', a', g), Q2_target(s', a', g))
+             - alpha * log pi(a' | s', g)]
+
+    Critic 1:
+        L1 = TD1_current
+           + replay_loss_coef * TD1_replay
+           + sigreg_coef * SIGReg(phi1)
+           + goal_separation_coef * GoalSeparation(psi1)
+           + phi_raw_norm_coef * Norm(phi1)
+           + psi_raw_norm_coef * Norm(psi1)
+
+    Critic 2:
+        L2 = TD2_current
+           + replay_loss_coef * TD2_replay
+           + sigreg_coef * SIGReg(phi2)
+           + goal_separation_coef * GoalSeparation(psi2)
+           + phi_raw_norm_coef * Norm(phi2)
+           + psi_raw_norm_coef * Norm(psi2)
+
+    Required factorised critic API:
+        critic.q1_forward(state, action, goal)
+        critic.q2_forward(state, action, goal)
+
+        critic.phi1_forward(state, action)
+        critic.psi1_forward(goal)
+
+        critic.phi2_forward(state, action)
+        critic.psi2_forward(goal)
+
+    Strongly recommended extra API:
+        critic.critic1_parameters()
+        critic.critic2_parameters()
+
+    Those methods must return disjoint parameter iterables.
+    """
+
+    # =========================================================
+    # Validation
+    # =========================================================
+
+    if actor is None:
+        raise ValueError("actor must be provided.")
+
+    if critic is None:
+        raise ValueError("critic must be provided.")
+
+    if critic_target is None:
+        raise ValueError("critic_target must be provided.")
+
+    if env is None:
+        raise ValueError("env must be provided.")
+
+    if buffer_capacity is None:
+        raise ValueError("buffer_capacity must be provided.")
+
+    if goal is None:
+        raise ValueError("goal must be provided.")
+
+    if task_id is None:
+        raise ValueError("task_id must be provided.")
+
+    if not isinstance(task_id, (int, np.integer)):
+        raise TypeError("task_id must be an integer.")
+
+    if make_env is None:
+        raise ValueError("make_env must be provided.")
+
+    if warmup_steps < 0:
+        raise ValueError("warmup_steps must be >= 0.")
+
+    if batch_size < 1:
+        raise ValueError("batch_size must be >= 1.")
+
+    if train_freq < 1:
+        raise ValueError("train_freq must be >= 1.")
+
+    if gradient_steps < 1:
+        raise ValueError("gradient_steps must be >= 1.")
+
+    if not 0.0 < tau <= 1.0:
+        raise ValueError("tau must be in (0, 1].")
+
+    if not 0.0 <= gamma <= 1.0:
+        raise ValueError("gamma must be in [0, 1].")
+
+    if obs_norm_clip <= 0.0:
+        raise ValueError("obs_norm_clip must be positive.")
+
+    if isinstance(ent_coef, str) and ent_coef != "auto":
+        raise ValueError(
+            "ent_coef must be a positive float or 'auto'."
+        )
+
+    if isinstance(ent_coef, (float, int)) and ent_coef <= 0.0:
+        raise ValueError(
+            "Fixed ent_coef must be positive."
+        )
+
+    if sigreg_coef < 0.0:
+        raise ValueError("sigreg_coef must be >= 0.")
+
+    if goal_separation_coef < 0.0:
+        raise ValueError(
+            "goal_separation_coef must be >= 0."
+        )
+
+    if phi_raw_norm_coef < 0.0:
+        raise ValueError(
+            "phi_raw_norm_coef must be >= 0."
+        )
+
+    if psi_raw_norm_coef < 0.0:
+        raise ValueError(
+            "psi_raw_norm_coef must be >= 0."
+        )
+
+    if not -1.0 <= goal_separation_target_cosine <= 1.0:
+        raise ValueError(
+            "goal_separation_target_cosine must be "
+            "within [-1, 1]."
+        )
+
+    # =========================================================
+    # Device, dimensions, seed
+    # =========================================================
+
+    if device is None:
+        device = next(critic.parameters()).device
+
+    device = torch.device(device)
+
+    if obs_dim is None:
+        obs_dim = env.observation_space.shape[0]
+
+    if action_dim is None:
+        action_dim = int(
+            env.action_space.shape[0]
+        )
+
+    goal_dim = int(
+        env.observation_space.shape[0]
+    )
+
+    set_seed(seed)
+
+    if replay_task_buffers is None:
+        replay_task_buffers = {}
+
+    if task_goals is None:
+        task_goals = {}
+
+    training_goal = np.asarray(
+        goal,
+        dtype=np.float32,
+    ).copy()
+
+    if training_goal.shape != (goal_dim,):
+        raise ValueError(
+            f"goal has shape {training_goal.shape}; "
+            f"expected ({goal_dim},)."
+        )
+
+    task_goals[task_id] = training_goal.copy()
+
+    actor = actor.to(device)
+    critic = critic.to(device)
+    critic_target = critic_target.to(device)
+
+    # =========================================================
+    # Target critic setup
+    # =========================================================
+
+    if reset_target_from_critic:
+        critic_target.load_state_dict(
+            critic.state_dict()
+        )
+
+    actor.train()
+    critic.train()
+    critic_target.eval()
+
+    for parameter in critic_target.parameters():
+        parameter.requires_grad_(False)
+
+    # =========================================================
+    # Validate factorised critic API
+    # =========================================================
+
+    required_methods = [
+        "q1_forward",
+        "q2_forward",
+        "phi1_forward",
+        "psi1_forward",
+        "phi2_forward",
+        "psi2_forward",
+    ]
+
+    missing_methods = [
+        method_name
+        for method_name in required_methods
+        if not hasattr(critic, method_name)
+    ]
+
+    if len(missing_methods) > 0:
+        raise AttributeError(
+            "Factorised critic is missing required methods: "
+            f"{missing_methods}."
+        )
+
+    # =========================================================
+    # Action bounds
+    # =========================================================
+
+    action_low = torch.as_tensor(
+        env.action_space.low,
+        dtype=torch.float32,
+        device=device,
+    ).view(1, -1)
+
+    action_high = torch.as_tensor(
+        env.action_space.high,
+        dtype=torch.float32,
+        device=device,
+    ).view(1, -1)
+
+    if action_low.shape[-1] != action_dim:
+        raise RuntimeError(
+            "Action-space bounds do not match action_dim."
+        )
+
+    if not (
+        torch.allclose(
+            action_low,
+            -torch.ones_like(action_low),
+        )
+        and torch.allclose(
+            action_high,
+            torch.ones_like(action_high),
+        )
+    ):
+        raise ValueError(
+            "This SAC actor assumes action bounds [-1, 1]."
+        )
+
+    # =========================================================
+    # Independent critic parameter groups
+    # =========================================================
+
+    def unique_parameters(parameters):
+        seen_parameter_ids = set()
+        unique = []
+
+        for parameter in parameters:
+            if not parameter.requires_grad:
+                continue
+
+            parameter_id = id(parameter)
+
+            if parameter_id not in seen_parameter_ids:
+                unique.append(parameter)
+                seen_parameter_ids.add(parameter_id)
+
+        return unique
+
+    def critic_parameter_groups():
+        """
+        Preferred design: define these in the critic class:
+
+            def critic1_parameters(self):
+                return chain(
+                    self.phi1_encoder.parameters(),
+                    self.psi1_encoder.parameters(),
+                    self.q1_head.parameters(),
+                )
+
+            def critic2_parameters(self):
+                return chain(
+                    self.phi2_encoder.parameters(),
+                    self.psi2_encoder.parameters(),
+                    self.q2_head.parameters(),
+                )
+        """
+
+        if (
+            hasattr(critic, "critic1_parameters")
+            and hasattr(critic, "critic2_parameters")
+        ):
+            critic1_params = unique_parameters(
+                list(critic.critic1_parameters())
+            )
+
+            critic2_params = unique_parameters(
+                list(critic.critic2_parameters())
+            )
+
+        else:
+            raise AttributeError(
+                "The critic must expose critic1_parameters() "
+                "and critic2_parameters() returning the two "
+                "disjoint parameter groups. This is required "
+                "to guarantee branch-specific optimisation."
+            )
+
+        if len(critic1_params) == 0:
+            raise RuntimeError(
+                "critic1_parameters() returned no trainable "
+                "parameters."
+            )
+
+        if len(critic2_params) == 0:
+            raise RuntimeError(
+                "critic2_parameters() returned no trainable "
+                "parameters."
+            )
+
+        critic1_ids = {
+            id(parameter)
+            for parameter in critic1_params
+        }
+
+        critic2_ids = {
+            id(parameter)
+            for parameter in critic2_params
+        }
+
+        shared_ids = critic1_ids.intersection(
+            critic2_ids
+        )
+
+        if len(shared_ids) > 0:
+            raise RuntimeError(
+                "Critic 1 and critic 2 share trainable "
+                "parameters. Fully separate phi1/psi1/q1 "
+                "from phi2/psi2/q2 before using independent "
+                "TBTRL losses."
+            )
+
+        all_critic_ids = {
+            id(parameter)
+            for parameter in critic.parameters()
+            if parameter.requires_grad
+        }
+
+        grouped_ids = critic1_ids.union(critic2_ids)
+        missing_ids = all_critic_ids.difference(
+            grouped_ids
+        )
+
+        if len(missing_ids) > 0:
+            raise RuntimeError(
+                "Some trainable critic parameters are absent "
+                "from both critic parameter groups. Put every "
+                "critic parameter in exactly one branch, or "
+                "make it non-trainable."
+            )
+
+        return critic1_params, critic2_params
+
+    critic1_params, critic2_params = (
+        critic_parameter_groups()
+    )
+
+    # =========================================================
+    # Optimisers and replay buffer
+    # =========================================================
+
+    opt_actor = optim.AdamW(
+        actor.parameters(),
+        lr=lr_actor,
+        weight_decay=0.0,
+    )
+
+    opt_critic1 = optim.AdamW(
+        critic1_params,
+        lr=lr_critic,
+        weight_decay=0.0,
+    )
+
+    opt_critic2 = optim.AdamW(
+        critic2_params,
+        lr=lr_critic,
+        weight_decay=0.0,
+    )
+
+    buffer = TrajectoryReplayBufferContinuous(
+        buffer_capacity,
+        obs_dim,
+        action_dim,
+        device=device,
+    )
+
+    # =========================================================
+    # Entropy coefficient
+    # =========================================================
+
+    if target_entropy is None:
+        target_entropy = -float(action_dim)
+
+    if ent_coef == "auto":
+        log_ent_coef = torch.tensor(
+            np.log(initial_alpha),
+            dtype=torch.float32,
+            device=device,
+            requires_grad=True,
+        )
+
+        opt_ent_coef = optim.Adam(
+            [log_ent_coef],
+            lr=lr_ent_coef,
+        )
+
+        fixed_ent_coef = None
+
+    else:
+        fixed_ent_coef = torch.as_tensor(
+            float(ent_coef),
+            dtype=torch.float32,
+            device=device,
+        )
+
+        log_ent_coef = None
+        opt_ent_coef = None
+
+    # =========================================================
+    # Input normalisers
+    # =========================================================
+
+    state_rms = RunningMeanStd(
+        shape=(obs_dim,),
+        device=device,
+    )
+
+    goal_rms = RunningMeanStd(
+        shape=(goal_dim,),
+        device=device,
+    )
+
+    # =========================================================
+    # Generic helpers
+    # =========================================================
+
+    def goal_batch_for(
+        goal_value,
+        requested_batch_size: int,
+        target_device: torch.device,
+    ) -> torch.Tensor:
+        if isinstance(goal_value, torch.Tensor):
+            goal_batch = goal_value.to(
+                device=target_device,
+                dtype=torch.float32,
+            )
+        else:
+            goal_batch = torch.as_tensor(
+                np.asarray(
+                    goal_value,
+                    dtype=np.float32,
+                ),
+                dtype=torch.float32,
+                device=target_device,
+            )
+
+        if goal_batch.ndim == 1:
+            goal_batch = goal_batch.unsqueeze(0)
+
+        if goal_batch.ndim != 2:
+            raise ValueError(
+                "Goal must be [goal_dim] or "
+                "[B, goal_dim]. "
+                f"Got {tuple(goal_batch.shape)}."
+            )
+
+        if goal_batch.shape[0] == 1:
+            goal_batch = goal_batch.expand(
+                requested_batch_size,
+                -1,
+            )
+
+        elif goal_batch.shape[0] != requested_batch_size:
+            raise ValueError(
+                "Goal batch size does not match "
+                "transition batch size."
+            )
+
+        return goal_batch
+
+    def normalize_state(
+        state_tensor: torch.Tensor,
+    ) -> torch.Tensor:
+        if not normalize_state_inputs:
+            return state_tensor
+
+        return state_rms.normalize(
+            state_tensor,
+            clip=obs_norm_clip,
+        )
+
+    def normalize_goal(
+        goal_tensor: torch.Tensor,
+    ) -> torch.Tensor:
+        if not normalize_goal_inputs:
+            return goal_tensor
+
+        return goal_rms.normalize(
+            goal_tensor,
+            clip=obs_norm_clip,
+        )
+
+    def current_ent_coef() -> torch.Tensor:
+        if log_ent_coef is not None:
+            return log_ent_coef.exp()
+
+        return fixed_ent_coef
+
+    def zero_scalar() -> torch.Tensor:
+        return torch.zeros(
+            (),
+            dtype=torch.float32,
+            device=device,
+        )
+
+    def set_requires_grad(
+        parameters,
+        requires_grad: bool,
+    ) -> None:
+        for parameter in parameters:
+            parameter.requires_grad_(requires_grad)
+
+    def polyak_update_critic() -> None:
+        with torch.no_grad():
+            for online_parameter, target_parameter in zip(
+                critic.parameters(),
+                critic_target.parameters(),
+            ):
+                target_parameter.mul_(1.0 - tau).add_(
+                    online_parameter,
+                    alpha=tau,
+                )
+
+    # =========================================================
+    # SAC target and independent TD losses
+    # =========================================================
+
+    def td_target(
+        batch,
+        raw_goal_batch: torch.Tensor,
+        ent_coef_tensor: torch.Tensor,
+    ) -> torch.Tensor:
+        rewards = batch.rewards
+        terminated = batch.terminated
+
+        if rewards.ndim == 1:
+            rewards = rewards.unsqueeze(-1)
+
+        if terminated.ndim == 1:
+            terminated = terminated.unsqueeze(-1)
+
+        next_state = normalize_state(
+            batch.next_obs
+        )
+
+        next_goal = normalize_goal(
+            goal_batch_for(
+                raw_goal_batch,
+                batch.next_obs.shape[0],
+                batch.next_obs.device,
+            )
+        )
+
+        # The target uses both target critics numerically but
+        # has no gradient path to online critic 1 or critic 2.
+        with torch.no_grad():
+            next_action, next_log_prob, _ = actor.sample(
+                next_state,
+                next_goal,
+            )
+
+            next_q1 = critic_target.q1_forward(
+                next_state,
+                next_action,
+                next_goal,
+            )
+
+            next_q2 = critic_target.q2_forward(
+                next_state,
+                next_action,
+                next_goal,
+            )
+
+            next_q = torch.minimum(
+                next_q1,
+                next_q2,
+            )
+
+            next_soft_value = (
+                next_q
+                - ent_coef_tensor * next_log_prob
+            )
+
+            if bootstrap_on_truncation:
+                bootstrap_mask = (
+                    1.0 - terminated.float()
+                )
+
+            else:
+                truncated = batch.truncated
+
+                if truncated.ndim == 1:
+                    truncated = truncated.unsqueeze(-1)
+
+                done = torch.logical_or(
+                    terminated.bool(),
+                    truncated.bool(),
+                ).float()
+
+                bootstrap_mask = 1.0 - done
+
+            target = (
+                rewards
+                + gamma
+                * bootstrap_mask
+                * next_soft_value
+            )
+
+            if q_target_min is not None or q_target_max is not None:
+                target = torch.clamp(
+                    target,
+                    min=q_target_min,
+                    max=q_target_max,
+                )
+
+        return target
+
+    def critic_td_losses(
+        batch,
+        raw_goal_batch: torch.Tensor,
+        ent_coef_tensor: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        target = td_target(
+            batch,
+            raw_goal_batch,
+            ent_coef_tensor,
+        )
+
+        state = normalize_state(batch.obs)
+        goal_batch = normalize_goal(raw_goal_batch)
+
+        q1 = critic.q1_forward(
+            state,
+            batch.actions,
+            goal_batch,
+        )
+
+        q2 = critic.q2_forward(
+            state,
+            batch.actions,
+            goal_batch,
+        )
+
+        if q1.shape != target.shape:
+            raise RuntimeError(
+                f"Q1 shape {q1.shape} does not match "
+                f"target shape {target.shape}."
+            )
+
+        if q2.shape != target.shape:
+            raise RuntimeError(
+                f"Q2 shape {q2.shape} does not match "
+                f"target shape {target.shape}."
+            )
+
+        td_loss1 = F.mse_loss(q1, target)
+        td_loss2 = F.mse_loss(q2, target)
+
+        return td_loss1, td_loss2
+
+    # =========================================================
+    # TBTRL helpers: fully branch-separated
+    # =========================================================
+
+    def seen_goals_tensor() -> torch.Tensor:
+        seen_task_ids = sorted(task_goals.keys())
+
+        return torch.as_tensor(
+            np.asarray(
+                [
+                    task_goals[seen_task_id]
+                    for seen_task_id in seen_task_ids
+                ],
+                dtype=np.float32,
+            ),
+            dtype=torch.float32,
+            device=device,
+        )
+
+    def resolve_norm_target(
+        name: str,
+        supplied_target: float | None,
+    ) -> float:
+        if supplied_target is not None:
+            target = float(supplied_target)
+
+        elif name == "phi":
+            target = float(
+                getattr(
+                    critic,
+                    "phi_max_norm",
+                    10.1,
+                )
+            ) - 0.1
+
+        elif name == "psi":
+            target = float(
+                getattr(
+                    critic,
+                    "psi_max_norm",
+                    10.1,
+                )
+            ) - 0.1
+
+        else:
+            raise ValueError(
+                f"Unknown embedding name: {name}."
+            )
+
+        if target <= 0.0:
+            raise ValueError(
+                f"{name}_norm_target must be positive, "
+                f"got {target}."
+            )
+
+        return target
+
+    def soft_excess_norm_loss(
+        embeddings: torch.Tensor,
+        target_norm: float,
+    ) -> torch.Tensor:
+        norms = embeddings.norm(
+            p=2,
+            dim=-1,
+        )
+
+        return F.relu(
+            norms - target_norm
+        ).mean()
+
+    def head_goal_separation_loss(
+        psi: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        n_goals = psi.shape[0]
+
+        if n_goals < 2:
+            return zero_scalar(), zero_scalar()
+
+        normalized_psi = F.normalize(
+            psi,
+            p=2,
+            dim=-1,
+            eps=1e-8,
+        )
+
+        cosine_matrix = (
+            normalized_psi @ normalized_psi.T
+        )
+
+        off_diagonal_mask = ~torch.eye(
+            n_goals,
+            dtype=torch.bool,
+            device=device,
+        )
+
+        off_diagonal_cosines = cosine_matrix[
+            off_diagonal_mask
+        ]
+
+        separation_loss = F.relu(
+            off_diagonal_cosines
+            - goal_separation_target_cosine
+        ).mean()
+
+        return (
+            separation_loss,
+            off_diagonal_cosines.max().detach(),
+        )
+
+    def tbtrl_sigreg_losses(
+        state: torch.Tensor,
+        action: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if sigreg_coef <= 0.0:
+            return zero_scalar(), zero_scalar()
+
+        phi1 = critic.phi1_forward(
+            state,
+            action,
+        )
+
+        phi2 = critic.phi2_forward(
+            state,
+            action,
+        )
+
+        sigreg1 = sigreg_loss(
+            phi1,
+            sketch_dim=sketch_dim,
+        )
+
+        sigreg2 = sigreg_loss(
+            phi2,
+            sketch_dim=sketch_dim,
+        )
+
+        return sigreg1, sigreg2
+
+    def mixed_phi_regularisation_batch(
+        current_batch,
+        replay_batches,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Return the union of all (state, action) samples participating
+        in TD learning at this update: the current task batch plus each
+        selected old-task replay batch.
+
+        The order does not matter for the phi-norm loss. It does matter
+        only as ordinary batch ordering for SIGReg, not task identity.
+        """
+        state_chunks = [current_batch.obs]
+        action_chunks = [current_batch.actions]
+
+        for _, old_batch in replay_batches:
+            state_chunks.append(old_batch.obs)
+            action_chunks.append(old_batch.actions)
+
+        mixed_states = torch.cat(state_chunks, dim=0)
+        mixed_actions = torch.cat(action_chunks, dim=0)
+
+        return normalize_state(mixed_states), mixed_actions
+
+    def tbtrl_goal_separation_losses() -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+    ]:
+        if (
+            goal_separation_coef <= 0.0
+            or len(task_goals) <= 1
+        ):
+            return (
+                zero_scalar(),
+                zero_scalar(),
+                zero_scalar(),
+                zero_scalar(),
+            )
+
+        all_seen_goals = normalize_goal(
+            seen_goals_tensor()
+        )
+
+        psi1_all = critic.psi1_forward(
+            all_seen_goals
+        )
+
+        psi2_all = critic.psi2_forward(
+            all_seen_goals
+        )
+
+        goal_sep1, max_cosine1 = (
+            head_goal_separation_loss(psi1_all)
+        )
+
+        goal_sep2, max_cosine2 = (
+            head_goal_separation_loss(psi2_all)
+        )
+
+        return (
+            goal_sep1,
+            goal_sep2,
+            max_cosine1,
+            max_cosine2,
+        )
+
+    def tbtrl_norm_losses(
+        state: torch.Tensor,
+        action: torch.Tensor,
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        dict[str, torch.Tensor],
+    ]:
+        phi1 = critic.phi1_forward(
+            state,
+            action,
+        )
+
+        phi2 = critic.phi2_forward(
+            state,
+            action,
+        )
+
+        all_seen_goals = normalize_goal(
+            seen_goals_tensor()
+        )
+
+        psi1_all = critic.psi1_forward(
+            all_seen_goals
+        )
+
+        psi2_all = critic.psi2_forward(
+            all_seen_goals
+        )
+
+        phi_target = resolve_norm_target(
+            "phi",
+            phi_norm_target,
+        )
+
+        psi_target = resolve_norm_target(
+            "psi",
+            psi_norm_target,
+        )
+
+        phi_norm1 = soft_excess_norm_loss(
+            phi1,
+            phi_target,
+        )
+
+        psi_norm1 = soft_excess_norm_loss(
+            psi1_all,
+            psi_target,
+        )
+
+        phi_norm2 = soft_excess_norm_loss(
+            phi2,
+            phi_target,
+        )
+
+        psi_norm2 = soft_excess_norm_loss(
+            psi2_all,
+            psi_target,
+        )
+
+        statistics = {
+            "phi1_norm": phi1.norm(
+                p=2,
+                dim=-1,
+            ).mean().detach(),
+
+            "phi2_norm": phi2.norm(
+                p=2,
+                dim=-1,
+            ).mean().detach(),
+
+            "psi1_norm": psi1_all.norm(
+                p=2,
+                dim=-1,
+            ).mean().detach(),
+
+            "psi2_norm": psi2_all.norm(
+                p=2,
+                dim=-1,
+            ).mean().detach(),
+        }
+
+        return (
+            phi_norm1,
+            psi_norm1,
+            phi_norm2,
+            psi_norm2,
+            statistics,
+        )
+
+    # =========================================================
+    # Training state
+    # =========================================================
+
+    obs_dict, _ = env.reset()
+
+    global_step = 0
+    update_count = 0
+    success_streak = 0
+
+    start_time = time.perf_counter()
+
+    eval_returns = []
+    eval_success_rates = []
+    eval_final_distances = []
+
+    min_steps = None
+    min_time = None
+
+    zero = zero_scalar()
+
+    current_td_loss1_value = zero
+    current_td_loss2_value = zero
+
+    old_replay_loss1_value = zero
+    old_replay_loss2_value = zero
+
+    current_critic1_total_value = zero
+    current_critic2_total_value = zero
+
+    current_critic1_grad_norm_value = zero
+    current_critic2_grad_norm_value = zero
+
+    current_actor_loss_value = zero
+
+    current_ent_coef_value = torch.ones(
+        (),
+        dtype=torch.float32,
+        device=device,
+    )
+
+    current_ent_coef_loss_value = zero
+    current_log_prob_value = zero
+    current_entropy_value = zero
+    current_q_pi_value = zero
+    current_q_data_value = zero
+    current_pi_abs_value = zero
+    current_pi_saturation_value = zero
+    current_actor_grad_norm_value = zero
+
+    current_sigreg1_value = zero
+    current_sigreg2_value = zero
+
+    current_goal_separation1_value = zero
+    current_goal_separation2_value = zero
+
+    current_phi_norm1_value = zero
+    current_phi_norm2_value = zero
+
+    current_psi_norm1_value = zero
+    current_psi_norm2_value = zero
+
+    current_phi1_norm_value = zero
+    current_phi2_norm_value = zero
+    current_psi1_norm_value = zero
+    current_psi2_norm_value = zero
+
+    current_psi1_max_cosine_value = zero
+    current_psi2_max_cosine_value = zero
+
+    # =========================================================
+    # Main SAC training loop
+    # =========================================================
+
+    while global_step < total_steps:
+
+        # -----------------------------------------------------
+        # Data collection
+        # -----------------------------------------------------
+
+        state = np.asarray(
+            obs_dict,
+            dtype=np.float32,
+        )
+
+        current_goal = training_goal.copy()
+
+        state_t = torch.as_tensor(
+            state,
+            dtype=torch.float32,
+            device=device,
+        ).unsqueeze(0)
+
+        goal_t = torch.as_tensor(
+            current_goal,
+            dtype=torch.float32,
+            device=device,
+        ).unsqueeze(0)
+
+        with torch.no_grad():
+            state_rms.update(state_t)
+
+            if normalize_goal_inputs:
+                goal_rms.update(goal_t)
+
+        if global_step < warmup_steps:
+            action = env.action_space.sample().astype(
+                np.float32
+            )
+
+        else:
+            with torch.no_grad():
+                action_t, _, _ = actor.sample(
+                    normalize_state(state_t),
+                    normalize_goal(goal_t),
+                )
+
+            action = (
+                action_t.squeeze(0)
+                .cpu()
+                .numpy()
+                .astype(np.float32)
+            )
+
+        (
+            next_obs_dict,
+            reward,
+            terminated,
+            truncated,
+            _,
+        ) = env.step(action)
+
+        next_state = np.asarray(
+            next_obs_dict,
+            dtype=np.float32,
+        )
+
+        next_goal = training_goal.copy()
+
+        with torch.no_grad():
+            next_state_t = torch.as_tensor(
+                next_state,
+                dtype=torch.float32,
+                device=device,
+            ).unsqueeze(0)
+
+            state_rms.update(next_state_t)
+
+            if normalize_goal_inputs:
+                next_goal_t = torch.as_tensor(
+                    next_goal,
+                    dtype=torch.float32,
+                    device=device,
+                ).unsqueeze(0)
+
+                goal_rms.update(next_goal_t)
+
+        buffer.add_transition(
+            obs=state,
+            action=action,
+            reward=reward,
+            next_obs=next_state,
+            terminated=terminated,
+            truncated=truncated,
+        )
+
+        obs_dict = next_obs_dict
+        global_step += 1
+
+        if terminated or truncated:
+            obs_dict, _ = env.reset()
+
+        if len(buffer) < warmup_steps:
+            continue
+
+        if global_step % train_freq != 0:
+            continue
+
+        # -----------------------------------------------------
+        # Gradient updates
+        # -----------------------------------------------------
+
+        for _ in range(gradient_steps):
+
+            current_batch = buffer.sample(batch_size)
+
+            current_goal_tensor = goal_batch_for(
+                training_goal,
+                current_batch.obs.shape[0],
+                device,
+            )
+
+            # -------------------------------------------------
+            # Select old-task replay batches
+            # -------------------------------------------------
+
+            eligible_old_task_ids = []
+
+            for old_task_id, old_buffer in (
+                replay_task_buffers.items()
+            ):
+                if old_buffer is None:
+                    continue
+
+                if len(old_buffer) < 1:
+                    continue
+
+                if old_task_id not in task_goals:
+                    raise KeyError(
+                        f"Missing goal for replay task "
+                        f"{old_task_id}."
+                    )
+
+                eligible_old_task_ids.append(
+                    old_task_id
+                )
+
+            replay_batches = []
+
+            if (
+                len(eligible_old_task_ids) > 0
+                and replay_ratio > 0.0
+            ):
+                if replay_tasks_per_batch is None:
+                    n_old_tasks = len(
+                        eligible_old_task_ids
+                    )
+                else:
+                    n_old_tasks = min(
+                        int(replay_tasks_per_batch),
+                        len(eligible_old_task_ids),
+                    )
+
+                cycle_index = (
+                    update_count
+                    % len(eligible_old_task_ids)
+                )
+
+                ordered_old_task_ids = (
+                    eligible_old_task_ids[cycle_index:]
+                    + eligible_old_task_ids[:cycle_index]
+                )
+
+                selected_old_task_ids = (
+                    ordered_old_task_ids[:n_old_tasks]
+                )
+
+                replay_batch_size = max(
+                    1,
+                    int(
+                        batch_size
+                        * replay_ratio
+                        / n_old_tasks
+                    ),
+                )
+
+                for old_task_id in selected_old_task_ids:
+                    old_buffer = replay_task_buffers[
+                        old_task_id
+                    ]
+
+                    if len(old_buffer) < replay_batch_size:
+                        continue
+
+                    old_batch = old_buffer.sample(
+                        replay_batch_size
+                    )
+
+                    old_goal = task_goals[old_task_id]
+
+                    replay_batches.append(
+                        (
+                            old_goal,
+                            old_batch,
+                        )
+                    )
+
+            # -------------------------------------------------
+            # Independent TD losses, common detached target
+            # -------------------------------------------------
+
+            ent_coef_tensor = (
+                current_ent_coef().detach()
+            )
+
+            (
+                current_td_loss1,
+                current_td_loss2,
+            ) = critic_td_losses(
+                current_batch,
+                current_goal_tensor,
+                ent_coef_tensor,
+            )
+
+            old_td_losses1 = []
+            old_td_losses2 = []
+
+            for old_goal, old_batch in replay_batches:
+                old_goal_tensor = goal_batch_for(
+                    old_goal,
+                    old_batch.obs.shape[0],
+                    device,
+                )
+
+                old_td_loss1, old_td_loss2 = (
+                    critic_td_losses(
+                        old_batch,
+                        old_goal_tensor,
+                        ent_coef_tensor,
+                    )
+                )
+
+                old_td_losses1.append(old_td_loss1)
+                old_td_losses2.append(old_td_loss2)
+
+            if len(old_td_losses1) > 0:
+                old_replay_td_loss1 = torch.stack(
+                    old_td_losses1
+                ).mean()
+
+                old_replay_td_loss2 = torch.stack(
+                    old_td_losses2
+                ).mean()
+
+            else:
+                old_replay_td_loss1 = zero_scalar()
+                old_replay_td_loss2 = zero_scalar()
+
+            # -------------------------------------------------
+            # Independent TBTRL regularisation losses
+            # -------------------------------------------------
+
+            state_for_phi_reg, action_for_phi_reg = (
+                mixed_phi_regularisation_batch(
+                    current_batch,
+                    replay_batches,
+                )
+            )
+
+            (
+                current_sigreg1,
+                current_sigreg2,
+            ) = tbtrl_sigreg_losses(
+                state_for_phi_reg,
+                action_for_phi_reg,
+            )
+
+            (
+                current_goal_separation1,
+                current_goal_separation2,
+                psi1_max_cosine,
+                psi2_max_cosine,
+            ) = tbtrl_goal_separation_losses()
+
+            (
+                phi_norm1,
+                psi_norm1,
+                phi_norm2,
+                psi_norm2,
+                norm_statistics,
+            ) = tbtrl_norm_losses(
+                state_for_phi_reg,
+                action_for_phi_reg,
+            )
+
+            # -------------------------------------------------
+            # Branch-specific critic objectives
+            # -------------------------------------------------
+
+            critic1_total_loss = (
+                current_td_loss1
+                + replay_loss_coef
+                * old_replay_td_loss1
+                + sigreg_coef
+                * current_sigreg1
+                + goal_separation_coef
+                * current_goal_separation1
+                + phi_raw_norm_coef
+                * phi_norm1
+                + psi_raw_norm_coef
+                * psi_norm1
+            )
+
+            critic2_total_loss = (
+                current_td_loss2
+                + replay_loss_coef
+                * old_replay_td_loss2
+                + sigreg_coef
+                * current_sigreg2
+                + goal_separation_coef
+                * current_goal_separation2
+                + phi_raw_norm_coef
+                * phi_norm2
+                + psi_raw_norm_coef
+                * psi_norm2
+            )
+
+            # -------------------------------------------------
+            # Critic 1 update: only phi1 / psi1 / Q1 params
+            # -------------------------------------------------
+
+            opt_critic1.zero_grad(set_to_none=True)
+
+            critic1_total_loss.backward()
+
+            critic1_grad_norm = nn.utils.clip_grad_norm_(
+                critic1_params,
+                max_norm=critic_grad_clip_norm,
+            )
+
+            opt_critic1.step()
+
+            # -------------------------------------------------
+            # Critic 2 update: only phi2 / psi2 / Q2 params
+            # -------------------------------------------------
+
+            opt_critic2.zero_grad(set_to_none=True)
+
+            critic2_total_loss.backward()
+
+            critic2_grad_norm = nn.utils.clip_grad_norm_(
+                critic2_params,
+                max_norm=critic_grad_clip_norm,
+            )
+
+            opt_critic2.step()
+
+            # -------------------------------------------------
+            # SAC actor update
+            #
+            # Freeze all critic parameters: Q still supplies
+            # dQ/da to the actor, but critic weights receive no
+            # gradients or optimiser updates.
+            # -------------------------------------------------
+
+            state_batch = normalize_state(
+                current_batch.obs
+            )
+
+            goal_batch = normalize_goal(
+                current_goal_tensor
+            )
+
+            set_requires_grad(
+                critic1_params,
+                requires_grad=False,
+            )
+
+            set_requires_grad(
+                critic2_params,
+                requires_grad=False,
+            )
+
+            sampled_actions, log_prob, _ = actor.sample(
+                state_batch,
+                goal_batch,
+            )
+
+            q1_pi = critic.q1_forward(
+                state_batch,
+                sampled_actions,
+                goal_batch,
+            )
+
+            q2_pi = critic.q2_forward(
+                state_batch,
+                sampled_actions,
+                goal_batch,
+            )
+
+            min_q_pi = torch.minimum(
+                q1_pi,
+                q2_pi,
+            )
+
+            ent_coef_tensor = (
+                current_ent_coef().detach()
+            )
+
+            actor_loss = (
+                ent_coef_tensor * log_prob
+                - min_q_pi
+            ).mean()
+
+            opt_actor.zero_grad(set_to_none=True)
+
+            actor_loss.backward()
+
+            actor_grad_norm = nn.utils.clip_grad_norm_(
+                actor.parameters(),
+                max_norm=actor_grad_clip_norm,
+            )
+
+            opt_actor.step()
+
+            set_requires_grad(
+                critic1_params,
+                requires_grad=True,
+            )
+
+            set_requires_grad(
+                critic2_params,
+                requires_grad=True,
+            )
+
+            # -------------------------------------------------
+            # SAC automatic entropy update
+            # -------------------------------------------------
+
+            if log_ent_coef is not None:
+                ent_coef_loss = -(
+                    log_ent_coef
+                    * (
+                        log_prob.detach()
+                        + target_entropy
+                    )
+                ).mean()
+
+                opt_ent_coef.zero_grad(
+                    set_to_none=True
+                )
+
+                ent_coef_loss.backward()
+
+                opt_ent_coef.step()
+
+            else:
+                ent_coef_loss = zero_scalar()
+
+            # -------------------------------------------------
+            # Target critic update
+            # -------------------------------------------------
+
+            polyak_update_critic()
+
+            update_count += 1
+
+            # -------------------------------------------------
+            # Diagnostics
+            # -------------------------------------------------
+
+            with torch.no_grad():
+                q_data_1 = critic.q1_forward(
+                    state_batch,
+                    current_batch.actions,
+                    goal_batch,
+                )
+
+                q_data_2 = critic.q2_forward(
+                    state_batch,
+                    current_batch.actions,
+                    goal_batch,
+                )
+
+                q_data = torch.minimum(
+                    q_data_1,
+                    q_data_2,
+                )
+
+                pi_abs = sampled_actions.abs().mean()
+
+                pi_saturation = (
+                    sampled_actions.abs() > 0.95
+                ).float().mean()
+
+            current_td_loss1_value = (
+                current_td_loss1.detach()
+            )
+
+            current_td_loss2_value = (
+                current_td_loss2.detach()
+            )
+
+            old_replay_loss1_value = (
+                old_replay_td_loss1.detach()
+            )
+
+            old_replay_loss2_value = (
+                old_replay_td_loss2.detach()
+            )
+
+            current_critic1_total_value = (
+                critic1_total_loss.detach()
+            )
+
+            current_critic2_total_value = (
+                critic2_total_loss.detach()
+            )
+
+            current_critic1_grad_norm_value = (
+                torch.as_tensor(
+                    critic1_grad_norm,
+                    dtype=torch.float32,
+                    device=device,
+                ).detach()
+            )
+
+            current_critic2_grad_norm_value = (
+                torch.as_tensor(
+                    critic2_grad_norm,
+                    dtype=torch.float32,
+                    device=device,
+                ).detach()
+            )
+
+            current_actor_loss_value = actor_loss.detach()
+
+            current_ent_coef_value = (
+                current_ent_coef().detach()
+            )
+
+            current_ent_coef_loss_value = (
+                ent_coef_loss.detach()
+            )
+
+            current_log_prob_value = (
+                log_prob.mean().detach()
+            )
+
+            current_entropy_value = (
+                -log_prob.mean().detach()
+            )
+
+            current_q_pi_value = (
+                min_q_pi.mean().detach()
+            )
+
+            current_q_data_value = (
+                q_data.mean().detach()
+            )
+
+            current_pi_abs_value = pi_abs.detach()
+
+            current_pi_saturation_value = (
+                pi_saturation.detach()
+            )
+
+            current_actor_grad_norm_value = (
+                torch.as_tensor(
+                    actor_grad_norm,
+                    dtype=torch.float32,
+                    device=device,
+                ).detach()
+            )
+
+            current_sigreg1_value = (
+                current_sigreg1.detach()
+            )
+
+            current_sigreg2_value = (
+                current_sigreg2.detach()
+            )
+
+            current_goal_separation1_value = (
+                current_goal_separation1.detach()
+            )
+
+            current_goal_separation2_value = (
+                current_goal_separation2.detach()
+            )
+
+            current_phi_norm1_value = phi_norm1.detach()
+            current_phi_norm2_value = phi_norm2.detach()
+
+            current_psi_norm1_value = psi_norm1.detach()
+            current_psi_norm2_value = psi_norm2.detach()
+
+            current_phi1_norm_value = norm_statistics[
+                "phi1_norm"
+            ]
+
+            current_phi2_norm_value = norm_statistics[
+                "phi2_norm"
+            ]
+
+            current_psi1_norm_value = norm_statistics[
+                "psi1_norm"
+            ]
+
+            current_psi2_norm_value = norm_statistics[
+                "psi2_norm"
+            ]
+
+            current_psi1_max_cosine_value = (
+                psi1_max_cosine
+            )
+
+            current_psi2_max_cosine_value = (
+                psi2_max_cosine
+            )
+
+        # -----------------------------------------------------
+        # Evaluation
+        # -----------------------------------------------------
+
+        if global_step % eval_freq != 0:
+            continue
+
+        eval_env = make_env(
+            goal=training_goal,
+
+        )
+
+        def eval_policy(observation):
+            eval_state = np.asarray(
+                observation,
+                dtype=np.float32,
+            )
+
+            eval_goal = training_goal.copy()
+
+            eval_state_t = torch.as_tensor(
+                eval_state,
+                dtype=torch.float32,
+                device=device,
+            ).unsqueeze(0)
+
+            eval_goal_t = torch.as_tensor(
+                eval_goal,
+                dtype=torch.float32,
+                device=device,
+            ).unsqueeze(0)
+
+            with torch.no_grad():
+                eval_action = actor.deterministic(
+                    normalize_state(eval_state_t),
+                    normalize_goal(eval_goal_t),
+                )
+
+            return (
+                eval_action
+                .squeeze(0)
+                .cpu()
+                .numpy()
+            )
+
+        (
+            mean_return,
+            mean_length,
+            success_rate,
+            mean_final_distance,
+        ) = evaluate_policy_with_success(
+            eval_env,
+            eval_policy,
+            goal=training_goal,
+            episodes=8,
+            seed=seed + 100_000 + global_step,
+        )
+
+        eval_returns.append(
+            (
+                global_step,
+                mean_return,
+            )
+        )
+
+        eval_success_rates.append(
+            (
+                global_step,
+                success_rate,
+            )
+        )
+
+        eval_final_distances.append(
+            (
+                global_step,
+                mean_final_distance,
+            )
+        )
+
+        if normalize_state_inputs:
+            state_std = torch.sqrt(
+                state_rms.var
+            ).detach().cpu().numpy()
+
+            state_norm_string = (
+                f"StateNormCount="
+                f"{state_rms.count.item():.0f} | "
+                f"StateStdMin={state_std.min():.6f} | "
+                f"StateStdMax={state_std.max():.6f} | "
+            )
+
+        else:
+            state_norm_string = ""
+
+        print(
+            "[SAC-TBTRL-Independent] "
+            f"step={global_step:7d} | "
+            f"return={mean_return:.3f} | "
+            f"len={mean_length:.1f} | "
+            f"Success={success_rate:.3f} | "
+            f"FinalDist={mean_final_distance:.4f} | "
+            f"TD1={current_td_loss1_value.item():.5f} | "
+            f"TD2={current_td_loss2_value.item():.5f} | "
+            f"Replay1={old_replay_loss1_value.item():.5f} | "
+            f"Replay2={old_replay_loss2_value.item():.5f} | "
+            f"Critic1={current_critic1_total_value.item():.5f} | "
+            f"Critic2={current_critic2_total_value.item():.5f} | "
+            f"C1Grad={current_critic1_grad_norm_value.item():.5f} | "
+            f"C2Grad={current_critic2_grad_norm_value.item():.5f} | "
+            f"SIG1={current_sigreg1_value.item():.6f} | "
+            f"SIG2={current_sigreg2_value.item():.6f} | "
+            f"GoalSep1="
+            f"{current_goal_separation1_value.item():.6f} | "
+            f"GoalSep2="
+            f"{current_goal_separation2_value.item():.6f} | "
+            f"PhiNorm1="
+            f"{current_phi_norm1_value.item():.6f} | "
+            f"PhiNorm2="
+            f"{current_phi_norm2_value.item():.6f} | "
+            f"PsiNorm1="
+            f"{current_psi_norm1_value.item():.6f} | "
+            f"PsiNorm2="
+            f"{current_psi_norm2_value.item():.6f} | "
+            f"Phi1MeanNorm="
+            f"{current_phi1_norm_value.item():.3f} | "
+            f"Phi2MeanNorm="
+            f"{current_phi2_norm_value.item():.3f} | "
+            f"Psi1MeanNorm="
+            f"{current_psi1_norm_value.item():.3f} | "
+            f"Psi2MeanNorm="
+            f"{current_psi2_norm_value.item():.3f} | "
+            f"PsiMaxCos=("
+            f"{current_psi1_max_cosine_value.item():.3f},"
+            f"{current_psi2_max_cosine_value.item():.3f}"
+            f") | "
+            f"ActorLoss={current_actor_loss_value.item():.5f} | "
+            f"Alpha={current_ent_coef_value.item():.5f} | "
+            f"AlphaLoss="
+            f"{current_ent_coef_loss_value.item():.5f} | "
+            f"LogProb={current_log_prob_value.item():.5f} | "
+            f"Entropy={current_entropy_value.item():.5f} | "
+            f"Qpi={current_q_pi_value.item():.5f} | "
+            f"Qdata={current_q_data_value.item():.5f} | "
+            f"MeanAbsPi={current_pi_abs_value.item():.5f} | "
+            f"PiSat={current_pi_saturation_value.item():.3f} | "
+            f"ActorGrad="
+            f"{current_actor_grad_norm_value.item():.5f} | "
+            f"{state_norm_string}"
+            f"ReplayTasks={len(replay_batches)}"
+        )
+
+        eval_env.close()
+
+        if early_stop_success_rate is not None:
+            criterion_met = (
+                success_rate
+                >= early_stop_success_rate
+            )
+
+        else:
+            criterion_met = (
+                mean_return
+                >= early_stop_reward
+            )
+
+        if criterion_met:
+            success_streak += 1
+        else:
+            success_streak = 0
+
+        if (
+            enable_early_stop
+            and success_streak
+            >= early_stop_patience
+        ):
+            min_steps = global_step
+
+            min_time = (
+                time.perf_counter()
+                - start_time
+            )
+
+            print(
+                f"Early stopping at step={global_step}, "
+                f"return={mean_return:.3f}, "
+                f"success={success_rate:.3f}, "
+                f"streak={success_streak}"
+            )
+
+            break
+
+    # =========================================================
+    # Final outputs
+    # =========================================================
+
+    if min_steps is None:
+        min_steps = global_step
+
+        min_time = (
+            time.perf_counter()
+            - start_time
+        )
+
+    env.close()
+
+    return (
+        actor,
+        critic,
+        critic_target,
+        eval_returns,
+        eval_success_rates,
+        eval_final_distances,
+        min_steps,
+        min_time,
+        buffer,
+    )
+
+def td3_train_tbtrl_separated(
+    seed: int = 42,
+    actor: nn.Module = None,
+    actor_target: nn.Module = None,
+    critic: nn.Module = None,
+    critic_target: nn.Module = None,
+    env=None,
+    buffer_capacity: int = None,
+    lr_actor: float = 3e-4,
+    lr_critic: float = 3e-4,
+    obs_dim: int = None,
+    action_dim: int = None,
+    device: torch.device = None,
+    total_steps: int = 300_000,
+    warmup_steps: int = 25_000,
+    batch_size: int = 256,
+    eval_freq: int = 5_000,
+    gamma: float = 0.99,
+    tau: float = 0.005,
+    train_freq: int = 1,
+    gradient_steps: int = 1,
+    goal: np.ndarray = None,
+    task_id: int = None,
+    make_env=None,
+    env_id: str = None,
+
+    replay_task_buffers: Optional[Dict[int, Any]] = None,
+    task_goals: Optional[Dict[int, np.ndarray]] = None,
+
+    replay_ratio: float = 0.0,
+    replay_tasks_per_batch: Optional[int] = None,
+    replay_loss_coef: float = 1.0,
+
+    bootstrap_on_truncation: bool = True,
+
+    normalize_state_inputs: bool = False,
+    normalize_goal_inputs: bool = False,
+    obs_norm_clip: float = 10.0,
+
+    early_stop_reward: float = -0.05,
+    early_stop_success_rate: float | None = None,
+    early_stop_patience: int = 5,
+    enable_early_stop: bool = True,
+
+    # TBTRL critic-only regularisation.
+    sigreg_coef: float = 0.0,
+    sketch_dim: int = 64,
+
+    goal_separation_coef: float = 0.0,
+    goal_separation_target_cosine: float = 0.85,
+
+    phi_raw_norm_coef: float = 0.0,
+    psi_raw_norm_coef: float = 0.0,
+
+    phi_norm_target: float | None = None,
+    psi_norm_target: float | None = None,
+
+    reset_target_from_actor_critic: bool = True,
+
+    # TD3-specific hyperparameters
+    policy_noise: float = 0.2,
+    noise_clip: float = 0.5,
+    policy_delay: int = 2,
+
+    # HER configuration.
+    use_her: bool = False,
+    her_ratio: float = 0.8,
+
+    q_target_min=-50,
+    q_target_max= 50,
+    critic_grad_clip_norm=10.0,
+    actor_grad_clip_norm=10.0,
+):
+    """
+    Factorised TD3-TBTRL trainer with independent critic branches
+    and optional Hindsight Experience Replay (HER).
+
+    TD3 bootstrap target:
+        y = r + gamma * mask *
+            min(Q1_target(s', mu_target(s') + noise, g),
+                Q2_target(s', mu_target(s') + noise, g))
+
+    Critic 1:
+        L1 = TD1_current
+           + replay_loss_coef * TD1_replay
+           + sigreg_coef * SIGReg(phi1)
+           + goal_separation_coef * GoalSeparation(psi1)
+           + phi_raw_norm_coef * Norm(phi1)
+           + psi_raw_norm_coef * Norm(psi1)
+
+    Critic 2:
+        L2 = TD2_current
+           + replay_loss_coef * TD2_replay
+           + sigreg_coef * SIGReg(phi2)
+           + goal_separation_coef * GoalSeparation(psi2)
+           + phi_raw_norm_coef * Norm(phi2)
+           + psi_raw_norm_coef * Norm(psi2)
+
+    Actor:
+        L_actor = - E[ Q1(s, mu(s,g), g) ]
+
+    HER (when use_her=True):
+        A fraction her_ratio of each batch is relabelled with the
+        next achieved goal (one-step hindsight). This turns many
+        "failures" into "successes" for some goal, improving the
+        learning signal without changing TBTRL's replay structure.
+
+    Required factorised critic API:
+        critic.q1_forward(state, action, goal)
+        critic.q2_forward(state, action, goal)
+
+        critic.phi1_forward(state, action)
+        critic.psi1_forward(goal)
+
+        critic.phi2_forward(state, action)
+        critic.psi2_forward(goal)
+
+    Required actor API:
+        actor.deterministic(state, goal) -> action
+
+    Strongly recommended extra API:
+        critic.critic1_parameters()
+        critic.critic2_parameters()
+
+    Those methods must return disjoint parameter iterables.
+    """
+
+    # =========================================================
+    # Validation
+    # =========================================================
+
+    if actor is None:
+        raise ValueError("actor must be provided.")
+
+    if actor_target is None:
+        raise ValueError("actor_target must be provided.")
+
+    if critic is None:
+        raise ValueError("critic must be provided.")
+
+    if critic_target is None:
+        raise ValueError("critic_target must be provided.")
+
+    if env is None:
+        raise ValueError("env must be provided.")
+
+    if buffer_capacity is None:
+        raise ValueError("buffer_capacity must be provided.")
+
+    if goal is None:
+        raise ValueError("goal must be provided.")
+
+    if task_id is None:
+        raise ValueError("task_id must be provided.")
+
+    if not isinstance(task_id, (int, np.integer)):
+        raise TypeError("task_id must be an integer.")
+
+    if make_env is None:
+        raise ValueError("make_env must be provided.")
+
+    if warmup_steps < 0:
+        raise ValueError("warmup_steps must be >= 0.")
+
+    if batch_size < 1:
+        raise ValueError("batch_size must be >= 1.")
+
+    if train_freq < 1:
+        raise ValueError("train_freq must be >= 1.")
+
+    if gradient_steps < 1:
+        raise ValueError("gradient_steps must be >= 1.")
+
+    if not 0.0 < tau <= 1.0:
+        raise ValueError("tau must be in (0, 1].")
+
+    if not 0.0 <= gamma <= 1.0:
+        raise ValueError("gamma must be in [0, 1].")
+
+    if obs_norm_clip <= 0.0:
+        raise ValueError("obs_norm_clip must be positive.")
+
+    if sigreg_coef < 0.0:
+        raise ValueError("sigreg_coef must be >= 0.")
+
+    if goal_separation_coef < 0.0:
+        raise ValueError("goal_separation_coef must be >= 0.")
+
+    if phi_raw_norm_coef < 0.0:
+        raise ValueError("phi_raw_norm_coef must be >= 0.")
+
+    if psi_raw_norm_coef < 0.0:
+        raise ValueError("psi_raw_norm_coef must be >= 0.")
+
+    if not -1.0 <= goal_separation_target_cosine <= 1.0:
+        raise ValueError(
+            "goal_separation_target_cosine must be "
+            "within [-1, 1]."
+        )
+
+    if not 0.0 <= her_ratio <= 1.0:
+        raise ValueError(
+            "her_ratio must be in [0, 1]."
+        )
+
+    # =========================================================
+    # Device, dimensions, seed
+    # =========================================================
+
+    if device is None:
+        device = next(critic.parameters()).device
+
+    device = torch.device(device)
+
+    if obs_dim is None:
+        obs_dim = (
+            int(
+                env.observation_space[
+                    "observation"
+                ].shape[0]
+            )
+            + int(
+                env.observation_space[
+                    "achieved_goal"
+                ].shape[0]
+            )
+        )
+
+    if action_dim is None:
+        action_dim = int(
+            env.action_space.shape[0]
+        )
+
+    goal_dim = int(
+        env.observation_space[
+            "desired_goal"
+        ].shape[0]
+    )
+
+    set_seed(seed)
+
+    if replay_task_buffers is None:
+        replay_task_buffers = {}
+
+    if task_goals is None:
+        task_goals = {}
+
+    training_goal = np.asarray(
+        goal,
+        dtype=np.float32,
+    ).copy()
+
+    if training_goal.shape != (goal_dim,):
+        raise ValueError(
+            f"goal has shape {training_goal.shape}; "
+            f"expected ({goal_dim},)."
+        )
+
+    task_goals[task_id] = training_goal.copy()
+
+    actor = actor.to(device)
+    actor_target = actor_target.to(device)
+    critic = critic.to(device)
+    critic_target = critic_target.to(device)
+
+    # =========================================================
+    # Target actor and critic setup
+    # =========================================================
+
+    if reset_target_from_actor_critic:
+        actor_target.load_state_dict(actor.state_dict())
+        critic_target.load_state_dict(critic.state_dict())
+
+    actor.train()
+    actor_target.eval()
+    for parameter in actor_target.parameters():
+        parameter.requires_grad_(False)
+
+    critic.train()
+    critic_target.eval()
+    for parameter in critic_target.parameters():
+        parameter.requires_grad_(False)
+
+    # =========================================================
+    # Validate factorised critic API
+    # =========================================================
+
+    required_methods = [
+        "q1_forward",
+        "q2_forward",
+        "phi1_forward",
+        "psi1_forward",
+        "phi2_forward",
+        "psi2_forward",
+    ]
+
+    missing_methods = [
+        method_name
+        for method_name in required_methods
+        if not hasattr(critic, method_name)
+    ]
+
+    if len(missing_methods) > 0:
+        raise AttributeError(
+            "Factorised critic is missing required methods: "
+            f"{missing_methods}."
+        )
+
+    # =========================================================
+    # Action bounds
+    # =========================================================
+
+    action_low = torch.as_tensor(
+        env.action_space.low,
+        dtype=torch.float32,
+        device=device,
+    ).view(1, -1)
+
+    action_high = torch.as_tensor(
+        env.action_space.high,
+        dtype=torch.float32,
+        device=device,
+    ).view(1, -1)
+
+    if action_low.shape[-1] != action_dim:
+        raise RuntimeError(
+            "Action-space bounds do not match action_dim."
+        )
+
+    if not (
+        torch.allclose(
+            action_low,
+            -torch.ones_like(action_low),
+        )
+        and torch.allclose(
+            action_high,
+            torch.ones_like(action_high),
+        )
+    ):
+        raise ValueError(
+            "This TD3 actor assumes action bounds [-1, 1]."
+        )
+
+    # =========================================================
+    # Independent critic parameter groups
+    # =========================================================
+
+    def unique_parameters(parameters):
+        seen_parameter_ids = set()
+        unique = []
+
+        for parameter in parameters:
+            if not parameter.requires_grad:
+                continue
+
+            parameter_id = id(parameter)
+
+            if parameter_id not in seen_parameter_ids:
+                unique.append(parameter)
+                seen_parameter_ids.add(parameter_id)
+
+        return unique
+
+    def critic_parameter_groups():
+        if (
+            hasattr(critic, "critic1_parameters")
+            and hasattr(critic, "critic2_parameters")
+        ):
+            critic1_params = unique_parameters(
+                list(critic.critic1_parameters())
+            )
+
+            critic2_params = unique_parameters(
+                list(critic.critic2_parameters())
+            )
+
+        else:
+            raise AttributeError(
+                "The critic must expose critic1_parameters() "
+                "and critic2_parameters() returning the two "
+                "disjoint parameter groups. This is required "
+                "to guarantee branch-specific optimisation."
+            )
+
+        if len(critic1_params) == 0:
+            raise RuntimeError(
+                "critic1_parameters() returned no trainable "
+                "parameters."
+            )
+
+        if len(critic2_params) == 0:
+            raise RuntimeError(
+                "critic2_parameters() returned no trainable "
+                "parameters."
+            )
+
+        critic1_ids = {
+            id(parameter)
+            for parameter in critic1_params
+        }
+
+        critic2_ids = {
+            id(parameter)
+            for parameter in critic2_params
+        }
+
+        shared_ids = critic1_ids.intersection(
+            critic2_ids
+        )
+
+        if len(shared_ids) > 0:
+            raise RuntimeError(
+                "Critic 1 and critic 2 share trainable "
+                "parameters. Fully separate phi1/psi1/q1 "
+                "from phi2/psi2/q2 before using independent "
+                "TBTRL losses."
+            )
+
+        all_critic_ids = {
+            id(parameter)
+            for parameter in critic.parameters()
+            if parameter.requires_grad
+        }
+
+        grouped_ids = critic1_ids.union(critic2_ids)
+        missing_ids = all_critic_ids.difference(
+            grouped_ids
+        )
+
+        if len(missing_ids) > 0:
+            raise RuntimeError(
+                "Some trainable critic parameters are absent "
+                "from both critic parameter groups. Put every "
+                "critic parameter in exactly one branch, or "
+                "make it non-trainable."
+            )
+
+        return critic1_params, critic2_params
+
+    critic1_params, critic2_params = (
+        critic_parameter_groups()
+    )
+
+    # =========================================================
+    # Optimisers and replay buffer
+    # =========================================================
+
+    opt_actor = optim.AdamW(
+        actor.parameters(),
+        lr=lr_actor,
+    )
+
+    opt_critic1 = optim.AdamW(
+        critic1_params,
+        lr=lr_critic,
+    )
+
+    opt_critic2 = optim.AdamW(
+        critic2_params,
+        lr=lr_critic,
+    )
+
+    buffer = TrajectoryReplayBufferContinuous(
+        buffer_capacity,
+        obs_dim,
+        action_dim,
+        device=device,
+    )
+
+    # =========================================================
+    # Input normalisers
+    # =========================================================
+
+    state_rms = RunningMeanStd(
+        shape=(obs_dim,),
+        device=device,
+    )
+
+    goal_rms = RunningMeanStd(
+        shape=(goal_dim,),
+        device=device,
+    )
+
+    # =========================================================
+    # Generic helpers
+    # =========================================================
+
+    def split_fetch_obs(obs_dict):
+        observation = np.asarray(
+            obs_dict["observation"],
+            dtype=np.float32,
+        )
+
+        achieved_goal = np.asarray(
+            obs_dict["achieved_goal"],
+            dtype=np.float32,
+        )
+
+        desired_goal = np.asarray(
+            obs_dict["desired_goal"],
+            dtype=np.float32,
+        )
+
+        state = np.concatenate(
+            [
+                observation,
+                achieved_goal,
+            ],
+            axis=-1,
+        ).astype(np.float32)
+
+        return state, desired_goal
+
+    def goal_batch_for(
+        goal_value,
+        requested_batch_size: int,
+        target_device: torch.device,
+    ) -> torch.Tensor:
+        if isinstance(goal_value, torch.Tensor):
+            goal_batch = goal_value.to(
+                device=target_device,
+                dtype=torch.float32,
+            )
+        else:
+            goal_batch = torch.as_tensor(
+                np.asarray(
+                    goal_value,
+                    dtype=np.float32,
+                ),
+                dtype=torch.float32,
+                device=target_device,
+            )
+
+        if goal_batch.ndim == 1:
+            goal_batch = goal_batch.unsqueeze(0)
+
+        if goal_batch.ndim != 2:
+            raise ValueError(
+                "Goal must be [goal_dim] or "
+                f"[B, goal_dim]. "
+                f"Got {tuple(goal_batch.shape)}."
+            )
+
+        if goal_batch.shape[0] == 1:
+            goal_batch = goal_batch.expand(
+                requested_batch_size,
+                -1,
+            )
+
+        elif goal_batch.shape[0] != requested_batch_size:
+            raise ValueError(
+                "Goal batch size does not match "
+                "transition batch size."
+            )
+
+        return goal_batch
+
+    def normalize_state(
+        state_tensor: torch.Tensor,
+    ) -> torch.Tensor:
+        if not normalize_state_inputs:
+            return state_tensor
+
+        return state_rms.normalize(
+            state_tensor,
+            clip=obs_norm_clip,
+        )
+
+    def normalize_goal(
+        goal_tensor: torch.Tensor,
+    ) -> torch.Tensor:
+        if not normalize_goal_inputs:
+            return goal_tensor
+
+        return goal_rms.normalize(
+            goal_tensor,
+            clip=obs_norm_clip,
+        )
+
+    def zero_scalar() -> torch.Tensor:
+        return torch.zeros(
+            (),
+            dtype=torch.float32,
+            device=device,
+        )
+
+    def set_requires_grad(
+        parameters,
+        requires_grad: bool,
+    ) -> None:
+        for parameter in parameters:
+            parameter.requires_grad_(requires_grad)
+
+    def polyak_update() -> None:
+        with torch.no_grad():
+            # Critic
+            for online_parameter, target_parameter in zip(
+                critic.parameters(),
+                critic_target.parameters(),
+            ):
+                target_parameter.mul_(1.0 - tau).add_(
+                    online_parameter,
+                    alpha=tau,
+                )
+
+            # Actor
+            for online_parameter, target_parameter in zip(
+                actor.parameters(),
+                actor_target.parameters(),
+            ):
+                target_parameter.mul_(1.0 - tau).add_(
+                    online_parameter,
+                    alpha=tau,
+                )
+
+    # =========================================================
+    # Fetch-specific helpers: on-the-fly reward/termination
+    # =========================================================
+
+    def extract_achieved_goal_from_obs(
+        obs: torch.Tensor,
+        goal_dim: int,
+    ) -> torch.Tensor:
+        """
+        Fetch-specific helper.
+
+        The observation is [observation; achieved_goal],
+        where achieved_goal is the last goal_dim dimensions.
+        """
+        return obs[..., -goal_dim:]
+
+    def fetch_reward_and_termination(
+        next_achieved_goal: torch.Tensor,
+        desired_goal: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Fetch-style sparse reward and termination.
+
+        Reward:
+            0 if the next achieved goal is within 0.05
+            of the desired goal, otherwise -1.
+
+        Termination:
+            true when the next achieved goal is within 0.05.
+        """
+        distance = torch.linalg.vector_norm(
+            next_achieved_goal - desired_goal,
+            dim=-1,
+            keepdim=True,
+        )
+
+        success = distance <= 0.05
+
+        rewards = torch.where(
+            success,
+            torch.zeros_like(distance),
+            -torch.ones_like(distance),
+        )
+
+        terminated = success.float()
+
+        return rewards, terminated
+
+    # =========================================================
+    # HER helper: one-step hindsight relabelling
+    # =========================================================
+
+    def apply_her_to_batch(
+        batch,
+        original_goal_batch: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Relabel a fraction of transitions with their next achieved goal.
+
+        This is a one-step hindsight relabelling scheme. It preserves
+        the batch size and is compatible with the existing buffer API.
+
+        The returned goals have shape [B, goal_dim].
+        """
+        if not use_her or her_ratio <= 0.0:
+            return original_goal_batch
+
+        if original_goal_batch.ndim == 1:
+            original_goal_batch = (
+                original_goal_batch.unsqueeze(0)
+            )
+
+        batch_size_local = batch.obs.shape[0]
+
+        if original_goal_batch.shape[0] != batch_size_local:
+            raise ValueError(
+                "Goal batch size does not match transition "
+                "batch size in HER."
+            )
+
+        num_relabelled = int(
+            round(batch_size_local * her_ratio)
+        )
+
+        if num_relabelled <= 0:
+            return original_goal_batch
+
+        next_achieved_goal = (
+            extract_achieved_goal_from_obs(
+                batch.next_obs,
+                goal_dim=goal_dim,
+            )
+        )
+
+        permutation = torch.randperm(
+            batch_size_local,
+            device=batch.next_obs.device,
+        )
+
+        her_indices = permutation[:num_relabelled]
+
+        relabelled_goals = original_goal_batch.clone()
+
+        relabelled_goals[her_indices] = (
+            next_achieved_goal[her_indices]
+        )
+
+        return relabelled_goals
+
+    # =========================================================
+    # TD3 target and independent TD losses
+    # =========================================================
+
+    def td_target(
+        batch,
+        raw_goal_batch: torch.Tensor,
+    ) -> torch.Tensor:
+        # Compute reward and termination on the fly from goals.
+        desired_goal = raw_goal_batch
+
+        if desired_goal.ndim == 1:
+            desired_goal = desired_goal.unsqueeze(0)
+
+        desired_goal = desired_goal.to(
+            device=batch.next_obs.device,
+            dtype=torch.float32,
+        )
+
+        next_achieved_goal = extract_achieved_goal_from_obs(
+            batch.next_obs,
+            goal_dim=goal_dim,
+        )
+
+        rewards, terminated = fetch_reward_and_termination(
+            next_achieved_goal=next_achieved_goal,
+            desired_goal=desired_goal,
+        )
+
+        if rewards.ndim == 1:
+            rewards = rewards.unsqueeze(-1)
+
+        if terminated.ndim == 1:
+            terminated = terminated.unsqueeze(-1)
+
+        next_state = normalize_state(batch.next_obs)
+
+        next_goal = normalize_goal(
+            goal_batch_for(
+                desired_goal,
+                batch.next_obs.shape[0],
+                batch.next_obs.device,
+            )
+        )
+
+        with torch.no_grad():
+            # Deterministic target policy with clipped noise
+            next_action = actor_target.deterministic(
+                next_state,
+                next_goal,
+            )
+
+            noise = (
+                torch.randn_like(next_action)
+                * policy_noise
+            )
+
+            noise = noise.clamp(
+                -noise_clip,
+                noise_clip,
+            )
+
+            next_action = (
+                next_action + noise
+            ).clamp(
+                action_low.squeeze(0),
+                action_high.squeeze(0),
+            )
+
+            next_q1 = critic_target.q1_forward(
+                next_state,
+                next_action,
+                next_goal,
+            )
+
+            next_q2 = critic_target.q2_forward(
+                next_state,
+                next_action,
+                next_goal,
+            )
+
+            next_q = torch.minimum(next_q1, next_q2)
+
+            if bootstrap_on_truncation:
+                bootstrap_mask = 1.0 - terminated.float()
+            else:
+                truncated = batch.truncated
+
+                if truncated.ndim == 1:
+                    truncated = truncated.unsqueeze(-1)
+
+                done = torch.logical_or(
+                    terminated.bool(),
+                    truncated.bool(),
+                ).float()
+
+                bootstrap_mask = 1.0 - done
+
+            target = rewards + gamma * bootstrap_mask * next_q
+
+        return target
+
+    def critic_td_losses(
+        batch,
+        raw_goal_batch: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        target = td_target(
+            batch,
+            raw_goal_batch,
+        )
+
+        state = normalize_state(batch.obs)
+        goal_batch = normalize_goal(raw_goal_batch)
+
+        q1 = critic.q1_forward(
+            state,
+            batch.actions,
+            goal_batch,
+        )
+
+        q2 = critic.q2_forward(
+            state,
+            batch.actions,
+            goal_batch,
+        )
+
+        td_loss1 = F.mse_loss(q1, target)
+        td_loss2 = F.mse_loss(q2, target)
+
+        return td_loss1, td_loss2
+
+    # =========================================================
+    # TBTRL helpers: fully branch-separated
+    # =========================================================
+
+    def seen_goals_tensor() -> torch.Tensor:
+        seen_task_ids = sorted(task_goals.keys())
+
+        return torch.as_tensor(
+            np.asarray(
+                [
+                    task_goals[seen_task_id]
+                    for seen_task_id in seen_task_ids
+                ],
+                dtype=np.float32,
+            ),
+            dtype=torch.float32,
+            device=device,
+        )
+
+    def resolve_norm_target(
+        name: str,
+        supplied_target: float | None,
+    ) -> float:
+        if supplied_target is not None:
+            target = float(supplied_target)
+
+        elif name == "phi":
+            target = float(
+                getattr(
+                    critic,
+                    "phi_max_norm",
+                    10.1,
+                )
+            ) - 0.1
+
+        elif name == "psi":
+            target = float(
+                getattr(
+                    critic,
+                    "psi_max_norm",
+                    10.1,
+                )
+            ) - 0.1
+
+        else:
+            raise ValueError(
+                f"Unknown embedding name: {name}."
+            )
+
+        if target <= 0.0:
+            raise ValueError(
+                f"{name}_norm_target must be positive, "
+                f"got {target}."
+            )
+
+        return target
+
+    def soft_excess_norm_loss(
+        embeddings: torch.Tensor,
+        target_norm: float,
+    ) -> torch.Tensor:
+        norms = embeddings.norm(
+            p=2,
+            dim=-1,
+        )
+
+        return F.relu(
+            norms - target_norm
+        ).mean()
+
+    def head_goal_separation_loss(
+        psi: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        n_goals = psi.shape[0]
+
+        if n_goals < 2:
+            return zero_scalar(), zero_scalar()
+
+        normalized_psi = F.normalize(
+            psi,
+            p=2,
+            dim=-1,
+            eps=1e-8,
+        )
+
+        cosine_matrix = (
+            normalized_psi @ normalized_psi.T
+        )
+
+        off_diagonal_mask = ~torch.eye(
+            n_goals,
+            dtype=torch.bool,
+            device=device,
+        )
+
+        off_diagonal_cosines = cosine_matrix[
+            off_diagonal_mask
+        ]
+
+        separation_loss = F.relu(
+            off_diagonal_cosines
+            - goal_separation_target_cosine
+        ).mean()
+
+        return (
+            separation_loss,
+            off_diagonal_cosines.max().detach(),
+        )
+
+    def tbtrl_sigreg_losses(
+        state: torch.Tensor,
+        action: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if sigreg_coef <= 0.0:
+            return zero_scalar(), zero_scalar()
+
+        phi1 = critic.phi1_forward(
+            state,
+            action,
+        )
+
+        phi2 = critic.phi2_forward(
+            state,
+            action,
+        )
+
+        sigreg1 = sigreg_loss(
+            phi1,
+            sketch_dim=sketch_dim,
+        )
+
+        sigreg2 = sigreg_loss(
+            phi2,
+            sketch_dim=sketch_dim,
+        )
+
+        return sigreg1, sigreg2
+
+    def mixed_phi_regularisation_batch(
+        current_batch,
+        replay_batches,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        state_chunks = [current_batch.obs]
+        action_chunks = [current_batch.actions]
+
+        for _, old_batch in replay_batches:
+            state_chunks.append(old_batch.obs)
+            action_chunks.append(old_batch.actions)
+
+        mixed_states = torch.cat(state_chunks, dim=0)
+        mixed_actions = torch.cat(action_chunks, dim=0)
+
+        return normalize_state(mixed_states), mixed_actions
+
+    def tbtrl_goal_separation_losses() -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+    ]:
+        if (
+            goal_separation_coef <= 0.0
+            or len(task_goals) <= 1
+        ):
+            return (
+                zero_scalar(),
+                zero_scalar(),
+                zero_scalar(),
+                zero_scalar(),
+            )
+
+        all_seen_goals = normalize_goal(
+            seen_goals_tensor()
+        )
+
+        psi1_all = critic.psi1_forward(
+            all_seen_goals
+        )
+
+        psi2_all = critic.psi2_forward(
+            all_seen_goals
+        )
+
+        goal_sep1, max_cosine1 = (
+            head_goal_separation_loss(psi1_all)
+        )
+
+        goal_sep2, max_cosine2 = (
+            head_goal_separation_loss(psi2_all)
+        )
+
+        return (
+            goal_sep1,
+            goal_sep2,
+            max_cosine1,
+            max_cosine2,
+        )
+
+    def tbtrl_norm_losses(
+        state: torch.Tensor,
+        action: torch.Tensor,
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        dict[str, torch.Tensor],
+    ]:
+        phi1 = critic.phi1_forward(
+            state,
+            action,
+        )
+
+        phi2 = critic.phi2_forward(
+            state,
+            action,
+        )
+
+        all_seen_goals = normalize_goal(
+            seen_goals_tensor()
+        )
+
+        psi1_all = critic.psi1_forward(
+            all_seen_goals
+        )
+
+        psi2_all = critic.psi2_forward(
+            all_seen_goals
+        )
+
+        phi_target = resolve_norm_target(
+            "phi",
+            phi_norm_target,
+        )
+
+        psi_target = resolve_norm_target(
+            "psi",
+            psi_norm_target,
+        )
+
+        phi_norm1 = soft_excess_norm_loss(
+            phi1,
+            phi_target,
+        )
+
+        psi_norm1 = soft_excess_norm_loss(
+            psi1_all,
+            psi_target,
+        )
+
+        phi_norm2 = soft_excess_norm_loss(
+            phi2,
+            phi_target,
+        )
+
+        psi_norm2 = soft_excess_norm_loss(
+            psi2_all,
+            psi_target,
+        )
+
+        statistics = {
+            "phi1_norm": phi1.norm(
+                p=2,
+                dim=-1,
+            ).mean().detach(),
+
+            "phi2_norm": phi2.norm(
+                p=2,
+                dim=-1,
+            ).mean().detach(),
+
+            "psi1_norm": psi1_all.norm(
+                p=2,
+                dim=-1,
+            ).mean().detach(),
+
+            "psi2_norm": psi2_all.norm(
+                p=2,
+                dim=-1,
+            ).mean().detach(),
+        }
+
+        return (
+            phi_norm1,
+            psi_norm1,
+            phi_norm2,
+            psi_norm2,
+            statistics,
+        )
+
+    # =========================================================
+    # Training state
+    # =========================================================
+
+    obs_dict, _ = env.reset()
+
+    global_step = 0
+    update_count = 0
+    success_streak = 0
+
+    start_time = time.perf_counter()
+
+    eval_returns = []
+    eval_success_rates = []
+    eval_final_distances = []
+
+    min_steps = None
+    min_time = None
+
+    zero = zero_scalar()
+
+    current_td_loss1_value = zero
+    current_td_loss2_value = zero
+
+    old_replay_loss1_value = zero
+    old_replay_loss2_value = zero
+
+    current_critic1_total_value = zero
+    current_critic2_total_value = zero
+
+    current_critic1_grad_norm_value = zero
+    current_critic2_grad_norm_value = zero
+    current_actor_grad_norm_value = zero
+
+    current_actor_loss_value = zero
+
+    current_sigreg1_value = zero
+    current_sigreg2_value = zero
+
+    current_goal_separation1_value = zero
+    current_goal_separation2_value = zero
+
+    current_phi_norm1_value = zero
+    current_phi_norm2_value = zero
+
+    current_psi_norm1_value = zero
+    current_psi_norm2_value = zero
+
+    current_phi1_norm_value = zero
+    current_phi2_norm_value = zero
+    current_psi1_norm_value = zero
+    current_psi2_norm_value = zero
+
+    current_psi1_max_cosine_value = zero
+    current_psi2_max_cosine_value = zero
+
+    # =========================================================
+    # Main TD3 training loop
+    # =========================================================
+
+    while global_step < total_steps:
+
+        # -----------------------------------------------------
+        # Data collection
+        # -----------------------------------------------------
+
+        state, current_goal = split_fetch_obs(
+            obs_dict
+        )
+
+        state_t = torch.as_tensor(
+            state,
+            dtype=torch.float32,
+            device=device,
+        ).unsqueeze(0)
+
+        goal_t = torch.as_tensor(
+            current_goal,
+            dtype=torch.float32,
+            device=device,
+        ).unsqueeze(0)
+
+        with torch.no_grad():
+            state_rms.update(state_t)
+
+            if normalize_goal_inputs:
+                goal_rms.update(goal_t)
+
+        if global_step < warmup_steps:
+            action = env.action_space.sample().astype(
+                np.float32
+            )
+
+        else:
+            with torch.no_grad():
+                action_t = actor.deterministic(
+                    normalize_state(state_t),
+                    normalize_goal(goal_t),
+                )
+
+            action = (
+                action_t.squeeze(0)
+                .cpu()
+                .numpy()
+                .astype(np.float32)
+            )
+
+        (
+            next_obs_dict,
+            reward,
+            terminated,
+            truncated,
+            _,
+        ) = env.step(action)
+
+        next_state, next_goal = split_fetch_obs(
+            next_obs_dict
+        )
+
+        with torch.no_grad():
+            next_state_t = torch.as_tensor(
+                next_state,
+                dtype=torch.float32,
+                device=device,
+            ).unsqueeze(0)
+
+            state_rms.update(next_state_t)
+
+            if normalize_goal_inputs:
+                next_goal_t = torch.as_tensor(
+                    next_goal,
+                    dtype=torch.float32,
+                    device=device,
+                ).unsqueeze(0)
+
+                goal_rms.update(next_goal_t)
+
+        buffer.add_transition(
+            obs=state,
+            action=action,
+            reward=reward,
+            next_obs=next_state,
+            terminated=terminated,
+            truncated=truncated,
+        )
+
+        obs_dict = next_obs_dict
+        global_step += 1
+
+        if terminated or truncated:
+            obs_dict, _ = env.reset()
+
+        if len(buffer) < warmup_steps:
+            continue
+
+        if global_step % train_freq != 0:
+            continue
+
+        # -----------------------------------------------------
+        # Gradient updates
+        # -----------------------------------------------------
+
+        for _ in range(gradient_steps):
+
+            current_batch = buffer.sample(batch_size)
+
+            current_goal_tensor = goal_batch_for(
+                training_goal,
+                current_batch.obs.shape[0],
+                device,
+            )
+
+            # -------------------------------------------------
+            # Select old-task replay batches
+            # -------------------------------------------------
+
+            eligible_old_task_ids = []
+
+            for old_task_id, old_buffer in (
+                replay_task_buffers.items()
+            ):
+                if old_buffer is None:
+                    continue
+
+                if len(old_buffer) < 1:
+                    continue
+
+                if old_task_id not in task_goals:
+                    raise KeyError(
+                        f"Missing goal for replay task "
+                        f"{old_task_id}."
+                    )
+
+                eligible_old_task_ids.append(
+                    old_task_id
+                )
+
+            replay_batches = []
+
+            if (
+                len(eligible_old_task_ids) > 0
+                and replay_ratio > 0.0
+            ):
+                if replay_tasks_per_batch is None:
+                    n_old_tasks = len(
+                        eligible_old_task_ids
+                    )
+                else:
+                    n_old_tasks = min(
+                        int(replay_tasks_per_batch),
+                        len(eligible_old_task_ids),
+                    )
+
+                cycle_index = (
+                    update_count
+                    % len(eligible_old_task_ids)
+                )
+
+                ordered_old_task_ids = (
+                    eligible_old_task_ids[cycle_index:]
+                    + eligible_old_task_ids[:cycle_index]
+                )
+
+                selected_old_task_ids = (
+                    ordered_old_task_ids[:n_old_tasks]
+                )
+
+                replay_batch_size = max(
+                    1,
+                    int(
+                        batch_size
+                        * replay_ratio
+                        / n_old_tasks
+                    ),
+                )
+
+                for old_task_id in selected_old_task_ids:
+                    old_buffer = replay_task_buffers[
+                        old_task_id
+                    ]
+
+                    if len(old_buffer) < replay_batch_size:
+                        continue
+
+                    old_batch = old_buffer.sample(
+                        replay_batch_size
+                    )
+
+                    old_goal = task_goals[old_task_id]
+
+                    replay_batches.append(
+                        (
+                            old_goal,
+                            old_batch,
+                        )
+                    )
+
+            # -------------------------------------------------
+            # Apply HER to current and replay batches
+            # -------------------------------------------------
+
+            current_goal_for_td = apply_her_to_batch(
+                current_batch,
+                current_goal_tensor,
+            )
+
+            # -------------------------------------------------
+            # Independent TD losses, common detached target
+            # -------------------------------------------------
+
+            (
+                current_td_loss1,
+                current_td_loss2,
+            ) = critic_td_losses(
+                current_batch,
+                current_goal_for_td,
+            )
+
+            old_td_losses1 = []
+            old_td_losses2 = []
+
+            for old_goal, old_batch in replay_batches:
+                old_goal_tensor = goal_batch_for(
+                    old_goal,
+                    old_batch.obs.shape[0],
+                    device,
+                )
+
+                old_goal_for_td = apply_her_to_batch(
+                    old_batch,
+                    old_goal_tensor,
+                )
+
+                old_td_loss1, old_td_loss2 = (
+                    critic_td_losses(
+                        old_batch,
+                        old_goal_for_td,
+                    )
+                )
+
+                old_td_losses1.append(old_td_loss1)
+                old_td_losses2.append(old_td_loss2)
+
+            if len(old_td_losses1) > 0:
+                old_replay_td_loss1 = torch.stack(
+                    old_td_losses1
+                ).mean()
+
+                old_replay_td_loss2 = torch.stack(
+                    old_td_losses2
+                ).mean()
+
+            else:
+                old_replay_td_loss1 = zero_scalar()
+                old_replay_td_loss2 = zero_scalar()
+
+            # -------------------------------------------------
+            # Independent TBTRL regularisation losses
+            # -------------------------------------------------
+
+            state_for_phi_reg, action_for_phi_reg = (
+                mixed_phi_regularisation_batch(
+                    current_batch,
+                    replay_batches,
+                )
+            )
+
+            (
+                current_sigreg1,
+                current_sigreg2,
+            ) = tbtrl_sigreg_losses(
+                state_for_phi_reg,
+                action_for_phi_reg,
+            )
+
+            (
+                current_goal_separation1,
+                current_goal_separation2,
+                psi1_max_cosine,
+                psi2_max_cosine,
+            ) = tbtrl_goal_separation_losses()
+
+            (
+                phi_norm1,
+                psi_norm1,
+                phi_norm2,
+                psi_norm2,
+                norm_statistics,
+            ) = tbtrl_norm_losses(
+                state_for_phi_reg,
+                action_for_phi_reg,
+            )
+
+            # -------------------------------------------------
+            # Branch-specific critic objectives
+            # -------------------------------------------------
+
+            critic1_total_loss = (
+                current_td_loss1
+                + replay_loss_coef
+                * old_replay_td_loss1
+                + sigreg_coef
+                * current_sigreg1
+                + goal_separation_coef
+                * current_goal_separation1
+                + phi_raw_norm_coef
+                * phi_norm1
+                + psi_raw_norm_coef
+                * psi_norm1
+            )
+
+            critic2_total_loss = (
+                current_td_loss2
+                + replay_loss_coef
+                * old_replay_td_loss2
+                + sigreg_coef
+                * current_sigreg2
+                + goal_separation_coef
+                * current_goal_separation2
+                + phi_raw_norm_coef
+                * phi_norm2
+                + psi_raw_norm_coef
+                * psi_norm2
+            )
+
+            # -------------------------------------------------
+            # Critic 1 update: only phi1 / psi1 / Q1 params
+            # -------------------------------------------------
+
+            opt_critic1.zero_grad(set_to_none=True)
+
+            critic1_total_loss.backward()
+
+            critic1_grad_norm = nn.utils.clip_grad_norm_(
+                critic1_params,
+                max_norm=critic_grad_clip_norm,
+            )
+
+            opt_critic1.step()
+
+            # -------------------------------------------------
+            # Critic 2 update: only phi2 / psi2 / Q2 params
+            # -------------------------------------------------
+
+            opt_critic2.zero_grad(set_to_none=True)
+
+            critic2_total_loss.backward()
+
+            critic2_grad_norm = nn.utils.clip_grad_norm_(
+                critic2_params,
+                max_norm=critic_grad_clip_norm,
+            )
+
+            opt_critic2.step()
+
+            # -------------------------------------------------
+            # TD3 actor update (delayed)
+            # -------------------------------------------------
+
+            if update_count % policy_delay == 0:
+
+                state_batch = normalize_state(
+                    current_batch.obs
+                )
+
+                goal_batch = normalize_goal(
+                    current_goal_tensor
+                )
+
+                set_requires_grad(
+                    critic1_params,
+                    requires_grad=False,
+                )
+
+                set_requires_grad(
+                    critic2_params,
+                    requires_grad=False,
+                )
+
+                actor_actions = actor.deterministic(
+                    state_batch,
+                    goal_batch,
+                )
+
+                q1_pi = critic.q1_forward(
+                    state_batch,
+                    actor_actions,
+                    goal_batch,
+                )
+
+                actor_loss = -q1_pi.mean()
+
+                opt_actor.zero_grad(set_to_none=True)
+
+                actor_loss.backward()
+
+                actor_grad_norm = nn.utils.clip_grad_norm_(
+                    actor.parameters(),
+                    max_norm=actor_grad_clip_norm,
+                )
+
+                opt_actor.step()
+
+                set_requires_grad(
+                    critic1_params,
+                    requires_grad=True,
+                )
+
+                set_requires_grad(
+                    critic2_params,
+                    requires_grad=True,
+                )
+
+                current_actor_grad_norm_value = (
+                    torch.as_tensor(
+                        actor_grad_norm,
+                        dtype=torch.float32,
+                        device=device,
+                    ).detach()
+                )
+
+            else:
+                current_actor_grad_norm_value = zero_scalar()
+
+            # -------------------------------------------------
+            # Target actor and critic update
+            # -------------------------------------------------
+
+            polyak_update()
+
+            update_count += 1
+
+            # -------------------------------------------------
+            # Diagnostics
+            # -------------------------------------------------
+
+            with torch.no_grad():
+                q_data_1 = critic.q1_forward(
+                    state_batch,
+                    current_batch.actions,
+                    goal_batch,
+                )
+
+                q_data_2 = critic.q2_forward(
+                    state_batch,
+                    current_batch.actions,
+                    goal_batch,
+                )
+
+                q_data = torch.minimum(
+                    q_data_1,
+                    q_data_2,
+                )
+
+            current_td_loss1_value = (
+                current_td_loss1.detach()
+            )
+
+            current_td_loss2_value = (
+                current_td_loss2.detach()
+            )
+
+            old_replay_loss1_value = (
+                old_replay_td_loss1.detach()
+            )
+
+            old_replay_loss2_value = (
+                old_replay_td_loss2.detach()
+            )
+
+            current_critic1_total_value = (
+                critic1_total_loss.detach()
+            )
+
+            current_critic2_total_value = (
+                critic2_total_loss.detach()
+            )
+
+            current_critic1_grad_norm_value = (
+                torch.as_tensor(
+                    critic1_grad_norm,
+                    dtype=torch.float32,
+                    device=device,
+                ).detach()
+            )
+
+            current_critic2_grad_norm_value = (
+                torch.as_tensor(
+                    critic2_grad_norm,
+                    dtype=torch.float32,
+                    device=device,
+                ).detach()
+            )
+
+            current_actor_loss_value = actor_loss.detach()
+
+            current_sigreg1_value = (
+                current_sigreg1.detach()
+            )
+
+            current_sigreg2_value = (
+                current_sigreg2.detach()
+            )
+
+            current_goal_separation1_value = (
+                current_goal_separation1.detach()
+            )
+
+            current_goal_separation2_value = (
+                current_goal_separation2.detach()
+            )
+
+            current_phi_norm1_value = phi_norm1.detach()
+            current_phi_norm2_value = phi_norm2.detach()
+
+            current_psi_norm1_value = psi_norm1.detach()
+            current_psi_norm2_value = psi_norm2.detach()
+
+            current_phi1_norm_value = norm_statistics[
+                "phi1_norm"
+            ]
+
+            current_phi2_norm_value = norm_statistics[
+                "phi2_norm"
+            ]
+
+            current_psi1_norm_value = norm_statistics[
+                "psi1_norm"
+            ]
+
+            current_psi2_norm_value = norm_statistics[
+                "psi2_norm"
+            ]
+
+            current_psi1_max_cosine_value = (
+                psi1_max_cosine
+            )
+
+            current_psi2_max_cosine_value = (
+                psi2_max_cosine
+            )
+
+        # -----------------------------------------------------
+        # Evaluation
+        # -----------------------------------------------------
+
+        if global_step % eval_freq != 0:
+            continue
+
+        eval_env = make_env(
+            goal=training_goal,
+            env_id=env_id,
+        )
+
+        def eval_policy(observation_dict):
+            eval_state, eval_goal = split_fetch_obs(
+                observation_dict
+            )
+
+            eval_state_t = torch.as_tensor(
+                eval_state,
+                dtype=torch.float32,
+                device=device,
+            ).unsqueeze(0)
+
+            eval_goal_t = torch.as_tensor(
+                eval_goal,
+                dtype=torch.float32,
+                device=device,
+            ).unsqueeze(0)
+
+            with torch.no_grad():
+                eval_action = actor.deterministic(
+                    normalize_state(eval_state_t),
+                    normalize_goal(eval_goal_t),
+                )
+
+            return (
+                eval_action
+                .squeeze(0)
+                .cpu()
+                .numpy()
+            )
+
+        (
+            mean_return,
+            mean_length,
+            success_rate,
+            mean_final_distance,
+        ) = evaluate_policy_with_success(
+            eval_env,
+            eval_policy,
+            episodes=8,
+            seed=seed + 100_000 + global_step,
+        )
+
+        eval_returns.append(
+            (
+                global_step,
+                mean_return,
+            )
+        )
+
+        eval_success_rates.append(
+            (
+                global_step,
+                success_rate,
+            )
+        )
+
+        eval_final_distances.append(
+            (
+                global_step,
+                mean_final_distance,
+            )
+        )
+
+        if normalize_state_inputs:
+            state_std = torch.sqrt(
+                state_rms.var
+            ).detach().cpu().numpy()
+
+            state_norm_string = (
+                f"StateNormCount="
+                f"{state_rms.count.item():.0f} | "
+                f"StateStdMin={state_std.min():.6f} | "
+                f"StateStdMax={state_std.max():.6f} | "
+            )
+
+        else:
+            state_norm_string = ""
+
+        print(
+            "[TD3-TBTRL-Independent] "
+            f"step={global_step:7d} | "
+            f"return={mean_return:.3f} | "
+            f"len={mean_length:.1f} | "
+            f"Success={success_rate:.3f} | "
+            f"FinalDist={mean_final_distance:.4f} | "
+            f"TD1={current_td_loss1_value.item():.5f} | "
+            f"TD2={current_td_loss2_value.item():.5f} | "
+            f"Replay1={old_replay_loss1_value.item():.5f} | "
+            f"Replay2={old_replay_loss2_value.item():.5f} | "
+            f"Critic1={current_critic1_total_value.item():.5f} | "
+            f"Critic2={current_critic2_total_value.item():.5f} | "
+            f"C1Grad={current_critic1_grad_norm_value.item():.5f} | "
+            f"C2Grad={current_critic2_grad_norm_value.item():.5f} | "
+            f"SIG1={current_sigreg1_value.item():.6f} | "
+            f"SIG2={current_sigreg2_value.item():.6f} | "
+            f"GoalSep1="
+            f"{current_goal_separation1_value.item():.6f} | "
+            f"GoalSep2="
+            f"{current_goal_separation2_value.item():.6f} | "
+            f"PhiNorm1="
+            f"{current_phi_norm1_value.item():.6f} | "
+            f"PhiNorm2="
+            f"{current_phi_norm2_value.item():.6f} | "
+            f"PsiNorm1="
+            f"{current_psi_norm1_value.item():.6f} | "
+            f"PsiNorm2="
+            f"{current_psi_norm2_value.item():.6f} | "
+            f"Phi1MeanNorm="
+            f"{current_phi1_norm_value.item():.3f} | "
+            f"Phi2MeanNorm="
+            f"{current_phi2_norm_value.item():.3f} | "
+            f"Psi1MeanNorm="
+            f"{current_psi1_norm_value.item():.3f} | "
+            f"Psi2MeanNorm="
+            f"{current_psi2_norm_value.item():.3f} | "
+            f"PsiMaxCos=("
+            f"{current_psi1_max_cosine_value.item():.3f},"
+            f"{current_psi2_max_cosine_value.item():.3f}"
+            f") | "
+            f"ActorLoss={current_actor_loss_value.item():.5f} | "
+            f"ActorGrad="
+            f"{current_actor_grad_norm_value.item():.5f} | "
+            f"{state_norm_string}"
+            f"ReplayTasks={len(replay_batches)}"
+        )
+
+        if early_stop_success_rate is not None:
+            criterion_met = (
+                success_rate
+                >= early_stop_success_rate
+            )
+
+        else:
+            criterion_met = (
+                mean_return
+                >= early_stop_reward
+            )
+
+        if criterion_met:
+            success_streak += 1
+        else:
+            success_streak = 0
+
+        if (
+            enable_early_stop
+            and success_streak
+            >= early_stop_patience
+        ):
+            min_steps = global_step
+
+            min_time = (
+                time.perf_counter()
+                - start_time
+            )
+
+            print(
+                f"Early stopping at step={global_step}, "
+                f"return={mean_return:.3f}, "
+                f"success={success_rate:.3f}, "
+                f"streak={success_streak}"
+            )
+
+            break
+
+    # =========================================================
+    # Final outputs
+    # =========================================================
+
+    if min_steps is None:
+        min_steps = global_step
+
+        min_time = (
+            time.perf_counter()
+            - start_time
+        )
+
+    env.close()
+
+    return (
+        actor,
+        actor_target,
         critic,
         critic_target,
         eval_returns,

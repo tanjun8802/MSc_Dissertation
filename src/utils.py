@@ -4241,8 +4241,106 @@ def plot_atari_evaluation(
     plt.tight_layout()
     plt.show()
 
-
 def evaluate_policy_with_success(
+    env,
+    policy_fn,
+    goal,
+    episodes: int = 8,
+    seed: int | None = None,
+    success_threshold: float = 0.45,
+):
+    """
+    Evaluate a direct-observation Maze policy.
+
+    Args:
+        env: Maze environment.
+        policy_fn: Function mapping a direct observation to an action.
+        goal: Target position, usually shape (2,).
+        episodes: Number of evaluation episodes.
+        seed: Base reset seed.
+        success_threshold: Distance threshold for success.
+
+    Returns:
+        mean_return,
+        mean_length,
+        success_rate,
+        mean_final_distance
+    """
+    returns = []
+    lengths = []
+    successes = []
+    final_distances = []
+
+    goal = np.asarray(
+        goal,
+        dtype=np.float32,
+    )
+
+    for episode_idx in range(episodes):
+        if seed is None:
+            observation, reset_info = env.reset()
+        else:
+            observation, reset_info = env.reset(
+                seed=seed + episode_idx
+            )
+
+        episode_return = 0.0
+        episode_length = 0
+        info = {}
+
+        while True:
+            action = policy_fn(observation)
+
+            (
+                observation,
+                reward,
+                terminated,
+                truncated,
+                info,
+            ) = env.step(action)
+
+            episode_return += float(reward)
+            episode_length += 1
+
+            if terminated or truncated:
+                break
+
+        final_state = np.asarray(
+            observation,
+            dtype=np.float32,
+        )
+
+        final_distance = float(
+            np.linalg.norm(
+                final_state - goal
+            )
+        )
+
+        if "success" in info:
+            success = float(info["success"])
+
+        elif "is_success" in info:
+            success = float(info["is_success"])
+
+        else:
+            success = float(
+                final_distance <= success_threshold
+            )
+
+        returns.append(episode_return)
+        lengths.append(episode_length)
+        successes.append(success)
+        final_distances.append(final_distance)
+
+    return (
+        float(np.mean(returns)),
+        float(np.mean(lengths)),
+        float(np.mean(successes)),
+        float(np.mean(final_distances)),
+    )
+
+
+def evaluate_policy_with_success_fetch(
     env,
     policy_fn,
     episodes: int = 8,
@@ -4479,76 +4577,146 @@ def keep_last_fraction_of_buffer_continuous(
     return new_buffer
 
 
-def integrate_trimmed_task_buffer(
-    task_id,
-    trimmed_buffer_new,
-    global_buffer,        # list of transitions
-    buffer_map,           # dict: task_id -> buffer_id
-    buffer_contents,      # dict: buffer_id -> list of transitions
-    similarity_matrix,
-    X=0.7
+def merge_fraction_of_buffers(
+    base_buffer: TrajectoryReplayBufferDiscrete,
+    new_buffer: TrajectoryReplayBufferDiscrete,
+    fraction: float = 1.0,
 ):
     """
-    Inputs:
-      - task_id: int
-      - trimmed_buffer_new: list (already trimmed by keep_buffer_fraction)
-      - global_buffer: list of all transitions currently stored
-      - buffer_map: task_id -> buffer_id
-      - buffer_contents: buffer_id -> list of transitions
-      - similarity_matrix: 2D array or similar, S[i, j]
-      - X: similarity threshold
-
-    Returns:
-      - global_buffer: updated flat list of all transitions
-      - buffer_map: updated task_id -> buffer_id
-      - buffer_contents: updated buffer_id -> list of transitions
+    Append the last `fraction` of transitions from new_buffer into base_buffer.
+    Modifies base_buffer in place.
     """
-    existing_tasks = [t for t in buffer_map.keys() if t != task_id]
+    N = len(new_buffer)
+    if N == 0:
+        return
 
-    # First task: just create its own buffer
-    if not existing_tasks:
-        new_buf_id = f"buf_{task_id}"
-        buffer_map[task_id] = new_buf_id
-        buffer_contents[new_buf_id] = list(trimmed_buffer_new)
-        global_buffer = list(trimmed_buffer_new)
-        return global_buffer, buffer_map, buffer_contents
+    keep_count = max(1, int(N * fraction))
+    start_idx = N - keep_count
 
-    # Most similar existing task
-    sims = {t: similarity_matrix[task_id, t] for t in existing_tasks}
-    i_star = max(sims, key=sims.get)
-    s = sims[i_star]
-
-    if abs(s - 1.0) < 1e-6:
-        # Regime 1: identical -> discard this task's buffer
-        buffer_map[task_id] = buffer_map[i_star]
-        # global_buffer and buffer_contents unchanged
-
-    elif s <= X:
-        # Regime 2: dissimilar -> new independent buffer
-        new_buf_id = f"buf_{task_id}"
-        buffer_map[task_id] = new_buf_id
-        buffer_contents[new_buf_id] = list(trimmed_buffer_new)
-
-        # Append to global buffer
-        global_buffer = global_buffer + list(trimmed_buffer_new)
-
+    # Map logical indices to physical indices in new_buffer
+    if not new_buffer.full:
+        phys_indices = np.arange(start_idx, N)
     else:
-        # Regime 3: partially similar -> merge fraction into i_star's buffer
-        r = (1.0 - s) / (1.0 - X)  # merge ratio
-        buf_id_star = buffer_map[i_star]
+        phys_indices = (
+            new_buffer.pos - N + np.arange(start_idx, N)
+        ) % new_buffer.capacity
 
-        n_add = max(1, int(len(trimmed_buffer_new) * r))
-        to_add = trimmed_buffer_new[-n_add:]
+    # Copy selected transitions into base_buffer
+    for p_idx in phys_indices:
+        base_buffer.add_transition(
+            obs=new_buffer.obs[p_idx],
+            action=new_buffer.actions[p_idx],
+            reward=new_buffer.rewards[p_idx, 0],
+            next_obs=new_buffer.next_obs[p_idx],
+            terminated=new_buffer.terminated[p_idx, 0],
+            truncated=new_buffer.truncated[p_idx, 0],
+            episode_id=new_buffer.episode_id[p_idx],
+            timestep=new_buffer.timestep[p_idx],
+        )
 
-        # Update logical buffer for i_star
-        buffer_contents[buf_id_star] = buffer_contents[buf_id_star] + to_add
+def evaluate_maze_policy_with_success(
+    env,
+    policy_fn,
+    episodes: int = 8,
+    seed: int | None = None,
+):
+    """
+    Evaluate a policy in MazeGoalWrapper.
 
-        # Map this task to the same buffer
-        buffer_map[task_id] = buf_id_star
+    Environment:
+        obs: float32 array, shape (2,)
+        env.goal_position: float32 array, shape (2,)
 
-        # Rebuild global buffer from all logical buffers
-        global_buffer = []
-        for buf in buffer_contents.values():
-            global_buffer.extend(buf)
+    policy_fn:
+        action = policy_fn(obs)
+    """
 
-    return global_buffer, buffer_map, buffer_contents
+    episode_returns = []
+    episode_lengths = []
+    episode_successes = []
+    final_distances = []
+
+    for episode_index in range(episodes):
+
+        episode_seed = (
+            None
+            if seed is None
+            else int(seed) + episode_index
+        )
+
+        obs, info = env.reset(
+            seed=episode_seed,
+        )
+
+        obs = np.asarray(
+            obs,
+            dtype=np.float32,
+        )
+
+        total_reward = 0.0
+        episode_length = 0
+        final_info = dict(info)
+
+        while True:
+            action = policy_fn(obs)
+
+            (
+                next_obs,
+                reward,
+                terminated,
+                truncated,
+                info,
+            ) = env.step(action)
+
+            obs = np.asarray(
+                next_obs,
+                dtype=np.float32,
+            )
+
+            total_reward += float(reward)
+            episode_length += 1
+            final_info = dict(info)
+
+            if terminated or truncated:
+                break
+
+        final_position = np.asarray(
+            obs,
+            dtype=np.float32,
+        )
+
+        desired_goal = np.asarray(
+            env.goal_position,
+            dtype=np.float32,
+        )
+
+        final_distance = float(
+            np.linalg.norm(
+                final_position - desired_goal
+            )
+        )
+
+        success = bool(
+            final_info.get(
+                "success",
+                final_distance <= float(
+                    getattr(
+                        env,
+                        "goal_radius",
+                        0.5,
+                    )
+                ),
+            )
+        )
+
+        episode_returns.append(total_reward)
+        episode_lengths.append(episode_length)
+        episode_successes.append(float(success))
+        final_distances.append(final_distance)
+
+    return (
+        float(np.mean(episode_returns)),
+        float(np.mean(episode_lengths)),
+        float(np.mean(episode_successes)),
+        float(np.mean(final_distances)),
+    )
