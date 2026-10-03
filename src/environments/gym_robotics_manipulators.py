@@ -1174,6 +1174,19 @@ def make_env(
 
                 return obs, info
 
+            def step(self, action):
+                obs, reward, terminated, truncated, info = self.env.step(action)
+
+                # Correct the goal in the observation
+                obs = dict(obs)
+                obs["desired_goal"] = self.fixed_goal.astype(np.float32).copy()
+
+                # Early termination when the task is solved
+                if info.get("is_success", False):
+                    terminated = True
+
+                return obs, reward, terminated, truncated, info
+
         base_env = FixedGoalWrapper(
             base_env,
             fixed_goal=fixed_goal,
@@ -1189,3 +1202,74 @@ def make_env(
         monitored_env.observation_space.seed(seed)
 
     return monitored_env
+
+def make_env_sparse(
+    env_id: str,
+    render_mode: str | None = None,
+    goal: np.ndarray | None = None,
+    max_episode_steps: int = 50,
+    seed: int | None = None,
+):
+
+    base_env = gym.make(
+        env_id,
+        reward_type="sparse",
+        max_episode_steps=max_episode_steps,
+        render_mode=render_mode,
+    )
+
+    if goal is not None:
+        fixed_goal = np.asarray(goal, dtype=np.float64).copy()
+
+        class FixedGoalWrapper(gym.Wrapper):
+            def __init__(self, env, fixed_goal):
+                super().__init__(env)
+                self.fixed_goal = fixed_goal
+
+            def reset(self, *, seed=None, options=None):
+                # The original reset randomizes the block/start state.
+                obs, info = self.env.reset(seed=seed, options=options)
+
+                # Change the environment's actual internal goal—not merely
+                # the returned observation. Future step rewards and
+                # info["is_success"] now use this fixed goal.
+                self.env.unwrapped.goal = self.fixed_goal.copy()
+
+                # reset() already generated obs using the random original goal,
+                # so correct the returned initial observation as well.
+                obs = dict(obs)
+                obs["desired_goal"] = self.fixed_goal.astype(
+                    np.float32
+                ).copy()
+
+                return obs, info
+
+            def step(self, action):
+                obs, reward, terminated, truncated, info = self.env.step(action)
+
+                # Correct the goal in the observation
+                obs = dict(obs)
+                obs["desired_goal"] = self.fixed_goal.astype(np.float32).copy()
+
+                # Early termination when the task is solved
+                if info.get("is_success", False):
+                    terminated = True
+
+                return obs, reward, terminated, truncated, info
+
+        base_env = FixedGoalWrapper(
+            base_env,
+            fixed_goal=fixed_goal,
+        )
+
+    monitored_env = Monitor(base_env)
+    monitored_env = Float32Wrapper(monitored_env)
+
+    # Optional: seed the action/observation spaces once, without making
+    # every episode identical.
+    if seed is not None:
+        monitored_env.action_space.seed(seed)
+        monitored_env.observation_space.seed(seed)
+
+    return monitored_env
+

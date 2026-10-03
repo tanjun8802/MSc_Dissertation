@@ -218,34 +218,109 @@ class MazeGridWorld(gym.Env):
 
     def render(self):
         cell = 40
-        img = np.ones((self.height * cell, self.width * cell, 3), dtype=np.uint8) * 255
+
+        img = np.ones(
+            (
+                self.height * cell,
+                self.width * cell,
+                3,
+            ),
+            dtype=np.uint8,
+        ) * 255
+
+        # ---------------------------------------------------------
+        # Maze background, walls, free cells, and grid outlines.
+        # ---------------------------------------------------------
 
         for y in range(self.height):
             for x in range(self.width):
-                y0, y1 = y * cell, (y + 1) * cell
-                x0, x1 = x * cell, (x + 1) * cell
+                y0 = y * cell
+                y1 = (y + 1) * cell
+                x0 = x * cell
+                x1 = (x + 1) * cell
 
                 if self.maze[y, x] == 1:
-                    img[y0:y1, x0:x1] = np.array([30, 30, 30], dtype=np.uint8)
+                    img[y0:y1, x0:x1] = np.array(
+                        [30, 30, 30],
+                        dtype=np.uint8,
+                    )
                 else:
-                    img[y0:y1, x0:x1] = np.array([240, 240, 240], dtype=np.uint8)
+                    img[y0:y1, x0:x1] = np.array(
+                        [240, 240, 240],
+                        dtype=np.uint8,
+                    )
 
-                img[y0:y0+1, x0:x1] = 180
-                img[y1-1:y1, x0:x1] = 180
-                img[y0:y1, x0:x0+1] = 180
-                img[y0:y1, x1-1:x1] = 180
+                # Cell outlines.
+                img[y0:y0 + 1, x0:x1] = 180
+                img[y1 - 1:y1, x0:x1] = 180
+                img[y0:y1, x0:x0 + 1] = 180
+                img[y0:y1, x1 - 1:x1] = 180
+
+        # ---------------------------------------------------------
+        # Helper: draw a filled circle at a continuous maze point.
+        #
+        # Continuous coordinates:
+        #     (x, y) = (1.5, 1.5)
+        #
+        # Pixel coordinates:
+        #     (px, py) = (1.5 * cell, 1.5 * cell)
+        # ---------------------------------------------------------
+
+        def draw_circle(
+            position,
+            colour,
+            radius,
+        ):
+            x, y = float(position[0]), float(position[1])
+
+            # Convert continuous maze coordinates to pixel position.
+            px = int(round(x * cell))
+            py = int(round(y * cell))
+
+            y0 = max(0, py - radius)
+            y1 = min(img.shape[0], py + radius + 1)
+
+            x0 = max(0, px - radius)
+            x1 = min(img.shape[1], px + radius + 1)
+
+            yy, xx = np.ogrid[
+                y0:y1,
+                x0:x1,
+            ]
+
+            mask = (
+                (xx - px) ** 2
+                + (yy - py) ** 2
+                <= radius ** 2
+            )
+
+            patch = img[y0:y1, x0:x1]
+            patch[mask] = np.asarray(
+                colour,
+                dtype=np.uint8,
+            )
+
+        # ---------------------------------------------------------
+        # Goal: green circle at exact continuous goal coordinates.
+        # ---------------------------------------------------------
 
         if self._goal_pos is not None:
-            gx, gy = self._pos_to_cell(self._goal_pos)
-            y0, y1 = gy * cell, (gy + 1) * cell
-            x0, x1 = gx * cell, (gx + 1) * cell
-            img[y0+8:y1-8, x0+8:x1-8] = np.array([50, 180, 50], dtype=np.uint8)
+            draw_circle(
+                position=self._goal_pos,
+                colour=[50, 180, 50],
+                radius=max(5, cell // 4),
+            )
+
+        # ---------------------------------------------------------
+        # Agent: blue circle at exact continuous agent coordinates.
+        # ---------------------------------------------------------
 
         if self.agent_pos is not None:
-            ax, ay = self._pos_to_cell(self.agent_pos)
-            y0, y1 = ay * cell, (ay + 1) * cell
-            x0, x1 = ax * cell, (ax + 1) * cell
-            img[y0+8:y1-8, x0+8:x1-8] = np.array([60, 120, 255], dtype=np.uint8)
+            draw_circle(
+                position=self.agent_pos,
+                colour=[60, 120, 255],
+                radius=max(4, cell // 5),
+            )
 
         return img
 
