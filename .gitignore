@@ -38,3 +38,15 @@ Thumbs.db
 htmlcov/
 
 plots/
+
+# Research artifacts are generated from configs, never committed.
+results/
+artifacts/
+*.pt
+*.pth
+*.pkl
+*.pickle
+*.npz
+*.gif
+*.mp4
+.ruff_cache/
