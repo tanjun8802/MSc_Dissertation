@@ -1,0 +1,64 @@
+{
+  "name": "TBTRL_GridworldMaze_SAC",
+  "algorithm": "sac",
+  "environment": "maze-continuous",
+  "seeds": [
+    42
+  ],
+  "goals": [
+    [
+      3.5,
+      1.5
+    ],
+    [
+      3.5,
+      5.5
+    ],
+    [
+      7.5,
+      7.5
+    ],
+    [
+      9.5,
+      9.5
+    ]
+  ],
+  "model": {
+    "hidden_dim": 64,
+    "latent_dim": 16
+  },
+  "training": {
+    "buffer_capacity": 1000000,
+    "total_steps": 500000,
+    "warmup_steps": 10000,
+    "batch_size": 256,
+    "eval_freq": 10000,
+    "gamma": 0.98,
+    "tau": 0.005,
+    "lr_actor": 0.0005,
+    "lr_critic": 0.0005,
+    "lr_ent_coef": 2e-05,
+    "replay_ratio": 0.5,
+    "replay_loss_coef": 0.05,
+    "early_stop_success_rate": 1.0,
+    "early_stop_patience": 3,
+    "enable_early_stop": true,
+    "sigreg_coef": 1e-05,
+    "sketch_dim": 16,
+    "goal_separation_coef": 1e-05,
+    "goal_separation_target_cosine": 0.85,
+    "phi_raw_norm_coef": 0.003,
+    "psi_raw_norm_coef": 0.003,
+    "phi_norm_target": 2.0,
+    "psi_norm_target": 2.0,
+    "initial_alpha": 0.2,
+    "q_target_min": -10.0,
+    "q_target_max": 10.0
+  },
+  "recovery": {
+    "total_steps": 100000
+  },
+  "replay_keep_fraction": 0.4,
+  "eval_episodes": 8,
+  "recovery_threshold": 0.9
+}

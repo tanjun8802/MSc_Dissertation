@@ -1,27 +1,44 @@
-name: RL Pipeline Tests
+name: TBTRL checks
 
 on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
-  test:
+  cpu-tests:
     runs-on: ubuntu-latest
-
+    timeout-minutes: 20
+    env:
+      MPLBACKEND: Agg
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
         with:
-          python-version: "3.12"
-
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - name: Install uv
         run: pip install uv
-
-      - name: Sync dependencies
-        run: uv sync
-
-      - name: Run tests
-        run: uv run pytest -v
+      - name: Install locked development environment
+        run: uv sync --locked --group dev
+      - name: Lint and format
+        run: |
+          uv run ruff check .
+          uv run ruff format --check .
+      - name: Test replay, TBTRL updates and experiment pipelines
+        run: uv run pytest
+      - name: Check update equivalence with original trainers
+        run: uv run python scripts/verify_legacy_equivalence.py
+      - name: Execute supported notebooks in fresh kernels
+        run: uv run python scripts/check_notebooks.py
+      - name: Build wheel and source distribution
+        run: uv run python -m build
+      - name: Verify wheel imports outside the checkout
+        run: |
+          uv venv /tmp/tbtrl-wheel
+          uv pip install --python /tmp/tbtrl-wheel/bin/python dist/*.whl
+          cd /tmp
+          /tmp/tbtrl-wheel/bin/python -c "from tbtrl.training.dqn import train_dqn; from tbtrl.training.sac import train_sac; from tbtrl.environments.registry import make_environment; make_environment('maze-discrete', [1, 1]).close()"
