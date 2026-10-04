@@ -62,7 +62,7 @@ class AtariEnvWrapper(gym.Env):
             noop_max=30,
             frame_skip=4,
             screen_size=84,
-            terminal_on_life_loss=False,
+            terminal_on_life_loss=True,
             grayscale_obs=True,
             grayscale_newaxis=False,
             scale_obs=False,
