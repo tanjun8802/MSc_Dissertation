@@ -35,8 +35,9 @@ TBTRL coefficients. Scratch and recovery models are independent.
 - Covariance sketches belong to trainer invocations instead of a global function
   attribute that retains random state across experiments.
 - Goal-separation loss returns a consistent tuple for zero/one/many goals.
-- Training, action-space and evaluation seeds are explicit. Scratch regularisation
-  uses only its own goal, avoiding accidental information from old tasks.
+- Training, action-space and evaluation seeds are explicit. DQN task seeds and
+  its scratch seen-goal regularisation follow the original notebook. SAC scratch
+  uses its own goal and disables goal separation, as before.
 - SAC goal dimensions need not equal observation dimensions.
 - SAC recovery calls the supported trainer. Its old notebook referred to a
   different, unimported trainer and depended on previous kernel state.

@@ -30,6 +30,8 @@ jobs:
           uv run ruff format --check .
       - name: Test replay, TBTRL updates and experiment pipelines
         run: uv run pytest
+      - name: Audit configurations against original notebook calls
+        run: uv run python scripts/verify_notebook_configs.py
       - name: Check update equivalence with original trainers
         run: uv run python scripts/verify_legacy_equivalence.py
       - name: Execute supported notebooks in fresh kernels

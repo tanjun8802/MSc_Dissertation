@@ -358,6 +358,8 @@ def train_dqn(
         loss_history.append(
             {
                 "step": global_step,
+                "epsilon": float(epsilon),
+                "q_bound": float(q_network.phi_max_norm * q_network.psi_max_norm),
                 "td": current_loss.detach().item(),
                 "replay": old_replay_loss.detach().item(),
                 "sigreg": current_sigreg.detach().item(),
@@ -390,10 +392,11 @@ def train_dqn(
         )
         eval_returns.append((global_step, mean_return))
         logger.info(
-            "TBTRL task=%s step=%s return=%.3f losses=%s",
+            "DQN task=%s step=%s return=%.3f length=%.1f losses=%s",
             task_id,
             global_step,
             mean_return,
+            mean_length,
             loss_history[-1] if loss_history else {},
         )
         eval_env.close()

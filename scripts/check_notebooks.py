@@ -34,10 +34,23 @@ with tempfile.TemporaryDirectory(prefix="tbtrl-notebooks-") as directory:
     for path in sorted((root / "experiments/working").glob("*.ipynb")):
         notebook = nbformat.read(path, as_version=4)
         nbformat.validate(notebook)
+        # Override only the in-memory test copy; committed notebooks use full budgets.
+        for cell in notebook.cells:
+            if "parameters" in cell.metadata.get("tags", []):
+                assert "SMOKE = False" in cell.source
+                cell.source = cell.source.replace("SMOKE = False", "SMOKE = True")
+                cell.source += '\nDEVICE = "cpu"'
+
         NotebookClient(
             notebook,
             timeout=180,
             kernel_name="tbtrl-validation",
             resources={"metadata": {"path": str(path.parent)}},
         ).execute()
-        print(f"Executed {path.name} successfully", flush=True)
+        outputs = [
+            out for cell in notebook.cells if cell.cell_type == "code" for out in cell.outputs
+        ]
+        assert any("Training task=" in out.get("text", "") for out in outputs)
+        assert any("image/png" in out.get("data", {}) for out in outputs)
+        assert list((work / "runs").rglob("diagnostics.json"))
+        print(f"Executed {path.name} with training logs and inline per-goal plots", flush=True)

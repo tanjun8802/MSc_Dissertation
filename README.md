@@ -36,8 +36,8 @@ uv sync --locked --extra notebooks --group dev
 uv run jupyter lab experiments/working
 ```
 
-Select the environment's Python kernel. All three notebooks start in smoke mode;
-set `SMOKE = False` for full training. They invoke the same runner as the CLI,
+Select the environment's Python kernel. All three notebooks default to the original full research budgets;
+set `SMOKE = True` only for a short execution check. They invoke the same runner as the CLI,
 and contain no copied trainer code or machine-specific paths.
 
 ## Supported configurations
@@ -49,7 +49,9 @@ and contain no copied trainer code or machine-specific paths.
 | `configs/tbtrl_gridworldmaze_sac.json` | Continuous | Separate task buffers and independent twin critics |
 
 Layouts, goals, model sizes and loss settings are explicit. The configurations
-retain the working notebooks' principal settings and single initial seed;
+retain the working notebooks' settings: FourRooms uses seeds 42, 123 and 456;
+Maze DQN/SAC use seed 42. Trainer settings, model dimensions, layouts and goals
+are checked directly against the original notebook code in CI;
 scientific comparisons should use additional seeds and task orders.
 
 ## Repository layout
@@ -75,7 +77,15 @@ without adding environment-specific branches to the trainers.
 
 ## Outputs and evaluation
 
-Each run saves `manifest.json` and `summary.json`. Task directories contain
+Each run streams training progress and saves the same messages in `training.log`,
+along with `manifest.json` and `summary.json`. Notebook runs display diagnostics
+immediately after every trained goal: learning/loss curves, Q and policy maps,
+rollouts, raw embedding norms, cosine matrices, covariance spectra, drift and
+weight changes. Numeric diagnostics and PNGs are saved beside each checkpoint.
+See [the notebook parity audit](docs/notebook-parity.md) for exact settings and
+legacy behavior that required repair.
+
+ Task directories contain
 `metrics.json`, sampled `losses.jsonl`, and `checkpoint.pt`. SAC tasks already
 above the recovery threshold save a skipped-recovery record without retraining.
 The manifest records configuration, seeds, dependency versions, device, Git
@@ -111,6 +121,7 @@ uv run python -m build
 
 # Requires the pre-refactor commit in Git history (a full clone or fetch).
 uv run python scripts/verify_legacy_equivalence.py
+uv run python scripts/verify_notebook_configs.py
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) and [migration notes](docs/migration.md).

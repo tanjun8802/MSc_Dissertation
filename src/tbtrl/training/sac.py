@@ -717,6 +717,11 @@ def train_sac(
                     "critic2_grad_norm": float(critic2_grad_norm),
                     "actor_grad_norm": float(actor_grad_norm),
                     "q_data": q_data.mean().item(),
+                    "q_policy": min_q_pi.mean().detach().item(),
+                    "log_prob": log_prob.mean().detach().item(),
+                    "entropy": -log_prob.mean().detach().item(),
+                    "psi1_max_cosine": float(psi1_max_cosine),
+                    "psi2_max_cosine": float(psi2_max_cosine),
                     "policy_abs": pi_abs.item(),
                     "policy_saturation": pi_saturation.item(),
                     **{key: value.item() for key, value in norm_statistics.items()},
@@ -755,10 +760,13 @@ def train_sac(
         eval_success_rates.append((global_step, success_rate))
         eval_final_distances.append((global_step, mean_final_distance))
         logger.info(
-            "TBTRL task=%s step=%s return=%.3f losses=%s",
+            "SAC task=%s step=%s return=%.3f length=%.1f success=%.3f final_distance=%.4f losses=%s",
             task_id,
             global_step,
             mean_return,
+            mean_length,
+            success_rate,
+            mean_final_distance,
             loss_history[-1] if loss_history else {},
         )
         eval_env.close()

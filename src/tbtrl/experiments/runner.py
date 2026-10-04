@@ -1,8 +1,11 @@
 """Scratch, sequential transfer, retention, and independent recovery experiments."""
 
 import json
+import logging
 import platform
 import subprocess
+import sys
+from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import asdict, replace
 from functools import partial
@@ -21,6 +24,10 @@ from tbtrl.replay import TaskReplayMemory
 from tbtrl.training.dqn import train_dqn
 from tbtrl.training.sac import train_sac
 
+from .config import training_seed, training_settings
+
+logger = logging.getLogger(__name__)
+
 
 def _models(config, factory, device):
     env = factory(goal=config.goals[0])
@@ -34,7 +41,11 @@ def _models(config, factory, device):
             model = FactorisedQNetwork(obs_dim, env.action_space.n, goal_dim, **config.model).to(
                 device
             )
-            return model, deepcopy(model)
+            target = FactorisedQNetwork(obs_dim, env.action_space.n, goal_dim, **config.model).to(
+                device
+            )
+            target.load_state_dict(model.state_dict())
+            return model, target
         if not isinstance(env.action_space, gymnasium.spaces.Box):
             raise ValueError("SAC requires Box actions.")
         act_dim = env.action_space.shape[0]
@@ -42,7 +53,9 @@ def _models(config, factory, device):
             obs_dim, act_dim, goal_dim, net_arch=(config.model.get("hidden_dim", 64),) * 2
         ).to(device)
         critic = FactorisedTwinCritic(obs_dim, act_dim, goal_dim, **config.model).to(device)
-        return actor, critic, deepcopy(critic)
+        target = FactorisedTwinCritic(obs_dim, act_dim, goal_dim, **config.model).to(device)
+        target.load_state_dict(critic.state_dict())
+        return actor, critic, target
     finally:
         env.close()
 
@@ -59,6 +72,13 @@ def _train(config, models, factory, task_id, seed, device, goals, buffers, setti
         task_goals=goals,
         replay_task_buffers=buffers,
         **settings,
+    )
+    logger.info(
+        "Training task=%s goal=%s seed=%s settings=%s",
+        task_id,
+        config.goals[task_id],
+        seed,
+        settings,
     )
     try:
         if config.algorithm == "dqn":
@@ -139,8 +159,13 @@ def _save_task(directory, result, config, seed, task_id, mode, evaluations):
     return record
 
 
-def run_experiment(
-    config, output_dir, *, device="cpu", modes=("scratch", "sequential", "recovery")
+def _run_experiment(
+    config,
+    output_dir,
+    *,
+    device="cpu",
+    modes=("scratch", "sequential", "recovery"),
+    on_task_end=None,
 ):
     """Run explicit task sequences; recovery starts from the same final model each time.
 
@@ -153,7 +178,6 @@ def run_experiment(
     if "recovery" in modes and "sequential" not in modes:
         raise ValueError("Recovery requires sequential training in the same run.")
     output = Path(output_dir)
-    output.mkdir(parents=True, exist_ok=False)
     factory = partial(make_environment, config.environment, **config.environment_options)
     try:
         commit = subprocess.check_output(
@@ -183,28 +207,24 @@ def run_experiment(
             if mode not in modes:
                 continue
             set_seed(seed)
-            models = _models(config, factory, device)
+            models = _models(config, factory, device) if mode == "sequential" else None
             memory = TaskReplayMemory(config.replay_keep_fraction, config.similarity_threshold)
             task_goals = {}
             for task_id, goal in enumerate(config.goals):
                 if mode == "scratch":
-                    set_seed(seed + task_id)
                     models = _models(config, factory, device)
-                    task_goals = {}
+                    if not config.scratch_seen_goals:
+                        task_goals = {}
                 task_goals[task_id] = np.asarray(goal, dtype=np.float32)
-                settings = dict(config.training, eval_episodes=config.eval_episodes)
-                if mode == "scratch":
-                    settings["replay_ratio"] = 0.0
-                    if config.algorithm == "sac":
-                        settings["initial_alpha"] = 0.1
-                elif config.replay_schedule == "task_count":
-                    settings["replay_ratio"] = float(task_id + 1)
+                settings = training_settings(config, mode, task_id)
+                logger.info("=== %s | seed=%s | task=%s | goal=%s ===", mode, seed, task_id, goal)
+                before = _snapshot(models, config.algorithm) if on_task_end else None
                 result = _train(
                     config,
                     models,
                     factory,
                     task_id,
-                    seed + task_id,
+                    training_seed(config, seed, mode, task_id),
                     device,
                     task_goals,
                     memory.buffers if mode == "sequential" else {},
@@ -222,6 +242,24 @@ def run_experiment(
                         mode,
                         evaluation,
                     )
+                )
+                if on_task_end:
+                    on_task_end(
+                        result=result,
+                        config=task_config,
+                        factory=factory,
+                        record=records[-1],
+                        task_goals=deepcopy(task_goals),
+                        before=before,
+                        directory=output / f"seed_{seed}" / mode / f"task_{task_id}",
+                    )
+                logger.info(
+                    "Completed %s task=%s steps=%s threshold_steps=%s elapsed=%.2fs",
+                    mode,
+                    task_id,
+                    result.steps,
+                    result.steps_to_threshold,
+                    result.elapsed_seconds,
                 )
                 if mode == "sequential":
                     similarities = None
@@ -266,6 +304,13 @@ def run_experiment(
                     directory.mkdir(parents=True)
                     (directory / "metrics.json").write_text(json.dumps(record, indent=2) + "\n")
                     records.append(record)
+                    logger.info(
+                        "Recovery skipped: seed=%s task=%s success=%.3f threshold=%.3f",
+                        seed,
+                        task_id,
+                        retention[task_id]["success_rate"],
+                        config.recovery_threshold,
+                    )
                     continue
                 if config.algorithm == "dqn":
                     models = deepcopy((final_result.network, final_result.target))
@@ -279,14 +324,15 @@ def run_experiment(
                         for key, value in sequential_memory.buffers.items()
                         if key != task_id
                     }
-                settings = dict(config.training, **config.recovery)
-                settings["eval_episodes"] = config.eval_episodes
+                settings = training_settings(config, "recovery", task_id)
+                before = _snapshot(models, config.algorithm) if on_task_end else None
+                logger.info("=== recovery | seed=%s | task=%s | goal=%s ===", seed, task_id, goal)
                 result = _train(
                     config,
                     models,
                     factory,
                     task_id,
-                    seed + task_id,
+                    training_seed(config, seed, "recovery", task_id),
                     device,
                     deepcopy(sequential_goals),
                     buffers,
@@ -305,5 +351,75 @@ def run_experiment(
                         evaluation,
                     )
                 )
+                if on_task_end:
+                    on_task_end(
+                        result=result,
+                        config=task_config,
+                        factory=factory,
+                        record=records[-1],
+                        task_goals=deepcopy(sequential_goals),
+                        before=before,
+                        directory=output / f"seed_{seed}" / "recovery" / f"task_{task_id}",
+                    )
+                logger.info(
+                    "Completed recovery task=%s steps=%s threshold_steps=%s elapsed=%.2fs",
+                    task_id,
+                    result.steps,
+                    result.steps_to_threshold,
+                    result.elapsed_seconds,
+                )
     (output / "summary.json").write_text(json.dumps(records, indent=2, allow_nan=False) + "\n")
     return records
+
+
+def _snapshot(models, algorithm):
+    names = ("q", "target") if algorithm == "dqn" else ("actor", "critic", "target")
+    return {
+        f"{group}.{name}": p.detach().cpu().clone()
+        for group, model in zip(names, models)
+        for name, p in model.named_parameters()
+    }
+
+
+@contextmanager
+def _training_log(output, verbose):
+    """Scope notebook stdout and file handlers; re-execution never duplicates logs."""
+    package_logger = logging.getLogger("tbtrl")
+    old_level, old_propagate = package_logger.level, package_logger.propagate
+    handlers = [logging.FileHandler(output / "training.log")]
+    if verbose:
+        handlers.append(logging.StreamHandler(sys.stdout))
+    for handler in handlers:
+        handler.setFormatter(logging.Formatter("%(asctime)s %(message)s", datefmt="%H:%M:%S"))
+        package_logger.addHandler(handler)
+    package_logger.setLevel(logging.INFO)
+    package_logger.propagate = False
+    try:
+        yield
+    finally:
+        for handler in handlers:
+            package_logger.removeHandler(handler)
+            handler.close()
+        package_logger.setLevel(old_level)
+        package_logger.propagate = old_propagate
+
+
+def run_experiment(
+    config,
+    output_dir,
+    *,
+    device="cpu",
+    modes=("scratch", "sequential", "recovery"),
+    on_task_end=None,
+    verbose=True,
+):
+    """Run experiments with live/file logging and an optional per-goal diagnostic callback.
+
+    The callback runs immediately after each trained goal, before the next goal.
+    Use NotebookDiagnostics for inline plots and saved numeric diagnostics.
+    """
+    config.validate()
+    output = Path(output_dir)
+    output.mkdir(parents=True, exist_ok=False)
+    with _training_log(output, verbose):
+        return _run_experiment(config, output, device=device, modes=modes, on_task_end=on_task_end)

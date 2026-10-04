@@ -74,14 +74,17 @@ relabelling implementation.
 | Optimisers | New | New each task | New |
 | Current replay | Empty | Empty | Empty |
 | Old replay | None | Retained by task memory | DQN: none; SAC: every other task |
-| Known goals | Current goal | All seen goals | All training goals |
+| Known goals | DQN: all seen goals; SAC: current goal | All seen goals | All training goals |
 | Running normalisation | New | New each task | New |
-| SAC temperature | Initially 0.1 in scratch runner | Configured initial value (0.2) | Configured initial value |
+| SAC temperature | Initially 0.1 in scratch runner | Configured initial value (0.2) | 1.0 (original recovery default) |
 
 Normalisation is disabled in supplied configurations. When enabled, final
 statistics are returned and saved for consistent evaluation. The runner seeds
-model initialisation and each environment/action space. Task seeds use
-`seed + task_id`, removing dependence on previous notebook random state.
+model initialisation and each environment/action space. DQN uses the run seed
+for every task, as in its notebook; SAC uses `seed + task_id` and recovery uses
+`seed + 200000 + task_id`. Scratch models are freshly initialized without
+re-seeding before each initialization, matching the notebook loop. DQN scratch
+retains seen goals for the regularizers while replay buffers remain empty.
 Independent recovery does not mutate the final forward model or replay memories.
 SAC recovery runs below the retention threshold (0.9); smoke mode exercises all
 recovery paths.
@@ -101,9 +104,12 @@ sharing, and all supported configurations through scratch/transfer/recovery and
 checkpoint loading. Notebook validation uses fresh kernels.
 
 `scripts/verify_legacy_equivalence.py` compares original and new trainers over
-eight environment steps (seven updates), identically seeded environments,
-old-task replay and regularisation. It uses each implementation's replay class
-and compares online, target and SAC actor tensors exactly. Projection-free sketch
-dimensions match the working configurations. This is not full-budget learning
+eight environment steps with all penalties active, plus 36-step runs for each
+original notebook configuration with three evaluations interleaved. It loads
+the original model definitions and trainers from Git, uses each implementation's
+replay class, and compares online, target and SAC actor tensors and evaluation
+curves exactly under matched environment seeds. Notebook cases retain the
+original network dimensions, batch size, loss coefficients and update frequency;
+only their total steps, warmup and evaluation interval are shortened. This is not full-budget learning
 curve equivalence: the seeding and correctness fixes change behaviour outside
 that controlled comparison.

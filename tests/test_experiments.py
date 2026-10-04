@@ -130,3 +130,58 @@ def test_new_environment_dimensions_and_normalized_checkpoint(tmp_path):
             .squeeze(0)
         )
     np.testing.assert_allclose(load_policy(path)(observation), expected, atol=1e-7)
+
+
+@pytest.mark.parametrize("algorithm", ["dqn", "sac"])
+def test_diagnostics_are_per_goal_visible_saved_and_do_not_change_training(
+    algorithm, tmp_path, capsys
+):
+    import torch
+
+    from tbtrl.experiments.diagnostics import NotebookDiagnostics
+
+    config = load_config(ROOT / f"configs/tbtrl_gridworldmaze_{algorithm}.json").smoke()
+    baseline = tmp_path / "without"
+    observed = tmp_path / "with"
+    run_experiment(config, baseline, modes=("sequential",), verbose=False)
+    callback = NotebookDiagnostics(display=False, rollout_episodes=1)
+    completed = []
+
+    def on_task_end(**kwargs):
+        task_id = kwargs["record"]["task_id"]
+        assert not (observed / f"seed_42/sequential/task_{task_id + 1}").exists()
+        callback(**kwargs)
+        completed.append(task_id)
+
+    run_experiment(config, observed, modes=("sequential",), on_task_end=on_task_end)
+    assert completed == [0, 1]
+    stdout = capsys.readouterr().out
+    assert "Training task=0" in stdout and "step=8" in stdout and "Goal cosine matrix" in stdout
+    assert "step=8" in (observed / "training.log").read_text()
+    for task_id in completed:
+        relative = f"seed_42/sequential/task_{task_id}"
+        actual = torch.load(observed / relative / "checkpoint.pt", weights_only=True)
+        expected = torch.load(baseline / relative / "checkpoint.pt", weights_only=True)
+        for group in ("network", "target") if algorithm == "dqn" else ("actor", "critic", "target"):
+            for key in actual[group]:
+                torch.testing.assert_close(actual[group][key], expected[group][key], rtol=0, atol=0)
+        data = json.loads((observed / relative / "diagnostics.json").read_text())
+        assert data["task_ids"] == list(range(task_id + 1))
+        assert data["weight_changes"]
+        assert (observed / relative / "rollouts.png").stat().st_size > 1000
+        assert (observed / relative / "q-policy.png").stat().st_size > 1000
+
+
+def test_notebooks_default_to_full_configs_and_explicit_diagnostics():
+    for path in (ROOT / "experiments/working").glob("*.ipynb"):
+        notebook = nbformat.read(path, as_version=4)
+        source = "\n".join(c.source for c in notebook.cells if c.cell_type == "code")
+        assert "SMOKE = False" in source and "on_task_end=diagnostics" in source
+    from tbtrl.experiments.config import training_seed, training_settings
+
+    config = load_config(ROOT / "configs/tbtrl_fourrooms_dqn.json")
+    assert config.seeds == [42, 123, 456]
+    assert config.scratch_seen_goals
+    assert training_seed(config, 123, "scratch", 5) == 123
+    assert training_settings(config, "scratch", 5)["replay_loss_coef"] == 0
+    assert training_settings(config, "recovery", 5)["replay_ratio"] == 6

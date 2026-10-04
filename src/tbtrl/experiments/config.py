@@ -19,6 +19,11 @@ class ExperimentConfig:
     replay_keep_fraction: float = 0.4
     replay_schedule: str = "constant"
     similarity_threshold: float | None = None
+    scratch: dict = field(default_factory=dict)
+    first_task: dict = field(default_factory=dict)
+    task_seed_stride: int = 1
+    recovery_seed_offset: int = 0
+    scratch_seen_goals: bool = False
     recovery: dict = field(default_factory=dict)
     recovery_threshold: float | None = None
     eval_episodes: int = 8
@@ -60,7 +65,7 @@ class ExperimentConfig:
             "action_dim",
         }
         allowed = set(inspect.signature(trainer).parameters) - owned
-        for settings in (self.training, self.recovery):
+        for settings in (self.training, self.scratch, self.first_task, self.recovery):
             unknown = set(settings) - allowed
             if unknown:
                 raise ValueError(f"Unknown or runner-owned training settings: {sorted(unknown)}")
@@ -91,7 +96,7 @@ class ExperimentConfig:
             model=model,
             training=training,
             environment_options=dict(self.environment_options, max_horizon=8),
-            recovery={"total_steps": 16, "warmup_steps": 4, "enable_early_stop": False},
+            recovery=dict(self.recovery, total_steps=16, warmup_steps=4, enable_early_stop=False),
             eval_episodes=1,
             recovery_threshold=None,
         )
@@ -99,3 +104,26 @@ class ExperimentConfig:
 
 def load_config(path):
     return ExperimentConfig(**json.loads(Path(path).read_text())).validate()
+
+
+def training_settings(config, mode, task_id):
+    """Resolve the original notebook's phase/task overrides in one audited place."""
+    settings = dict(config.training, eval_episodes=config.eval_episodes)
+    if mode == "scratch":
+        settings.update(config.scratch)
+    else:
+        if config.replay_schedule == "task_count":
+            settings["replay_ratio"] = float(task_id + 1)
+        if mode == "sequential" and task_id == 0:
+            settings.update(config.first_task)
+        if mode == "recovery":
+            settings.update(config.recovery)
+    return settings
+
+
+def training_seed(config, seed, mode, task_id):
+    return (
+        seed
+        + config.task_seed_stride * task_id
+        + (config.recovery_seed_offset if mode == "recovery" else 0)
+    )
