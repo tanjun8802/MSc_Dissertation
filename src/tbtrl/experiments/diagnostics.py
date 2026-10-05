@@ -93,7 +93,10 @@ class NotebookDiagnostics:
         goals = torch.as_tensor(
             np.asarray([task_goals[i] for i in task_ids]), dtype=torch.float32, device=device
         )
-        action = torch.as_tensor(np.asarray(actions), device=device)
+        # NumPy's uniform probes default to float64, which MPS cannot transfer.
+        # Choose the dtype at construction, before moving data to the device.
+        action_dtype = torch.int64 if algorithm == "dqn" else torch.float32
+        action = torch.as_tensor(np.asarray(actions), dtype=action_dtype, device=device)
         # Normalized SAC runs must probe the same inputs used by their policy/critic.
         if algorithm == "sac":
             if config.training.get("normalize_state_inputs", False):
@@ -106,8 +109,12 @@ class NotebookDiagnostics:
                 )
         indices = result.buffer.chronological_indices()
         indices = indices[np.linspace(0, len(indices) - 1, min(1024, len(indices)), dtype=int)]
-        replay_state = torch.as_tensor(result.buffer.obs[indices], device=device)
-        replay_action = torch.as_tensor(result.buffer.actions[indices], device=device)
+        replay_state = torch.as_tensor(
+            result.buffer.obs[indices], dtype=torch.float32, device=device
+        )
+        replay_action = torch.as_tensor(
+            result.buffer.actions[indices], dtype=action_dtype, device=device
+        )
         if algorithm == "dqn":
             action = F.one_hot(action.long(), model.num_actions).float()
             replay_action = F.one_hot(replay_action.long().view(-1), model.num_actions).float()
@@ -281,7 +288,7 @@ class NotebookDiagnostics:
         states = np.column_stack([x, y]).astype(np.float32)
         if config.algorithm == "sac":
             states += 0.5
-        obs = torch.as_tensor(states, device=device)
+        obs = torch.as_tensor(states, dtype=torch.float32, device=device)
         goals = (
             torch.as_tensor(goal, dtype=torch.float32, device=device)
             .view(1, -1)

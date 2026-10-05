@@ -134,7 +134,7 @@ def test_new_environment_dimensions_and_normalized_checkpoint(tmp_path):
 
 @pytest.mark.parametrize("algorithm", ["dqn", "sac"])
 def test_diagnostics_are_per_goal_visible_saved_and_do_not_change_training(
-    algorithm, tmp_path, capsys
+    algorithm, tmp_path, capsys, monkeypatch
 ):
     import torch
 
@@ -146,11 +146,22 @@ def test_diagnostics_are_per_goal_visible_saved_and_do_not_change_training(
     run_experiment(config, baseline, modes=("sequential",), verbose=False)
     callback = NotebookDiagnostics(display=False, rollout_episodes=1)
     completed = []
+    as_tensor = torch.as_tensor
+
+    def reject_double_device_transfer(data, *args, **kwargs):
+        # Exercise MPS's dtype constraint in CPU CI too. NumPy uniform probes
+        # are float64 unless the diagnostic explicitly casts before transfer.
+        if kwargs.get("device") is not None:
+            host = as_tensor(data, dtype=kwargs.get("dtype"))
+            assert host.dtype != torch.float64, "MPS does not support float64 transfers"
+        return as_tensor(data, *args, **kwargs)
 
     def on_task_end(**kwargs):
         task_id = kwargs["record"]["task_id"]
         assert not (observed / f"seed_42/sequential/task_{task_id + 1}").exists()
-        callback(**kwargs)
+        with monkeypatch.context() as patch:
+            patch.setattr(torch, "as_tensor", reject_double_device_transfer)
+            callback(**kwargs)
         completed.append(task_id)
 
     run_experiment(config, observed, modes=("sequential",), on_task_end=on_task_end)
