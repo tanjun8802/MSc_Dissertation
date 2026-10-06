@@ -98,6 +98,8 @@ report = {}
 cases = [(algo + "_all_penalties", algo, None) for algo in ("dqn", "sac")]
 for path in sorted((Path(__file__).resolve().parents[1] / "configs").glob("*.json")):
     config = load_config(path)
+    if config.actor_type != "mlp":
+        continue  # Preserve parity checks for the original algorithms.
     cases.append((config.name, config.algorithm, config))
 for label, algo, config in cases:
 
@@ -145,8 +147,10 @@ for label, algo, config in cases:
     legacy_model, legacy_actor = components(True)
     for key, value in model.state_dict().items():
         torch.testing.assert_close(value, legacy_model.state_dict()[key], rtol=0, atol=0)
-    oldbuf = ReplayBuffer(16, 2, 1 if algo == "dqn" else 2, discrete=algo == "dqn")
-    for _ in range(16):
+    # Keep old-task batches eligible even at the original notebook batch sizes.
+    old_capacity = 512
+    oldbuf = ReplayBuffer(old_capacity, 2, 1 if algo == "dqn" else 2, discrete=algo == "dqn")
+    for _ in range(old_capacity):
         oldbuf.add_transition([1, 1], 3 if algo == "dqn" else [0.1, 0.2], 0, [2, 1], False)
     outcomes = []
     for legacy in [True, False]:
@@ -155,12 +159,12 @@ for label, algo, config in cases:
                 "TrajectoryReplayBufferDiscrete"
                 if algo == "dqn"
                 else "TrajectoryReplayBufferContinuous"
-            ](16, 2, 1 if algo == "dqn" else 2)
+            ](old_capacity, 2, 1 if algo == "dqn" else 2)
             if legacy
             else oldbuf
         )
         if legacy:
-            for i in range(16):
+            for i in range(old_capacity):
                 replay.add_transition(
                     oldbuf.obs[i],
                     int(oldbuf.actions[i].item()) if algo == "dqn" else oldbuf.actions[i],
@@ -227,6 +231,7 @@ for label, algo, config in cases:
             legacy_curves = curves
         else:
             assert curves == legacy_curves, (label, "evaluation mismatch")
+            assert result.losses and all(row["replay_tasks"] > 0 for row in result.losses)
         outcomes.append([copy.deepcopy(m.state_dict()) for m in [q, t] + ([a] if a else [])])
     deltas = []
     for left, right in zip(*outcomes):

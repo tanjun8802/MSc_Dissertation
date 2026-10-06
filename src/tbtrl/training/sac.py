@@ -12,6 +12,7 @@ from tbtrl.losses import CovarianceRegularizer
 from tbtrl.normalization import RunningMeanStd
 from tbtrl.random import set_seed
 from tbtrl.replay import ReplayBuffer
+from tbtrl.training.actor import ActorRegularizer, ActorTBTRLOptions, policy_objective
 from tbtrl.training.common import LossHistory, validate_training_options
 from tbtrl.training.results import SACResult
 
@@ -72,6 +73,7 @@ def train_sac(
     q_target_max: float | None = 5.0,
     critic_grad_clip_norm: float = 10.0,
     actor_grad_clip_norm: float = 10.0,
+    actor_tbtrl: dict | None = None,
 ):
     """
     Factorised SAC-TBTRL trainer with independent critic branches.
@@ -181,6 +183,10 @@ def train_sac(
         early_stop_patience=early_stop_patience,
         eval_episodes=eval_episodes,
     )
+    actor_options = ActorTBTRLOptions.from_dict(actor_tbtrl or {})
+    actor_regularizer = ActorRegularizer(actor, actor_options) if actor_tbtrl is not None else None
+    if {id(p) for p in actor.parameters()} & {id(p) for p in critic.parameters()}:
+        raise ValueError("Actor and critic parameters must be separate.")
     set_seed(seed)
     env.action_space.seed(seed)
     sigreg_loss = CovarianceRegularizer(sketch_dim=sketch_dim)
@@ -669,17 +675,60 @@ def train_sac(
             q2_pi = critic.q2_forward(state_batch, sampled_actions, goal_batch)
             min_q_pi = torch.minimum(q1_pi, q2_pi)
             ent_coef_tensor = current_ent_coef().detach()
-            actor_loss = (ent_coef_tensor * log_prob - min_q_pi).mean()
-            opt_actor.zero_grad(set_to_none=True)
-            actor_loss.backward()
-            actor_grad_norm = nn.utils.clip_grad_norm_(
-                actor.parameters(), max_norm=actor_grad_clip_norm
-            )
-            opt_actor.step()
-            set_requires_grad(critic1_params, requires_grad=True)
-            set_requires_grad(critic2_params, requires_grad=True)
+            actor_current = (ent_coef_tensor * log_prob - min_q_pi).mean()
+            actor_replay = zero_scalar()
+            actor_penalty = zero_scalar()
+            actor_terms, actor_statistics = {}, {}
+            old_entropy_residuals = []
+            actor_replay_tasks = 0
+            try:
+                if actor_regularizer is not None:
+                    old_actor_losses = []
+                    if actor_options.replay_loss_coef > 0:
+                        for old_goal, old_batch in replay_batches:
+                            old_goals = normalize_goal(
+                                goal_batch_for(old_goal, old_batch.obs.shape[0], device)
+                            )
+                            old_loss, old_log_prob = policy_objective(
+                                actor,
+                                critic,
+                                normalize_state(old_batch.obs),
+                                old_goals,
+                                ent_coef_tensor,
+                            )
+                            old_actor_losses.append(old_loss)
+                            old_entropy_residuals.append(
+                                (old_log_prob.detach() + target_entropy).mean()
+                            )
+                    if old_actor_losses:
+                        actor_replay = torch.stack(old_actor_losses).mean()
+                        actor_replay_tasks = len(old_actor_losses)
+                    actor_penalty, actor_terms, actor_statistics = actor_regularizer(
+                        actor, state_for_phi_reg, normalize_goal(seen_goals_tensor())
+                    )
+                actor_loss = (
+                    actor_current + actor_options.replay_loss_coef * actor_replay + actor_penalty
+                )
+                opt_actor.zero_grad(set_to_none=True)
+                actor_loss.backward()
+                actor_grad_norm = nn.utils.clip_grad_norm_(
+                    actor.parameters(), max_norm=actor_grad_clip_norm
+                )
+                opt_actor.step()
+            finally:
+                set_requires_grad(critic1_params, requires_grad=True)
+                set_requires_grad(critic2_params, requires_grad=True)
             if log_ent_coef is not None:
                 ent_coef_loss = -(log_ent_coef * (log_prob.detach() + target_entropy)).mean()
+                if old_entropy_residuals:
+                    # Match the same task weighting as the actor objective,
+                    # normalized so adding old goals does not scale alpha's LR.
+                    weight = actor_options.replay_loss_coef
+                    residual = (
+                        (log_prob.detach() + target_entropy).mean()
+                        + weight * torch.stack(old_entropy_residuals).mean()
+                    ) / (1 + weight)
+                    ent_coef_loss = -(log_ent_coef * residual).mean()
                 opt_ent_coef.zero_grad(set_to_none=True)
                 ent_coef_loss.backward()
                 opt_ent_coef.step()
@@ -711,6 +760,12 @@ def train_sac(
                     "total1": critic1_total_loss.detach().item(),
                     "total2": critic2_total_loss.detach().item(),
                     "actor": actor_loss.detach().item(),
+                    "actor_current": actor_current.detach().item(),
+                    "actor_replay": actor_replay.detach().item(),
+                    "actor_replay_tasks": actor_replay_tasks,
+                    "actor_regularization": actor_penalty.detach().item(),
+                    **{f"actor_{key}": value.detach().item() for key, value in actor_terms.items()},
+                    **{key: value.item() for key, value in actor_statistics.items()},
                     "alpha": current_ent_coef().detach().item(),
                     "alpha_loss": ent_coef_loss.detach().item(),
                     "critic1_grad_norm": float(critic1_grad_norm),

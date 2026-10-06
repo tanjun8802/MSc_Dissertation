@@ -47,27 +47,29 @@ def test_unknown_config_option_fails_before_training():
         config.validate()
 
 
-def test_working_notebooks_have_no_hidden_state_or_outputs():
+def test_working_notebooks_compile_and_new_experiment_has_no_saved_outputs():
     notebooks = list((ROOT / "experiments/working").glob("*.ipynb"))
-    assert len(notebooks) == 3
+    assert len(notebooks) == 4
     for path in notebooks:
         notebook = nbformat.read(path, as_version=4)
         nbformat.validate(notebook)
         for cell in notebook.cells:
             if cell.cell_type == "code":
                 compile(cell.source, str(path), "exec")
-                assert cell.execution_count is None and cell.outputs == []
-                assert "sys.path" not in cell.source
+                if "FactorisedActor" in path.stem:
+                    assert cell.execution_count is None and cell.outputs == []
+                    assert "sys.path" not in cell.source
         assert "run_experiment" in json.dumps(notebook)
 
 
-def test_new_environment_dimensions_and_normalized_checkpoint(tmp_path):
+@pytest.mark.parametrize("actor_type", ["mlp", "factorised"])
+def test_new_environment_dimensions_and_normalized_checkpoint(tmp_path, actor_type):
     import gymnasium as gym
     import torch
 
     from tbtrl.environments.registry import register_environment
     from tbtrl.experiments.config import ExperimentConfig
-    from tbtrl.models.sac import GaussianActor
+    from tbtrl.models.sac import FactorisedGaussianActor, GaussianActor
 
     class VectorGoalEnv(gym.Env):
         observation_space = gym.spaces.Box(-10, 10, shape=(3,), dtype=np.float32)
@@ -85,11 +87,13 @@ def test_new_environment_dimensions_and_normalized_checkpoint(tmp_path):
             self.steps += 1
             return np.array([1, 2, 3], dtype=np.float32), 0.0, False, self.steps >= 2, {}
 
-    register_environment("test-vector-goal", VectorGoalEnv)
+    register_environment(f"test-vector-goal-{actor_type}", VectorGoalEnv)
     config = ExperimentConfig(
         name="different-dimensions",
+        actor_type=actor_type,
+        actor_model={"hidden_dim": 8, "latent_dim": 4} if actor_type == "factorised" else {},
         algorithm="sac",
-        environment="test-vector-goal",
+        environment=f"test-vector-goal-{actor_type}",
         goals=[[1], [2]],
         model={"hidden_dim": 8, "latent_dim": 4},
         training={
@@ -108,7 +112,11 @@ def test_new_environment_dimensions_and_normalized_checkpoint(tmp_path):
     run_experiment(config, tmp_path / "run", modes=("sequential",))
     path = tmp_path / "run/seed_42/sequential/task_1/checkpoint.pt"
     checkpoint = torch.load(path, weights_only=True)
-    actor = GaussianActor(3, 1, 1, net_arch=(8, 8))
+    actor = (
+        GaussianActor(3, 1, 1, net_arch=(8, 8))
+        if actor_type == "mlp"
+        else FactorisedGaussianActor(3, 1, 1, hidden_dim=8, latent_dim=4)
+    )
     actor.load_state_dict(checkpoint["actor"])
     observation = np.array([2, 3, 4], dtype=np.float32)
 
@@ -132,7 +140,7 @@ def test_new_environment_dimensions_and_normalized_checkpoint(tmp_path):
     np.testing.assert_allclose(load_policy(path)(observation), expected, atol=1e-7)
 
 
-@pytest.mark.parametrize("algorithm", ["dqn", "sac"])
+@pytest.mark.parametrize("algorithm", ["dqn", "sac", "sac_factorised_actor"])
 def test_diagnostics_are_per_goal_visible_saved_and_do_not_change_training(
     algorithm, tmp_path, capsys, monkeypatch
 ):
@@ -179,6 +187,9 @@ def test_diagnostics_are_per_goal_visible_saved_and_do_not_change_training(
         data = json.loads((observed / relative / "diagnostics.json").read_text())
         assert data["task_ids"] == list(range(task_id + 1))
         assert data["weight_changes"]
+        if config.actor_type == "factorised":
+            assert {"actor_mu", "actor_log_std"} <= data["branches"].keys()
+            assert (observed / relative / "actor-losses.png").stat().st_size > 1000
         assert (observed / relative / "rollouts.png").stat().st_size > 1000
         assert (observed / relative / "q-policy.png").stat().st_size > 1000
 

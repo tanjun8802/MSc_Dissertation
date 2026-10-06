@@ -248,3 +248,69 @@ class GaussianActor(nn.Module):
         """
         (mean, _) = self.forward(state, goal)
         return torch.tanh(mean)
+
+
+class FactorisedGaussianActor(GaussianActor):
+    """Bilinear goal-conditioned Gaussian policy with independent actor factors.
+
+    mu_j(s,g) = phi_mu_j(s)^T psi(g), and likewise for log_std_j.
+    Both phi encoders return [batch, action_dim, latent_dim]; psi returns
+    [batch, latent_dim]. There is no action input, critic parameter sharing,
+    or hard embedding projection. Gaussian sampling/tanh correction are inherited.
+    """
+
+    def __init__(
+        self,
+        state_dim,
+        action_dim,
+        goal_dim,
+        hidden_dim=64,
+        latent_dim=16,
+        log_std_min=-20.0,
+        log_std_max=2.0,
+        output_init_scale=0.01,
+    ):
+        # Reuse GaussianActor's policy interface without creating unused MLP heads.
+        nn.Module.__init__(self)
+        if any(
+            not isinstance(d, int) or d < 1
+            for d in (state_dim, action_dim, goal_dim, hidden_dim, latent_dim)
+        ):
+            raise ValueError("Actor dimensions must be positive integers.")
+        if not 0 < output_init_scale <= 1:
+            raise ValueError("output_init_scale must be in (0, 1].")
+        if not log_std_min < log_std_max:
+            raise ValueError("Require log_std_min < log_std_max.")
+        self.state_dim, self.action_dim, self.goal_dim = state_dim, action_dim, goal_dim
+        self.latent_dim = latent_dim
+        self.log_std_min, self.log_std_max = log_std_min, log_std_max
+
+        def encoder(input_dim, output_dim):
+            return nn.Sequential(
+                nn.Linear(input_dim, hidden_dim), nn.ReLU(), nn.Linear(hidden_dim, output_dim)
+            )
+
+        self.phi_mu = encoder(state_dim, action_dim * latent_dim)
+        self.phi_log_std = encoder(state_dim, action_dim * latent_dim)
+        self.psi = encoder(goal_dim, latent_dim)
+        # Start near zero mean / unit std rather than saturating tanh or the
+        # log-std clamp before the state and goal representations have learned.
+        with torch.no_grad():
+            for branch in (self.phi_mu, self.phi_log_std):
+                branch[-1].weight.mul_(output_init_scale)
+                branch[-1].bias.mul_(output_init_scale)
+
+    def state_factors(self, state):
+        shape = (state.shape[0], self.action_dim, self.latent_dim)
+        return self.phi_mu(state).view(shape), self.phi_log_std(state).view(shape)
+
+    def goal_factors(self, goal):
+        return self.psi(goal)
+
+    def forward(self, state, goal):
+        state, goal = self._validate_inputs(state, goal)
+        phi_mu, phi_std = self.state_factors(state)
+        psi = self.goal_factors(goal).unsqueeze(1)
+        mean = (phi_mu * psi).sum(-1)
+        log_std = (phi_std * psi).sum(-1).clamp(self.log_std_min, self.log_std_max)
+        return mean, log_std

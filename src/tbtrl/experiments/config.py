@@ -15,6 +15,8 @@ class ExperimentConfig:
     seeds: list[int] = field(default_factory=lambda: [42])
     environment_options: dict = field(default_factory=dict)
     model: dict = field(default_factory=dict)
+    actor_type: str = "mlp"
+    actor_model: dict = field(default_factory=dict)
     training: dict = field(default_factory=dict)
     replay_keep_fraction: float = 0.4
     replay_schedule: str = "constant"
@@ -46,6 +48,31 @@ class ExperimentConfig:
             raise ValueError("Shared task buffers require DQN reward relabelling.")
         if self.recovery_threshold is not None and not 0 <= self.recovery_threshold <= 1:
             raise ValueError("recovery_threshold must be a success rate in [0, 1].")
+        from tbtrl.models.sac import FactorisedGaussianActor
+        from tbtrl.training.actor import ActorTBTRLOptions
+
+        if self.actor_type not in ("mlp", "factorised"):
+            raise ValueError("actor_type must be mlp or factorised.")
+        if self.actor_type == "factorised" and self.algorithm != "sac":
+            raise ValueError("A factorised actor requires SAC.")
+        if self.actor_type == "mlp" and self.actor_model:
+            raise ValueError("actor_model options are only supported for the factorised actor.")
+        actor_keys = set(inspect.signature(FactorisedGaussianActor).parameters) - {
+            "state_dim",
+            "action_dim",
+            "goal_dim",
+        }
+        if set(self.actor_model) - actor_keys:
+            raise ValueError(
+                f"Unknown actor model settings: {sorted(set(self.actor_model) - actor_keys)}"
+            )
+        for settings in (self.training, self.scratch, self.first_task, self.recovery):
+            if settings.get("actor_tbtrl") is not None:
+                actor_options = ActorTBTRLOptions.from_dict(settings["actor_tbtrl"])
+                if actor_options.needs_factors and self.actor_type != "factorised":
+                    raise ValueError(
+                        "Actor representation penalties require actor_type='factorised'."
+                    )
         trainer = train_dqn if self.algorithm == "dqn" else train_sac
         owned = {
             "seed",
@@ -94,6 +121,9 @@ class ExperimentConfig:
             goals=self.goals[:2],
             seeds=self.seeds[:1],
             model=model,
+            actor_model=dict(self.actor_model, hidden_dim=8, latent_dim=4)
+            if self.actor_type == "factorised"
+            else {},
             training=training,
             environment_options=dict(self.environment_options, max_horizon=8),
             recovery=dict(self.recovery, total_steps=16, warmup_steps=4, enable_early_stop=False),

@@ -18,7 +18,7 @@ import torch
 from tbtrl.environments.registry import make_environment
 from tbtrl.evaluation import evaluate_policy_with_success, make_policy
 from tbtrl.models.dqn import FactorisedQNetwork
-from tbtrl.models.sac import FactorisedTwinCritic, GaussianActor
+from tbtrl.models.sac import FactorisedGaussianActor, FactorisedTwinCritic, GaussianActor
 from tbtrl.random import set_seed
 from tbtrl.replay import TaskReplayMemory
 from tbtrl.training.dqn import train_dqn
@@ -49,9 +49,14 @@ def _models(config, factory, device):
         if not isinstance(env.action_space, gymnasium.spaces.Box):
             raise ValueError("SAC requires Box actions.")
         act_dim = env.action_space.shape[0]
-        actor = GaussianActor(
-            obs_dim, act_dim, goal_dim, net_arch=(config.model.get("hidden_dim", 64),) * 2
-        ).to(device)
+        if config.actor_type == "factorised":
+            actor = FactorisedGaussianActor(obs_dim, act_dim, goal_dim, **config.actor_model).to(
+                device
+            )
+        else:
+            actor = GaussianActor(
+                obs_dim, act_dim, goal_dim, net_arch=(config.model.get("hidden_dim", 64),) * 2
+            ).to(device)
         critic = FactorisedTwinCritic(obs_dim, act_dim, goal_dim, **config.model).to(device)
         target = FactorisedTwinCritic(obs_dim, act_dim, goal_dim, **config.model).to(device)
         target.load_state_dict(critic.state_dict())

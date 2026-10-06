@@ -4,7 +4,7 @@ Research code for an Imperial College London MSc dissertation on transferring
 factorised value representations between goal-conditioned RL tasks.
 
 The supported experiments are **FourRooms DQN**, **Gridworld Maze DQN**, and
-**Gridworld Maze SAC**. They compare fresh training, sequential transfer,
+**Gridworld Maze SAC**, plus an experimental **factorised SAC actor** variant. They compare fresh training, sequential transfer,
 retention on earlier tasks, and independent recovery from the final transferred
 model. The update rules come from the working dissertation trainers.
 See [the method](docs/method.md) for objectives and task-boundary behaviour.
@@ -36,9 +36,16 @@ uv sync --locked --extra notebooks --group dev
 uv run jupyter lab experiments/working
 ```
 
-Select the environment's Python kernel. All three notebooks default to the original full research budgets;
+Select the environment's Python kernel. All four notebooks default to the original full research budgets;
 set `SMOKE = True` only for a short execution check. They invoke the same runner as the CLI,
-and contain no copied trainer code or machine-specific paths.
+and use the shared trainer code. The two original Maze result notebooks are preserved as committed.
+
+To test the actor extension, open
+[`TBTRL_GridworldMaze_SAC_FactorisedActor.ipynb`](experiments/working/TBTRL_GridworldMaze_SAC_FactorisedActor.ipynb).
+Its `VARIANT` selector supports `baseline`, `factorised_only`, `mlp_replay`, and
+`factorised_tbtrl` (default). Logs and actor/critic diagnostic plots appear in the
+training cell after each goal. Full budgets and critic settings match the original
+Maze SAC configuration. See [the actor objective and experiment guide](docs/factorised-actor.md).
 
 ## Supported configurations
 
@@ -47,8 +54,9 @@ and contain no copied trainer code or machine-specific paths.
 | `configs/tbtrl_fourrooms_dqn.json` | Discrete | Separate replay buffers per task |
 | `configs/tbtrl_gridworldmaze_dqn.json` | Discrete | Goal-similarity buffer sharing, with reward relabelling |
 | `configs/tbtrl_gridworldmaze_sac.json` | Continuous | Separate task buffers and independent twin critics |
+| `configs/tbtrl_gridworldmaze_sac_factorised_actor.json` | Continuous | Factorised actor with policy replay and representation penalties |
 
-Layouts, goals, model sizes and loss settings are explicit. The configurations
+Layouts, goals, model sizes and loss settings are explicit. The three original configurations
 retain the working notebooks' settings: FourRooms uses seeds 42, 123 and 456;
 Maze DQN/SAC use seed 42. Trainer settings, model dimensions, layouts and goals
 are checked directly against the original notebook code in CI;
@@ -58,7 +66,7 @@ scientific comparisons should use additional seeds and task orders.
 
 ```text
 configs/                    Experiment settings
-experiments/working/        Three supported notebooks
+experiments/working/        Four supported notebooks
 src/tbtrl/
   environments/             Gymnasium environments, layouts and registration
   models/                   Factorised DQN and SAC models

@@ -92,6 +92,8 @@ def audit():
     reports = []
     for path in sorted((ROOT / "configs").glob("*.json")):
         config = load_config(path)
+        if config.actor_type != "mlp":
+            continue  # The new actor experiment has no original-notebook equivalent.
         notebook = json.loads(source(f"src/experiments/working/{config.name}.ipynb"))
         tree = ast.parse(
             "\n\n".join("".join(c["source"]) for c in notebook["cells"] if c["cell_type"] == "code")

@@ -145,6 +145,20 @@ class NotebookDiagnostics:
                 )
                 for head in (1, 2)
             }
+            if hasattr(result.actor, "state_factors"):
+                actor_psi = _array(result.actor.goal_factors(goals))
+                fixed_factors = result.actor.state_factors(state)
+                replay_factors = result.actor.state_factors(replay_state)
+                for name, fixed, replay in zip(
+                    ("actor_mu", "actor_log_std"), fixed_factors, replay_factors
+                ):
+                    branches[name] = dict(
+                        psi=actor_psi,
+                        phi_fixed=_array(fixed).reshape(-1, result.actor.latent_dim),
+                        phi_replay=_array(replay).reshape(-1, result.actor.latent_dim),
+                        phi_fixed_by_action=_array(fixed),
+                        phi_replay_by_action=_array(replay),
+                    )
             models = {"actor": result.actor, "critic": result.critic, "target": result.target}
         changes = {}
         for group, network in models.items():
@@ -170,6 +184,12 @@ class NotebookDiagnostics:
                 if len(indices) > 1
                 else np.zeros((data["psi"].shape[1],) * 2)
             )
+            if "phi_replay_by_action" in data and len(indices) > 1:
+                per_action = data["phi_replay_by_action"]
+                covariance = np.mean(
+                    [np.cov(per_action[:, j, :], rowvar=False) for j in range(per_action.shape[1])],
+                    axis=0,
+                )
             data["covariance_eigenvalues"] = np.linalg.eigvalsh(np.atleast_2d(covariance))
             if previous is not None:
                 old = previous[name]
@@ -241,6 +261,28 @@ class NotebookDiagnostics:
         )
         axes[2].set(title="Success on every goal", xlabel="Goal index", ylim=(0, 1))
         emit(fig, "learning")
+        if algorithm == "sac" and config.training.get("actor_tbtrl") is not None:
+            options = config.training["actor_tbtrl"]
+            fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+            steps = [r["step"] for r in result.losses]
+            for key, coefficient in (
+                ("actor_current", 1.0),
+                ("actor_replay", options.get("replay_loss_coef", 0.0)),
+                ("actor", 1.0),
+            ):
+                axes[0].plot(steps, [r[key] * coefficient for r in result.losses], label=key)
+            for name in ("sigreg", "goal_separation", "phi_norm", "psi_norm"):
+                coefficient = options.get(f"{name}_coef", 0.0)
+                axes[1].plot(
+                    steps,
+                    [r.get(f"actor_{name}", 0.0) * coefficient for r in result.losses],
+                    label=name,
+                )
+            axes[0].set(title="Actor current / weighted replay / total", xlabel="Steps")
+            axes[1].set(title="Weighted actor regularizers", xlabel="Steps")
+            for ax in axes:
+                ax.legend()
+            emit(fig, "actor-losses")
         for name, data in branches.items():
             fig, axes = plt.subplots(2, 3, figsize=(15, 8))
             im = axes[0, 0].imshow(data["psi_cosine"], vmin=-1, vmax=1, cmap="coolwarm")

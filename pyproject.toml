@@ -30,6 +30,9 @@ testpaths = ["tests"]
 addopts = "-ra"
 
 [tool.ruff]
+# Preserve the user's committed result notebooks byte-for-byte. Their cells are
+# still executed in fresh kernels in CI; new source notebooks remain linted.
+extend-exclude = ["experiments/working/TBTRL_GridworldMaze_DQN.ipynb", "experiments/working/TBTRL_GridworldMaze_SAC.ipynb"]
 target-version = "py312"
 line-length = 100
 
