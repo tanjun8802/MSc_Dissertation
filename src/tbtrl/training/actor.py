@@ -12,6 +12,8 @@ from tbtrl.losses import CovarianceRegularizer
 @dataclass(frozen=True)
 class ActorTBTRLOptions:
     replay_loss_coef: float = 0.0
+    retention_kl_coef: float = 0.0
+    covariance_target_variance: float = 1.0
     sigreg_coef: float = 0.0
     sketch_dim: int = 16
     goal_separation_coef: float = 0.0
@@ -29,6 +31,7 @@ class ActorTBTRLOptions:
         result = cls(**values)
         for name in (
             "replay_loss_coef",
+            "retention_kl_coef",
             "sigreg_coef",
             "goal_separation_coef",
             "phi_norm_coef",
@@ -37,7 +40,7 @@ class ActorTBTRLOptions:
             value = getattr(result, name)
             if not math.isfinite(value) or value < 0:
                 raise ValueError(f"actor_tbtrl.{name} must be finite and nonnegative.")
-        for name in ("phi_norm_target", "psi_norm_target"):
+        for name in ("phi_norm_target", "psi_norm_target", "covariance_target_variance"):
             value = getattr(result, name)
             if not math.isfinite(value) or value <= 0:
                 raise ValueError(f"actor_tbtrl.{name} must be finite and positive.")
@@ -96,7 +99,10 @@ class ActorRegularizer:
         components = [x[:, j, :] for x in (mu, std) for j in range(actor.action_dim)]
         if o.sigreg_coef:
             terms["sigreg"] = torch.stack(
-                [reg(phi) for reg, phi in zip(self.covariance, components)]
+                [
+                    reg(phi / math.sqrt(o.covariance_target_variance))
+                    for reg, phi in zip(self.covariance, components)
+                ]
             ).mean()
         norms = torch.cat([mu.norm(dim=-1).flatten(), std.norm(dim=-1).flatten()])
         psi_norms = psi.norm(dim=-1)
@@ -121,3 +127,42 @@ class ActorRegularizer:
             actor_psi_max_cosine=max_cosine,
         )
         return total, terms, statistics
+
+
+def policy_retention_kl(reference, actor, states, goals):
+    """KL(previous policy || current policy); tanh is a shared bijection.
+
+    Evaluate the analytic diagonal Gaussian KL before squashing, avoiding
+    sampling noise and inverse-tanh numerical instability near action bounds.
+    """
+    with torch.no_grad():
+        old_mean, old_log_std = reference(states, goals)
+    mean, log_std = actor(states, goals)
+    old = torch.distributions.Normal(old_mean, old_log_std.exp())
+    current = torch.distributions.Normal(mean, log_std.exp())
+    return torch.distributions.kl_divergence(old, current).sum(-1).mean()
+
+
+def actor_gradient_statistics(components, parameters):
+    """Weighted component gradient norms without writing parameter .grad fields."""
+    parameters = list(parameters)
+    vectors = {}
+    for name, loss in components.items():
+        grads = (
+            torch.autograd.grad(loss, parameters, retain_graph=True, allow_unused=True)
+            if loss.requires_grad
+            else [None] * len(parameters)
+        )
+        vectors[name] = torch.cat(
+            [
+                torch.zeros_like(p).flatten() if g is None else g.detach().flatten()
+                for p, g in zip(parameters, grads)
+            ]
+        )
+    result = {f"actor_{name}_grad_norm": vector.norm().item() for name, vector in vectors.items()}
+    current, replay = vectors["current"], vectors["replay"]
+    denominator = current.norm() * replay.norm()
+    result["actor_current_replay_grad_cosine"] = (
+        (torch.dot(current, replay) / denominator).item() if denominator > 0 else 0.0
+    )
+    return result

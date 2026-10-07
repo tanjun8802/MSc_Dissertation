@@ -271,7 +271,7 @@ class NotebookDiagnostics:
                 ("actor", 1.0),
             ):
                 axes[0].plot(steps, [r[key] * coefficient for r in result.losses], label=key)
-            for name in ("sigreg", "goal_separation", "phi_norm", "psi_norm"):
+            for name in ("sigreg", "goal_separation", "phi_norm", "psi_norm", "retention_kl"):
                 coefficient = options.get(f"{name}_coef", 0.0)
                 axes[1].plot(
                     steps,
@@ -283,6 +283,70 @@ class NotebookDiagnostics:
             for ax in axes:
                 ax.legend()
             emit(fig, "actor-losses")
+        if getattr(result, "transfer_probes", None):
+            probes = result.transfer_probes
+            fig, axes = plt.subplots(1, 3, figsize=(16, 4))
+            steps = [p["step"] for p in probes]
+            axes[0].semilogy(steps, [p["alpha"] for p in probes], marker=".")
+            axes[0].set(
+                title="Temperature (including step zero)",
+                xlabel="Environment steps",
+                ylabel="Alpha",
+            )
+            for goal_id in task_ids:
+                values = [
+                    next(r["success_rate"] for r in p["evaluation"] if r["task_id"] == goal_id)
+                    for p in probes
+                ]
+                axes[1].plot(steps, values, marker=".", label=f"Goal {goal_id}")
+                early = [
+                    (p["updates"], value)
+                    for p, value in zip(probes, values)
+                    if p["updates"] <= 5001
+                ]
+                if early:
+                    axes[2].plot(*zip(*early), marker=".", label=f"Goal {goal_id}")
+            axes[1].set(
+                title="Transfer and retention during training",
+                xlabel="Environment steps",
+                ylim=(-0.05, 1.05),
+            )
+            axes[2].set(
+                title="Before / just after updates begin",
+                xlabel="Optimizer updates",
+                ylim=(-0.05, 1.05),
+            )
+            for ax in axes[1:]:
+                ax.legend()
+            emit(fig, "transfer-probes")
+        gradient_rows = [r for r in result.losses if "actor_current_grad_norm" in r]
+        if algorithm == "sac" and gradient_rows:
+            fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+            steps = [r["step"] for r in gradient_rows]
+            for name in (
+                "current",
+                "replay",
+                "retention_kl",
+                "sigreg",
+                "goal_separation",
+                "phi_norm",
+                "psi_norm",
+            ):
+                axes[0].plot(
+                    steps, [r[f"actor_{name}_grad_norm"] for r in gradient_rows], label=name
+                )
+            axes[0].set(
+                yscale="symlog", title="Weighted actor gradient norms", xlabel="Environment steps"
+            )
+            axes[0].legend()
+            axes[1].plot(steps, [r["actor_current_replay_grad_cosine"] for r in gradient_rows])
+            axes[1].axhline(0, color="grey", linewidth=0.5)
+            axes[1].set(
+                title="Current / replay gradient cosine",
+                xlabel="Environment steps",
+                ylim=(-1.05, 1.05),
+            )
+            emit(fig, "actor-gradients")
         for name, data in branches.items():
             fig, axes = plt.subplots(2, 3, figsize=(15, 8))
             im = axes[0, 0].imshow(data["psi_cosine"], vmin=-1, vmax=1, cmap="coolwarm")

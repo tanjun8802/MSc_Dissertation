@@ -38,8 +38,14 @@ with tempfile.TemporaryDirectory(prefix="tbtrl-notebooks-") as directory:
             if "FactorisedActor" in path.stem
             else [None]
         )
-        cases.extend((path, variant) for variant in variants)
-    for path, variant in cases:
+        if path.stem.endswith("SAC_Transfer"):
+            cases.extend(
+                (path, None, experiment)
+                for experiment in ("temperature_carry", "scaled_regularization", "policy_retention")
+            )
+        else:
+            cases.extend((path, variant, None) for variant in variants)
+    for path, variant, experiment in cases:
         notebook = nbformat.read(path, as_version=4)
         nbformat.validate(notebook)
         # Override only the in-memory test copy; committed notebooks use full budgets.
@@ -48,6 +54,10 @@ with tempfile.TemporaryDirectory(prefix="tbtrl-notebooks-") as directory:
                 assert "SMOKE = False" in cell.source
                 cell.source = cell.source.replace("SMOKE = False", "SMOKE = True")
                 cell.source += '\nDEVICE = "cpu"'
+                if experiment is not None:
+                    cell.source = cell.source.replace(
+                        'EXPERIMENT = "temperature_carry"', f'EXPERIMENT = "{experiment}"'
+                    )
                 if variant is not None:
                     cell.source = cell.source.replace(
                         'VARIANT = "factorised_tbtrl"', f'VARIANT = "{variant}"'
@@ -64,7 +74,15 @@ with tempfile.TemporaryDirectory(prefix="tbtrl-notebooks-") as directory:
         ]
         assert any("Training task=" in out.get("text", "") for out in outputs)
         assert any("image/png" in out.get("data", {}) for out in outputs)
-        if variant is not None:
+        if experiment is not None:
+            run = next((work / "runs").glob(f"*-{experiment}-factorised_tbtrl-*"))
+            probes = list(run.rglob("transfer-probes.json"))
+            assert len(probes) == 6
+            assert all(json.loads(p.read_text())[0]["step"] == 0 for p in probes)
+            assert len(list(run.rglob("transfer-probes.png"))) == 6
+            assert len(list(run.rglob("actor-gradients.png"))) == 6
+            assert any("Transfer probe task=" in out.get("text", "") for out in outputs)
+        elif variant is not None:
             run = next((work / "runs").glob(f"*-{variant}-*"))
             diagnostics = list(run.rglob("diagnostics.json"))
             assert len(diagnostics) == 6
@@ -76,6 +94,6 @@ with tempfile.TemporaryDirectory(prefix="tbtrl-notebooks-") as directory:
         else:
             assert list((work / "runs").rglob("diagnostics.json"))
         print(
-            f"Executed {path.name} ({variant or 'original'}) with training logs and inline per-goal plots",
+            f"Executed {path.name} ({experiment or variant or 'original'}) with training logs and inline per-goal plots",
             flush=True,
         )

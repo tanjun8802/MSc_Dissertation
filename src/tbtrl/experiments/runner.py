@@ -153,6 +153,17 @@ def _save_task(directory, result, config, seed, task_id, mode, evaluations):
             "entropy_coefficient": result.entropy_coefficient,
         }
         record["success_curve"] = result.success_rates
+        record["initial_alpha"] = (
+            config.training.get("initial_alpha", 1.0)
+            if config.training.get("ent_coef", "auto") == "auto"
+            else float(config.training["ent_coef"])
+        )
+        record["final_alpha"] = result.entropy_coefficient
+        if result.transfer_probes:
+            record["transfer_probes"] = result.transfer_probes
+            (directory / "transfer-probes.json").write_text(
+                json.dumps(result.transfer_probes, indent=2, allow_nan=False) + "\n"
+            )
     checkpoint.update(
         config=asdict(config), seed=seed, task_id=task_id, mode=mode, format_version=1
     )
@@ -222,6 +233,17 @@ def _run_experiment(
                         task_goals = {}
                 task_goals[task_id] = np.asarray(goal, dtype=np.float32)
                 settings = training_settings(config, mode, task_id)
+                if (
+                    mode == "sequential"
+                    and final_result is not None
+                    and config.entropy_transfer == "carry"
+                ):
+                    settings["initial_alpha"] = final_result.entropy_coefficient
+                    logger.info(
+                        "Carrying temperature into task=%s: alpha=%.8g",
+                        task_id,
+                        settings["initial_alpha"],
+                    )
                 logger.info("=== %s | seed=%s | task=%s | goal=%s ===", mode, seed, task_id, goal)
                 before = _snapshot(models, config.algorithm) if on_task_end else None
                 result = _train(
@@ -330,6 +352,13 @@ def _run_experiment(
                         if key != task_id
                     }
                 settings = training_settings(config, "recovery", task_id)
+                if config.entropy_transfer == "carry":
+                    settings["initial_alpha"] = final_result.entropy_coefficient
+                    logger.info(
+                        "Recovery task=%s starts from final sequential alpha=%.8g",
+                        task_id,
+                        settings["initial_alpha"],
+                    )
                 before = _snapshot(models, config.algorithm) if on_task_end else None
                 logger.info("=== recovery | seed=%s | task=%s | goal=%s ===", seed, task_id, goal)
                 result = _train(

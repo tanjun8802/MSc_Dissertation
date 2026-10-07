@@ -1,5 +1,6 @@
 import logging
 import time
+from copy import deepcopy
 from typing import Any, Dict, Optional
 
 import numpy as np
@@ -10,9 +11,15 @@ from torch import nn, optim
 from tbtrl.evaluation import evaluate_policy_with_success
 from tbtrl.losses import CovarianceRegularizer
 from tbtrl.normalization import RunningMeanStd
-from tbtrl.random import set_seed
+from tbtrl.random import preserve_rng_state, set_seed
 from tbtrl.replay import ReplayBuffer
-from tbtrl.training.actor import ActorRegularizer, ActorTBTRLOptions, policy_objective
+from tbtrl.training.actor import (
+    ActorRegularizer,
+    ActorTBTRLOptions,
+    actor_gradient_statistics,
+    policy_objective,
+    policy_retention_kl,
+)
 from tbtrl.training.common import LossHistory, validate_training_options
 from tbtrl.training.results import SACResult
 
@@ -74,6 +81,8 @@ def train_sac(
     critic_grad_clip_norm: float = 10.0,
     actor_grad_clip_norm: float = 10.0,
     actor_tbtrl: dict | None = None,
+    transfer_probe_steps: list[int] | None = None,
+    actor_gradient_diagnostics: bool = False,
 ):
     """
     Factorised SAC-TBTRL trainer with independent critic branches.
@@ -183,6 +192,11 @@ def train_sac(
         early_stop_patience=early_stop_patience,
         eval_episodes=eval_episodes,
     )
+    if transfer_probe_steps is not None and any(
+        not isinstance(step, int) or step < 0 for step in transfer_probe_steps
+    ):
+        raise ValueError("transfer_probe_steps must contain nonnegative integer environment steps.")
+    probe_steps = set(transfer_probe_steps or [])
     actor_options = ActorTBTRLOptions.from_dict(actor_tbtrl or {})
     actor_regularizer = ActorRegularizer(actor, actor_options) if actor_tbtrl is not None else None
     if {id(p) for p in actor.parameters()} & {id(p) for p in critic.parameters()}:
@@ -200,6 +214,9 @@ def train_sac(
         raise ValueError(f"goal has shape {training_goal.shape}; expected ({goal_dim},).")
     task_goals[task_id] = training_goal.copy()
     actor = actor.to(device)
+    retention_reference = None
+    if actor_options.retention_kl_coef > 0 and replay_task_buffers:
+        retention_reference = deepcopy(actor).eval().requires_grad_(False)
     critic = critic.to(device)
     critic_target = critic_target.to(device)
     if reset_target_from_critic:
@@ -518,6 +535,77 @@ def train_sac(
         }
         return (phi_norm1, psi_norm1, phi_norm2, psi_norm2, statistics)
 
+    transfer_probes = []
+
+    def record_transfer_probe(step, updates):
+        if transfer_probe_steps is None:
+            return
+        # Fixed evaluation seeds within the task, all seen goals, no training RNG use.
+        with preserve_rng_state(), torch.no_grad():
+            rows = []
+            for probe_task_id in sorted(task_goals):
+                probe_goal = task_goals[probe_task_id]
+                probe_env = make_env(goal=probe_goal)
+                try:
+
+                    def policy(observation):
+                        state = torch.as_tensor(
+                            observation, dtype=torch.float32, device=device
+                        ).unsqueeze(0)
+                        goal = goal_batch_for(probe_goal, 1, device)
+                        return (
+                            actor.deterministic(normalize_state(state), normalize_goal(goal))
+                            .squeeze(0)
+                            .cpu()
+                            .numpy()
+                        )
+
+                    ret, length, success, distance = evaluate_policy_with_success(
+                        probe_env,
+                        policy,
+                        probe_goal,
+                        eval_episodes,
+                        seed=seed + 2_000_000 + probe_task_id * 100,
+                    )
+                    row = dict(
+                        task_id=probe_task_id,
+                        success_rate=success,
+                        mean_return=ret,
+                        mean_length=length,
+                        final_distance=distance if np.isfinite(distance) else None,
+                    )
+                    rows.append(row)
+                    logger.info(
+                        "Transfer probe task=%s step=%s updates=%s alpha=%.8g evaluated_goal=%s success=%.3f return=%.3f",
+                        task_id,
+                        step,
+                        updates,
+                        current_ent_coef().item(),
+                        probe_task_id,
+                        success,
+                        ret,
+                    )
+                finally:
+                    probe_env.close()
+            gradients = {
+                key: value
+                for key, value in (
+                    loss_history[-1] if loss_history and loss_history[-1]["step"] == step else {}
+                ).items()
+                if key.startswith("actor_") and "grad" in key
+            }
+            transfer_probes.append(
+                dict(
+                    step=step,
+                    updates=updates,
+                    alpha=current_ent_coef().item(),
+                    evaluation=rows,
+                    gradients=gradients,
+                )
+            )
+            if gradients:
+                logger.info("Transfer probe gradients step=%s: %s", step, gradients)
+
     (obs_dict, _) = env.reset(seed=seed)
     global_step = 0
     update_count = 0
@@ -529,6 +617,8 @@ def train_sac(
     solved = False
     min_steps = None
     min_time = None
+    if 0 in probe_steps:
+        record_transfer_probe(0, 0)
     while global_step < total_steps:
         state = np.asarray(obs_dict, dtype=np.float32)
         current_goal = training_goal.copy()
@@ -569,9 +659,11 @@ def train_sac(
         global_step += 1
         if terminated or truncated:
             (obs_dict, _) = env.reset()
-        if len(buffer) < warmup_steps:
-            continue
-        if global_step % train_freq != 0:
+        if len(buffer) < warmup_steps or global_step % train_freq != 0:
+            if global_step in probe_steps or (
+                transfer_probe_steps is not None and global_step % eval_freq == 0
+            ):
+                record_transfer_probe(global_step, update_count)
             continue
         for _ in range(gradient_steps):
             current_batch = buffer.sample(batch_size)
@@ -678,6 +770,8 @@ def train_sac(
             actor_current = (ent_coef_tensor * log_prob - min_q_pi).mean()
             actor_replay = zero_scalar()
             actor_penalty = zero_scalar()
+            actor_kl = zero_scalar()
+            gradient_statistics = {}
             actor_terms, actor_statistics = {}, {}
             old_entropy_residuals = []
             actor_replay_tasks = 0
@@ -700,6 +794,20 @@ def train_sac(
                             old_entropy_residuals.append(
                                 (old_log_prob.detach() + target_entropy).mean()
                             )
+                    if retention_reference is not None:
+                        old_kls = [
+                            policy_retention_kl(
+                                retention_reference,
+                                actor,
+                                normalize_state(old_batch.obs),
+                                normalize_goal(
+                                    goal_batch_for(old_goal, old_batch.obs.shape[0], device)
+                                ),
+                            )
+                            for old_goal, old_batch in replay_batches
+                        ]
+                        if old_kls:
+                            actor_kl = torch.stack(old_kls).mean()
                     if old_actor_losses:
                         actor_replay = torch.stack(old_actor_losses).mean()
                         actor_replay_tasks = len(old_actor_losses)
@@ -707,8 +815,24 @@ def train_sac(
                         actor, state_for_phi_reg, normalize_goal(seen_goals_tensor())
                     )
                 actor_loss = (
-                    actor_current + actor_options.replay_loss_coef * actor_replay + actor_penalty
+                    actor_current
+                    + actor_options.replay_loss_coef * actor_replay
+                    + actor_penalty
+                    + actor_options.retention_kl_coef * actor_kl
                 )
+                if actor_gradient_diagnostics and (
+                    global_step % eval_freq == 0 or global_step in probe_steps
+                ):
+                    components = dict(
+                        current=actor_current,
+                        replay=actor_options.replay_loss_coef * actor_replay,
+                        retention_kl=actor_options.retention_kl_coef * actor_kl,
+                    )
+                    for name in ("sigreg", "goal_separation", "phi_norm", "psi_norm"):
+                        components[name] = getattr(actor_options, f"{name}_coef") * actor_terms.get(
+                            name, zero_scalar()
+                        )
+                    gradient_statistics = actor_gradient_statistics(components, actor.parameters())
                 opt_actor.zero_grad(set_to_none=True)
                 actor_loss.backward()
                 actor_grad_norm = nn.utils.clip_grad_norm_(
@@ -764,6 +888,8 @@ def train_sac(
                     "actor_replay": actor_replay.detach().item(),
                     "actor_replay_tasks": actor_replay_tasks,
                     "actor_regularization": actor_penalty.detach().item(),
+                    "actor_retention_kl": actor_kl.detach().item(),
+                    **gradient_statistics,
                     **{f"actor_{key}": value.detach().item() for key, value in actor_terms.items()},
                     **{key: value.item() for key, value in actor_statistics.items()},
                     "alpha": current_ent_coef().detach().item(),
@@ -783,6 +909,10 @@ def train_sac(
                     "replay_tasks": len(replay_batches),
                 }
             )
+        if global_step in probe_steps or (
+            transfer_probe_steps is not None and global_step % eval_freq == 0
+        ):
+            record_transfer_probe(global_step, update_count)
         if global_step % eval_freq != 0:
             continue
         eval_env = make_env(goal=training_goal)
@@ -859,4 +989,5 @@ def train_sac(
         goal_rms,
         current_ent_coef().detach().item(),
         loss_history,
+        transfer_probes,
     )

@@ -34,3 +34,4 @@ class SACResult:
     goal_normalizer: Any
     entropy_coefficient: float
     losses: list = field(default_factory=list)
+    transfer_probes: list = field(default_factory=list)

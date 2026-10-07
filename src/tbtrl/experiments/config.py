@@ -15,6 +15,7 @@ class ExperimentConfig:
     seeds: list[int] = field(default_factory=lambda: [42])
     environment_options: dict = field(default_factory=dict)
     model: dict = field(default_factory=dict)
+    entropy_transfer: str = "reset"
     actor_type: str = "mlp"
     actor_model: dict = field(default_factory=dict)
     training: dict = field(default_factory=dict)
@@ -51,6 +52,14 @@ class ExperimentConfig:
         from tbtrl.models.sac import FactorisedGaussianActor
         from tbtrl.training.actor import ActorTBTRLOptions
 
+        if self.entropy_transfer not in ("reset", "carry"):
+            raise ValueError("entropy_transfer must be reset or carry.")
+        if self.entropy_transfer == "carry":
+            if self.algorithm != "sac":
+                raise ValueError("Entropy transfer requires SAC.")
+            for phase in ({}, self.scratch, self.first_task, self.recovery):
+                if dict(self.training, **phase).get("ent_coef", "auto") != "auto":
+                    raise ValueError("Entropy transfer requires automatic entropy tuning.")
         if self.actor_type not in ("mlp", "factorised"):
             raise ValueError("actor_type must be mlp or factorised.")
         if self.actor_type == "factorised" and self.algorithm != "sac":
@@ -114,6 +123,8 @@ class ExperimentConfig:
             enable_early_stop=False,
             sketch_dim=4,
         )
+        if training.get("transfer_probe_steps") is not None:
+            training["transfer_probe_steps"] = [0, 3, 4, 5, 8]
         model = dict(self.model, hidden_dim=8)
         model["rep_dim" if self.algorithm == "dqn" else "latent_dim"] = 4
         return replace(

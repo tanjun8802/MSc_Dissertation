@@ -49,14 +49,14 @@ def test_unknown_config_option_fails_before_training():
 
 def test_working_notebooks_compile_and_new_experiment_has_no_saved_outputs():
     notebooks = list((ROOT / "experiments/working").glob("*.ipynb"))
-    assert len(notebooks) == 4
+    assert len(notebooks) == 5
     for path in notebooks:
         notebook = nbformat.read(path, as_version=4)
         nbformat.validate(notebook)
         for cell in notebook.cells:
             if cell.cell_type == "code":
                 compile(cell.source, str(path), "exec")
-                if "FactorisedActor" in path.stem:
+                if path.stem.endswith("SAC_Transfer"):
                     assert cell.execution_count is None and cell.outputs == []
                     assert "sys.path" not in cell.source
         assert "run_experiment" in json.dumps(notebook)

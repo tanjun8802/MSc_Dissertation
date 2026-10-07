@@ -36,7 +36,7 @@ uv sync --locked --extra notebooks --group dev
 uv run jupyter lab experiments/working
 ```
 
-Select the environment's Python kernel. All four notebooks default to the original full research budgets;
+Select the environment's Python kernel. All five notebooks default to the original full research budgets;
 set `SMOKE = True` only for a short execution check. They invoke the same runner as the CLI,
 and use the shared trainer code. The two original Maze result notebooks are preserved as committed.
 
@@ -46,6 +46,13 @@ Its `VARIANT` selector supports `baseline`, `factorised_only`, `mlp_replay`, and
 `factorised_tbtrl` (default). Logs and actor/critic diagnostic plots appear in the
 training cell after each goal. Full budgets and critic settings match the original
 Maze SAC configuration. See [the actor objective and experiment guide](docs/factorised-actor.md).
+
+For the follow-up to the saved actor results, use
+[`TBTRL_GridworldMaze_SAC_Transfer.ipynb`](experiments/working/TBTRL_GridworldMaze_SAC_Transfer.ipynb).
+It defaults to matching initial temperature and carrying learned alpha between tasks,
+with step-zero/early retention probes and actor gradient plots. Compare `matched_reset`
+against `temperature_carry` first; covariance scaling and policy KL are separate optional
+presets. See [the controlled experiment guide](docs/transfer-experiments.md).
 
 ## Supported configurations
 
@@ -66,7 +73,7 @@ scientific comparisons should use additional seeds and task orders.
 
 ```text
 configs/                    Experiment settings
-experiments/working/        Four supported notebooks
+experiments/working/        Five supported notebooks
 src/tbtrl/
   environments/             Gymnasium environments, layouts and registration
   models/                   Factorised DQN and SAC models
