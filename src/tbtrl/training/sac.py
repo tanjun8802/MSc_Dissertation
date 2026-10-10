@@ -83,6 +83,8 @@ def train_sac(
     actor_tbtrl: dict | None = None,
     transfer_probe_steps: list[int] | None = None,
     actor_gradient_diagnostics: bool = False,
+    current_buffer: ReplayBuffer | None = None,
+    relabel_rewards: bool = False,
 ):
     """
     Factorised SAC-TBTRL trainer with independent critic branches.
@@ -132,6 +134,8 @@ def train_sac(
         raise ValueError("critic_target must be provided.")
     if env is None:
         raise ValueError("env must be provided.")
+    if relabel_rewards and not callable(getattr(env, "relabel_transitions", None)):
+        raise ValueError("Shared SAC replay requires env.relabel_transitions(batch, goal).")
     if buffer_capacity is None:
         raise ValueError("buffer_capacity must be provided.")
     if goal is None:
@@ -316,7 +320,16 @@ def train_sac(
     opt_actor = optim.AdamW(actor.parameters(), lr=lr_actor, weight_decay=0.0)
     opt_critic1 = optim.AdamW(critic1_params, lr=lr_critic, weight_decay=0.0)
     opt_critic2 = optim.AdamW(critic2_params, lr=lr_critic, weight_decay=0.0)
-    buffer = ReplayBuffer(buffer_capacity, obs_dim, action_dim, device=device)
+    buffer = current_buffer
+    if buffer is None:
+        buffer = ReplayBuffer(buffer_capacity, obs_dim, action_dim, device=device)
+    elif (buffer.capacity, buffer.obs_dim, buffer.action_dim, buffer.discrete) != (
+        buffer_capacity,
+        obs_dim,
+        action_dim,
+        False,
+    ):
+        raise ValueError("Current replay buffer does not match the SAC training specification.")
     if initial_alpha <= 0 or not np.isfinite(initial_alpha):
         raise ValueError("initial_alpha must be finite and positive.")
     if target_entropy is None:
@@ -387,8 +400,10 @@ def train_sac(
     def td_target(
         batch, raw_goal_batch: torch.Tensor, ent_coef_tensor: torch.Tensor
     ) -> torch.Tensor:
-        rewards = batch.rewards
-        terminated = batch.terminated
+        if relabel_rewards:
+            rewards, terminated = env.relabel_transitions(batch, raw_goal_batch)
+        else:
+            rewards, terminated = batch.rewards, batch.terminated
         if rewards.ndim == 1:
             rewards = rewards.unsqueeze(-1)
         if terminated.ndim == 1:
@@ -691,7 +706,7 @@ def train_sac(
                 replay_batch_size = max(1, int(batch_size * replay_ratio / n_old_tasks))
                 for old_task_id in selected_old_task_ids:
                     old_buffer = replay_task_buffers[old_task_id]
-                    if len(old_buffer) < replay_batch_size:
+                    if len(old_buffer) < replay_batch_size and current_buffer is None:
                         continue
                     old_batch = old_buffer.sample(replay_batch_size)
                     old_goal = task_goals[old_task_id]

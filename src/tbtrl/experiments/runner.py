@@ -17,6 +17,7 @@ import torch
 
 from tbtrl.environments.registry import make_environment
 from tbtrl.evaluation import evaluate_policy_with_success, make_policy
+from tbtrl.global_replay import GlobalReplayMemory
 from tbtrl.models.dqn import FactorisedQNetwork
 from tbtrl.models.sac import FactorisedGaussianActor, FactorisedTwinCritic, GaussianActor
 from tbtrl.random import set_seed
@@ -65,7 +66,7 @@ def _models(config, factory, device):
         env.close()
 
 
-def _train(config, models, factory, task_id, seed, device, goals, buffers, settings):
+def _train(config, models, factory, task_id, seed, device, goals, buffers, settings, memory=None):
     env = factory(goal=config.goals[task_id])
     common = dict(
         seed=seed,
@@ -78,6 +79,8 @@ def _train(config, models, factory, task_id, seed, device, goals, buffers, setti
         replay_task_buffers=buffers,
         **settings,
     )
+    if isinstance(memory, GlobalReplayMemory):
+        common["current_buffer"] = memory.begin_task()
     logger.info(
         "Training task=%s goal=%s seed=%s settings=%s",
         task_id,
@@ -91,6 +94,60 @@ def _train(config, models, factory, task_id, seed, device, goals, buffers, setti
         return train_sac(actor=models[0], critic=models[1], critic_target=models[2], **common)
     finally:
         env.close()
+
+
+def _memory(config, factory, device):
+    if config.replay_mode == "per_task":
+        return TaskReplayMemory(config.replay_keep_fraction, config.similarity_threshold)
+    env = factory(goal=config.goals[0])
+    try:
+        if not callable(getattr(env, "relabel_transitions", None)):
+            raise ValueError("Global replay requires environment reward/termination relabelling.")
+        return GlobalReplayMemory(
+            config.global_replay_capacity,
+            config.recent_replay_capacity,
+            env.observation_space.shape[0],
+            1 if config.algorithm == "dqn" else env.action_space.shape[0],
+            device,
+            discrete=config.algorithm == "dqn",
+            keep_fraction=config.replay_keep_fraction,
+            similarity_threshold=config.similarity_threshold,
+            max_groups=config.replay_max_groups,
+        )
+    finally:
+        env.close()
+
+
+def _archive_global(config, memory, result, task_id, goals, device):
+    # Only the bounded representative set is compared; no task-by-task N^2 matrix.
+    ids = memory.representatives + [task_id]
+    values = torch.as_tensor(
+        np.asarray([goals[i] for i in ids]), dtype=torch.float32, device=device
+    )
+    with torch.no_grad():
+        if config.algorithm == "dqn":
+            branches = [result.network.encode_goal(values)]
+        else:
+            if config.training.get("normalize_goal_inputs", False):
+                values = result.goal_normalizer.normalize(
+                    values, clip=config.training.get("obs_norm_clip", 10.0)
+                )
+            branches = [result.critic.psi1_forward(values), result.critic.psi2_forward(values)]
+        cosines = []
+        for embeddings in branches:
+            unit = torch.nn.functional.normalize(embeddings, dim=-1)
+            cosines.append(unit @ unit.T)
+        similarities = torch.stack(cosines).mean(dim=0).cpu().numpy()
+    memory.finish_task(task_id, similarities)
+
+
+def _record_memory(directory, record, memory):
+    if isinstance(memory, GlobalReplayMemory):
+        record["replay_memory"] = memory.stats()
+        (directory / "metrics.json").write_text(
+            json.dumps(record, indent=2, allow_nan=False) + "\n"
+        )
+        logger.info("Global replay: %s", json.dumps(record["replay_memory"]))
 
 
 def _evaluate(config, result, factory, seed):
@@ -224,11 +281,13 @@ def _run_experiment(
                 continue
             set_seed(seed)
             models = _models(config, factory, device) if mode == "sequential" else None
-            memory = TaskReplayMemory(config.replay_keep_fraction, config.similarity_threshold)
+            memory = _memory(config, factory, device)
             task_goals = {}
             for task_id, goal in enumerate(config.goals):
                 if mode == "scratch":
                     models = _models(config, factory, device)
+                    if config.replay_mode == "global":
+                        memory = _memory(config, factory, device)
                     if not config.scratch_seen_goals:
                         task_goals = {}
                 task_goals[task_id] = np.asarray(goal, dtype=np.float32)
@@ -256,8 +315,11 @@ def _run_experiment(
                     task_goals,
                     memory.buffers if mode == "sequential" else {},
                     settings,
+                    memory,
                 )
                 task_config = replace(config, training=settings)
+                if mode == "sequential" and isinstance(memory, GlobalReplayMemory):
+                    _archive_global(task_config, memory, result, task_id, task_goals, device)
                 evaluation = _evaluate(task_config, result, factory, seed)
                 records.append(
                     _save_task(
@@ -269,6 +331,9 @@ def _run_experiment(
                         mode,
                         evaluation,
                     )
+                )
+                _record_memory(
+                    output / f"seed_{seed}" / mode / f"task_{task_id}", records[-1], memory
                 )
                 if on_task_end:
                     on_task_end(
@@ -292,6 +357,7 @@ def _run_experiment(
                     similarities = None
                     if (
                         config.algorithm == "dqn"
+                        and not isinstance(memory, GlobalReplayMemory)
                         and task_id > 0
                         and config.similarity_threshold is not None
                     ):
@@ -305,11 +371,13 @@ def _run_experiment(
                                 result.network.encode_goal(goals_t), dim=-1
                             )
                             similarities = (embeddings[-1] @ embeddings[:-1].T).cpu().numpy()
-                    memory.add(task_id, result.buffer, similarities)
+                    if not isinstance(memory, GlobalReplayMemory):
+                        memory.add(task_id, result.buffer, similarities)
                     final_result, sequential_memory, sequential_goals = result, memory, task_goals
         if "recovery" in modes:
             retention = _evaluate(config, final_result, factory, seed)
             for task_id, goal in enumerate(config.goals):
+                recovery_memory = None
                 if (
                     config.recovery_threshold is not None
                     and retention[task_id]["success_rate"] >= config.recovery_threshold
@@ -351,6 +419,13 @@ def _run_experiment(
                         for key, value in sequential_memory.buffers.items()
                         if key != task_id
                     }
+                if isinstance(sequential_memory, GlobalReplayMemory):
+                    recovery_memory = sequential_memory.fork()
+                    buffers = {
+                        key: value
+                        for key, value in recovery_memory.buffers.items()
+                        if key != task_id
+                    }
                 settings = training_settings(config, "recovery", task_id)
                 if config.entropy_transfer == "carry":
                     settings["initial_alpha"] = final_result.entropy_coefficient
@@ -371,6 +446,7 @@ def _run_experiment(
                     deepcopy(sequential_goals),
                     buffers,
                     settings,
+                    recovery_memory,
                 )
                 task_config = replace(config, training=settings)
                 evaluation = _evaluate(task_config, result, factory, seed)
@@ -384,6 +460,11 @@ def _run_experiment(
                         "recovery",
                         evaluation,
                     )
+                )
+                _record_memory(
+                    output / f"seed_{seed}" / "recovery" / f"task_{task_id}",
+                    records[-1],
+                    recovery_memory,
                 )
                 if on_task_end:
                     on_task_end(

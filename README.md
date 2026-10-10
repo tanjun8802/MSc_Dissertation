@@ -36,7 +36,7 @@ uv sync --locked --extra notebooks --group dev
 uv run jupyter lab experiments/working
 ```
 
-Select the environment's Python kernel. All five notebooks default to the original full research budgets;
+Select the environment's Python kernel. All six notebooks default to full research training budgets;
 set `SMOKE = True` only for a short execution check. They invoke the same runner as the CLI,
 and use the shared trainer code. The two original Maze result notebooks are preserved as committed.
 
@@ -53,6 +53,12 @@ It defaults to matching initial temperature and carrying learned alpha between t
 with step-zero/early retention probes and actor gradient plots. Compare `matched_reset`
 against `temperature_carry` first; covariance scaling and policy KL are separate optional
 presets. See [the controlled experiment guide](docs/transfer-experiments.md).
+
+For a fixed replay budget across tasks, use
+[`TBTRL_GridworldMaze_SAC_GlobalReplay.ipynb`](experiments/working/TBTRL_GridworldMaze_SAC_GlobalReplay.ipynb).
+It includes recent experience in the global limit, shares archive space by goal
+similarity, relabels SAC rewards/termination, and reports allocated replay bytes.
+See [the memory policy and matched control](docs/global-replay.md).
 
 ## Supported configurations
 
@@ -73,7 +79,7 @@ scientific comparisons should use additional seeds and task orders.
 
 ```text
 configs/                    Experiment settings
-experiments/working/        Five supported notebooks
+experiments/working/        Six supported notebooks
 src/tbtrl/
   environments/             Gymnasium environments, layouts and registration
   models/                   Factorised DQN and SAC models

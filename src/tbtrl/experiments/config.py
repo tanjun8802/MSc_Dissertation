@@ -22,6 +22,10 @@ class ExperimentConfig:
     replay_keep_fraction: float = 0.4
     replay_schedule: str = "constant"
     similarity_threshold: float | None = None
+    replay_mode: str = "per_task"
+    global_replay_capacity: int = 1000000
+    recent_replay_capacity: int = 250000
+    replay_max_groups: int = 16
     scratch: dict = field(default_factory=dict)
     first_task: dict = field(default_factory=dict)
     task_seed_stride: int = 1
@@ -45,7 +49,41 @@ class ExperimentConfig:
             raise ValueError("replay_keep_fraction must be in (0, 1].")
         if self.replay_schedule not in ("constant", "task_count"):
             raise ValueError("Unknown replay_schedule.")
-        if self.similarity_threshold is not None and self.algorithm != "dqn":
+        if self.replay_mode not in ("per_task", "global"):
+            raise ValueError("replay_mode must be per_task or global.")
+        if self.replay_mode == "global":
+            if any(
+                not isinstance(value, int) or isinstance(value, bool)
+                for value in (
+                    self.global_replay_capacity,
+                    self.recent_replay_capacity,
+                    self.replay_max_groups,
+                )
+            ):
+                raise ValueError("Global replay capacities and group limit must be integers.")
+            if not 1 <= self.recent_replay_capacity < self.global_replay_capacity:
+                raise ValueError("Recent replay capacity must leave space in the global budget.")
+            if (
+                not 2
+                <= self.replay_max_groups
+                <= (self.global_replay_capacity - self.recent_replay_capacity)
+            ):
+                raise ValueError("Global replay requires at least two groups and a slot per group.")
+            if self.similarity_threshold is None or not -1 <= self.similarity_threshold < 1:
+                raise ValueError("Global replay requires a similarity_threshold in [-1, 1).")
+            for phase in ({}, self.scratch, self.first_task, self.recovery):
+                if (
+                    dict(self.training, **phase).get(
+                        "warmup_steps", 25000 if self.algorithm == "sac" else 5000
+                    )
+                    > self.recent_replay_capacity
+                ):
+                    raise ValueError("Recent replay capacity must cover every phase's warmup.")
+        if (
+            self.similarity_threshold is not None
+            and self.algorithm != "dqn"
+            and self.replay_mode != "global"
+        ):
             raise ValueError("Shared task buffers require DQN reward relabelling.")
         if self.recovery_threshold is not None and not 0 <= self.recovery_threshold <= 1:
             raise ValueError("recovery_threshold must be a success rate in [0, 1].")
@@ -91,6 +129,7 @@ class ExperimentConfig:
             "make_env",
             "task_goals",
             "replay_task_buffers",
+            "current_buffer",
             "q_network",
             "q_target_network",
             "actor",
@@ -140,6 +179,15 @@ class ExperimentConfig:
             recovery=dict(self.recovery, total_steps=16, warmup_steps=4, enable_early_stop=False),
             eval_episodes=1,
             recovery_threshold=None,
+            global_replay_capacity=64
+            if self.replay_mode == "global"
+            else self.global_replay_capacity,
+            recent_replay_capacity=32
+            if self.replay_mode == "global"
+            else self.recent_replay_capacity,
+            replay_max_groups=min(self.replay_max_groups, 8)
+            if self.replay_mode == "global"
+            else self.replay_max_groups,
         )
 
 
@@ -159,6 +207,10 @@ def training_settings(config, mode, task_id):
             settings.update(config.first_task)
         if mode == "recovery":
             settings.update(config.recovery)
+    if config.replay_mode == "global":
+        settings["buffer_capacity"] = config.recent_replay_capacity
+        if config.algorithm == "sac":
+            settings["relabel_rewards"] = True
     return settings
 
 

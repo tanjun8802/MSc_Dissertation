@@ -65,6 +65,12 @@ and Polyak updates retain their configured behaviour. SAC task buffers keep
 their original rewards and must not be shared across reward tasks without a
 relabelling implementation.
 
+The optional [global replay mode](global-replay.md) now supplies this contract
+for continuous Maze. It bounds recent plus archived transition storage, groups
+similar tasks, and recomputes rewards and goal termination in SAC TD targets.
+It is a separate experimental condition; original per-task configurations are
+unchanged.
+
 ## Task boundaries and evaluation
 
 | State | Scratch | Sequential | Independent recovery |

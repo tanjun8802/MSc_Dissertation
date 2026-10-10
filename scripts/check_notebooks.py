@@ -38,7 +38,9 @@ with tempfile.TemporaryDirectory(prefix="tbtrl-notebooks-") as directory:
             if "FactorisedActor" in path.stem
             else [None]
         )
-        if path.stem.endswith("SAC_Transfer"):
+        if path.stem.endswith("SAC_GlobalReplay"):
+            cases.append((path, None, "global_replay"))
+        elif path.stem.endswith("SAC_Transfer"):
             cases.extend(
                 (path, None, experiment)
                 for experiment in ("temperature_carry", "scaled_regularization", "policy_retention")

@@ -60,6 +60,31 @@ class DiscreteGoalMaze(maze_discrete.MazeGoalWrapper):
 
 
 class ContinuousGoalMaze(maze.MazeGoalWrapper):
+    def relabel_transitions(self, batch, goal):
+        """Goal-dependent rewards/termination in raw coordinates, on the batch device.
+
+        This maze has goal-independent dynamics and no non-goal terminal states.
+        Other environments must supply their own relabelling contract.
+        """
+        states, next_states = batch.obs, batch.next_obs
+        goals = torch.as_tensor(goal, dtype=states.dtype, device=states.device)
+        reached = (next_states - goals).norm(dim=-1) <= self.goal_radius
+        distance = (next_states - states).norm(dim=-1)
+        moved = distance > self.movement_eps
+        rewards = torch.where(reached, self.goal_reward, self.step_reward)
+        if self.reward_mode in ("simple", "shaped"):
+            rewards = torch.where(~reached & ~moved, self.wall_penalty, rewards)
+            rewards = rewards + torch.where(
+                moved, self.movement_bonus_coef * distance.pow(self.movement_bonus_power), 0.0
+            )
+        if self.reward_mode == "shaped":
+            max_distance = self.env.unwrapped.width + self.env.unwrapped.height - 2
+            if max_distance > 0:
+                phi = 1 - (states - goals).abs().sum(dim=-1) / max_distance
+                next_phi = 1 - (next_states - goals).abs().sum(dim=-1) / max_distance
+                rewards = rewards + self.gamma * next_phi - phi
+        return rewards.to(states.dtype).view(-1, 1), reached.to(states.dtype).view(-1, 1)
+
     def goal_distance(self, observation, goal):
         return float(np.linalg.norm(np.asarray(observation) - goal))
 

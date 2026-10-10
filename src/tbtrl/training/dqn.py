@@ -55,6 +55,7 @@ def train_dqn(
     goal_separation_target_cosine=0.85,
     psi_raw_norm_coef=0.0001,
     phi_raw_norm_coef=0.0001,
+    current_buffer=None,
 ):
     """
     Functional factorised critic:
@@ -157,7 +158,16 @@ def train_dqn(
     ).view(1, -1)
     opt_sa = optim.Adam(q_network.sa_encoder.parameters(), lr=lr_sa)
     opt_goal = optim.Adam(q_network.goal_encoder.parameters(), lr=lr_goal_init)
-    buffer = ReplayBuffer(buffer_capacity, obs_dim, 1, device=device, discrete=True)
+    buffer = current_buffer
+    if buffer is None:
+        buffer = ReplayBuffer(buffer_capacity, obs_dim, 1, device=device, discrete=True)
+    elif (buffer.capacity, buffer.obs_dim, buffer.action_dim, buffer.discrete) != (
+        buffer_capacity,
+        obs_dim,
+        1,
+        True,
+    ):
+        raise ValueError("Current replay buffer does not match the DQN training specification.")
 
     def goal_batch_for(goal_value, batch_size, target_device):
         if isinstance(goal_value, torch.Tensor):
@@ -291,7 +301,7 @@ def train_dqn(
             replay_batch_size = max(1, int(batch_size * replay_ratio / n_old_tasks))
             for old_task_id in selected_old_task_ids:
                 old_buffer = replay_task_buffers[old_task_id]
-                if len(old_buffer) < replay_batch_size:
+                if len(old_buffer) < replay_batch_size and current_buffer is None:
                     continue
                 old_batch = old_buffer.sample(replay_batch_size)
                 old_goal = task_goals[old_task_id]

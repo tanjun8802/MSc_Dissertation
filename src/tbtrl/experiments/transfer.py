@@ -8,6 +8,7 @@ EXPERIMENTS = (
     "temperature_carry",
     "scaled_regularization",
     "policy_retention",
+    "global_replay",
 )
 ACTORS = ("baseline", "factorised_only", "mlp_replay", "factorised_tbtrl")
 
@@ -47,6 +48,10 @@ def configure_transfer(config, experiment="temperature_carry", actor_variant="fa
         if actor_variant not in ("factorised_tbtrl", "mlp_replay"):
             raise ValueError("policy_retention requires an actor replay variant.")
         result.training["actor_tbtrl"]["retention_kl_coef"] = 0.01
+    if experiment == "global_replay":
+        result.replay_mode = "global"
+        result.similarity_threshold = 0.8
+        result.training["replay_tasks_per_batch"] = 4
     warmup = result.training["warmup_steps"]
     result.training["transfer_probe_steps"] = sorted(
         {0, max(0, warmup - 1), warmup, warmup + 100, warmup + 1000, warmup + 5000}

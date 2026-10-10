@@ -53,9 +53,12 @@ inside the trainer. See `DiscreteGoalMaze` for an example.
 ## SAC
 
 Use a one-dimensional Box action vector with bounds [-1, 1]. Wrap physical
-ranges with a normalised-action adapter. Replay rewards and termination belong
-to the goal under which each buffer was collected. Do not enable similarity
-sharing for SAC buffers.
+ranges with a normalised-action adapter. Legacy per-task replay uses stored
+rewards and termination. Global replay enables `relabel_rewards=True` and requires
+the same `relabel_transitions(batch, goal)` contract as DQN. Include non-goal
+terminal conditions where relevant; shared transitions must remain valid under
+the receiving goal's dynamics. See `ContinuousGoalMaze` and the
+[fixed-budget replay guide](global-replay.md).
 
 ## Extension checks
 

@@ -67,6 +67,20 @@ class ReplayBuffer:
     def chronological_indices(self):
         return (self.pos - self.size + np.arange(self.size)) % self.capacity
 
+    @classmethod
+    def view(cls, storage, start, stop, *, size=0):
+        """A ring buffer over existing slots, without allocating transition arrays."""
+        if not 0 <= start < stop <= storage.capacity or not 0 <= size <= stop - start:
+            raise ValueError("Invalid replay view bounds.")
+        result = cls.__new__(cls)
+        result.capacity = stop - start
+        result.obs_dim, result.action_dim = storage.obs_dim, storage.action_dim
+        result.device, result.discrete = storage.device, storage.discrete
+        result.size, result.pos = size, size % result.capacity
+        for name in cls.fields:
+            setattr(result, name, getattr(storage, name)[start:stop])
+        return result
+
     def keep_last(self, fraction):
         if not 0 < fraction <= 1:
             raise ValueError("Retained fraction must be in (0, 1].")
