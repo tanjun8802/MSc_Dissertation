@@ -140,19 +140,28 @@ def test_new_environment_dimensions_and_normalized_checkpoint(tmp_path, actor_ty
     np.testing.assert_allclose(load_policy(path)(observation), expected, atol=1e-7)
 
 
-@pytest.mark.parametrize("algorithm", ["dqn", "sac", "sac_factorised_actor"])
+@pytest.mark.parametrize("algorithm", ["dqn", "sac", "sac_factorised_actor", "sac_global"])
 def test_diagnostics_are_per_goal_visible_saved_and_do_not_change_training(
     algorithm, tmp_path, capsys, monkeypatch
 ):
     import torch
 
     from tbtrl.experiments.diagnostics import NotebookDiagnostics
+    from tbtrl.experiments.figure_style import FigureStyle
 
-    config = load_config(ROOT / f"configs/tbtrl_gridworldmaze_{algorithm}.json").smoke()
+    name = "sac_factorised_actor" if algorithm == "sac_global" else algorithm
+    config = load_config(ROOT / f"configs/tbtrl_gridworldmaze_{name}.json")
+    if algorithm == "sac_global":
+        from tbtrl.experiments.transfer import configure_transfer
+
+        config = configure_transfer(config, "global_replay")
+    config = config.smoke()
     baseline = tmp_path / "without"
     observed = tmp_path / "with"
     run_experiment(config, baseline, modes=("sequential",), verbose=False)
-    callback = NotebookDiagnostics(display=False, rollout_episodes=1)
+    callback = NotebookDiagnostics(
+        display=False, rollout_episodes=1, style=FigureStyle(dpi=80, formats=("png",))
+    )
     completed = []
     as_tensor = torch.as_tensor
 
@@ -192,6 +201,7 @@ def test_diagnostics_are_per_goal_visible_saved_and_do_not_change_training(
             assert (observed / relative / "actor-losses.png").stat().st_size > 1000
         assert (observed / relative / "rollouts.png").stat().st_size > 1000
         assert (observed / relative / "q-policy.png").stat().st_size > 1000
+        assert (observed / relative / "critic-losses.png").stat().st_size > 1000
 
 
 def test_notebooks_default_to_full_configs_and_explicit_diagnostics():

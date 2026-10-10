@@ -102,7 +102,10 @@ Each run streams training progress and saves the same messages in `training.log`
 along with `manifest.json` and `summary.json`. Notebook runs display diagnostics
 immediately after every trained goal: learning/loss curves, Q and policy maps,
 rollouts, raw embedding norms, cosine matrices, covariance spectra, drift and
-weight changes. Numeric diagnostics and PNGs are saved beside each checkpoint.
+weight changes. Numeric diagnostics and 300 dpi PNG/PDF/SVG figures are saved
+beside each checkpoint. All notebooks share the same plotting conventions;
+see [research figures](docs/visualisations.md) for styles, statistical labels and
+regenerating publication figures from saved runs without retraining.
 See [the notebook parity audit](docs/notebook-parity.md) for exact settings and
 legacy behavior that required repair.
 

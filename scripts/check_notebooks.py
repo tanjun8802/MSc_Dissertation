@@ -56,6 +56,7 @@ with tempfile.TemporaryDirectory(prefix="tbtrl-notebooks-") as directory:
                 assert "SMOKE = False" in cell.source
                 cell.source = cell.source.replace("SMOKE = False", "SMOKE = True")
                 cell.source += '\nDEVICE = "cpu"'
+                cell.source += '\nfrom tbtrl.experiments.figure_style import FigureStyle\n_validation_style = FigureStyle(dpi=80, formats=("png",))'
                 if experiment is not None:
                     cell.source = cell.source.replace(
                         'EXPERIMENT = "temperature_carry"', f'EXPERIMENT = "{experiment}"'
@@ -64,6 +65,19 @@ with tempfile.TemporaryDirectory(prefix="tbtrl-notebooks-") as directory:
                     cell.source = cell.source.replace(
                         'VARIANT = "factorised_tbtrl"', f'VARIANT = "{variant}"'
                     )
+            if cell.cell_type == "code":
+                # Full-resolution vector/raster exports have dedicated tests. Keep
+                # all fresh-kernel executions light without changing notebook files.
+                cell.source = (
+                    cell.source.replace(
+                        "NotebookDiagnostics(", "NotebookDiagnostics(style=_validation_style, "
+                    )
+                    .replace("plot_run(output)", "plot_run(output, style=_validation_style)")
+                    .replace(
+                        "plot_comparison(output)",
+                        "plot_comparison(output, style=_validation_style)",
+                    )
+                )
 
         NotebookClient(
             notebook,

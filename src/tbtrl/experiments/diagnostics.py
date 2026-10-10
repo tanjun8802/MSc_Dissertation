@@ -13,6 +13,27 @@ import torch.nn.functional as F
 
 from tbtrl.evaluation import make_policy
 
+from .diagnostic_plots import (
+    plot_actor_losses,
+    plot_critic_objective,
+    plot_drift,
+    plot_embeddings,
+    plot_gradients,
+    plot_learning,
+    plot_parameters,
+    plot_transfer,
+)
+from .figure_style import (
+    BRANCHES,
+    COLORS,
+    DEFAULT_STYLE,
+    MODES,
+    finish,
+    save_figure,
+    styled,
+    subplots,
+)
+
 
 def _array(tensor):
     return tensor.detach().cpu().numpy()
@@ -33,13 +54,6 @@ def _cosine(values):
     return unit @ unit.T
 
 
-def _pca(values):
-    centered = values - values.mean(0)
-    _, _, basis = np.linalg.svd(centered, full_matrices=False)
-    projected = centered @ basis[:2].T
-    return np.pad(projected, ((0, 0), (0, max(0, 2 - projected.shape[1]))))
-
-
 def _serializable(value):
     if isinstance(value, np.ndarray):
         return value.tolist()
@@ -54,21 +68,23 @@ class NotebookDiagnostics:
     """Display and save Q/policy maps, rollouts, embeddings and weight changes.
 
     Pass an instance as run_experiment(..., on_task_end=NotebookDiagnostics()).
-    Each task saves diagnostics.json and PNGs next to its checkpoint. Display can
+    Each task saves diagnostics.json and publication PNG/PDF/SVG figures next to its checkpoint. Display can
     be disabled for automated checks. Unknown environments still receive numeric
     embedding, loss, weight and learning-curve diagnostics; spatial plots require
     a maze layout and two-dimensional observations.
     """
 
-    def __init__(self, *, display=True, rollout_episodes=8):
+    def __init__(self, *, display=True, rollout_episodes=8, style=DEFAULT_STYLE):
+        if not isinstance(rollout_episodes, int) or rollout_episodes < 1:
+            raise ValueError("rollout_episodes must be a positive integer.")
+        self.style = style
         self.display = display
         self.rollout_episodes = rollout_episodes
         self.history = {}
 
     @torch.no_grad()
+    @styled
     def __call__(self, *, result, config, factory, record, task_goals, before, directory):
-        import matplotlib.pyplot as plt
-
         algorithm = config.algorithm
         model = result.network if algorithm == "dqn" else result.critic
         device = next(model.parameters()).device
@@ -229,209 +245,207 @@ class NotebookDiagnostics:
             flush=True,
         )
 
-        def emit(fig, name):
-            fig.suptitle(title)
-            fig.tight_layout()
-            fig.savefig(directory / f"{name}.png", dpi=110, bbox_inches="tight")
-            if self.display:
-                from IPython.display import Image, display
-
-                display(Image(filename=str(directory / f"{name}.png")))
-            plt.close(fig)
-
-        fig, axes = plt.subplots(1, 3, figsize=(15, 4))
-        if result.evaluations:
-            axes[0].plot(*zip(*result.evaluations), marker="o")
-        axes[0].set(title="Evaluation return", xlabel="Environment steps")
-        if algorithm == "sac" and result.success_rates:
-            axes[0].plot(*zip(*result.success_rates), label="Success rate")
-            axes[0].legend()
-        for key in (
-            ("td", "replay", "total")
-            if algorithm == "dqn"
-            else ("td1", "td2", "replay1", "replay2", "actor")
-        ):
-            axes[1].plot(
-                [r["step"] for r in result.losses], [r[key] for r in result.losses], label=key
-            )
-        axes[1].set(title="Training losses", xlabel="Environment steps")
-        axes[1].legend()
-        axes[2].bar(
-            range(len(record["evaluation"])), [r["success_rate"] for r in record["evaluation"]]
+        self.render(
+            result=result,
+            config=config,
+            record=record,
+            diagnostic=diagnostic,
+            directory=directory,
+            factory=factory,
+            layout=np.asarray(layout) if layout is not None and state.shape[1] == 2 else None,
         )
-        axes[2].set(title="Success on every goal", xlabel="Goal index", ylim=(0, 1))
-        emit(fig, "learning")
-        if algorithm == "sac" and config.training.get("actor_tbtrl") is not None:
-            options = config.training["actor_tbtrl"]
-            fig, axes = plt.subplots(1, 2, figsize=(12, 4))
-            steps = [r["step"] for r in result.losses]
-            for key, coefficient in (
-                ("actor_current", 1.0),
-                ("actor_replay", options.get("replay_loss_coef", 0.0)),
-                ("actor", 1.0),
-            ):
-                axes[0].plot(steps, [r[key] * coefficient for r in result.losses], label=key)
-            for name in ("sigreg", "goal_separation", "phi_norm", "psi_norm", "retention_kl"):
-                coefficient = options.get(f"{name}_coef", 0.0)
-                axes[1].plot(
-                    steps,
-                    [r.get(f"actor_{name}", 0.0) * coefficient for r in result.losses],
-                    label=name,
-                )
-            axes[0].set(title="Actor current / weighted replay / total", xlabel="Steps")
-            axes[1].set(title="Weighted actor regularizers", xlabel="Steps")
-            for ax in axes:
-                ax.legend()
-            emit(fig, "actor-losses")
+
+    @torch.no_grad()
+    @styled
+    def render(self, *, result, config, record, diagnostic, directory, factory=None, layout=None):
+        """Render existing numeric diagnostics without collecting or updating anything."""
+        import matplotlib.pyplot as plt
+
+        directory = Path(directory)
+        directory.mkdir(parents=True, exist_ok=True)
+        branches, task_ids = diagnostic["branches"], diagnostic["task_ids"]
+        changes = diagnostic["weight_changes"]
+
+        def emit(fig, name):
+            from io import BytesIO
+
+            branch = next((BRANCHES[k] for k in branches if name.endswith(f"-{k}")), None)
+            context = (
+                f"{MODES[record['mode']][0]} · goal {record['task_id']} · seed {record['seed']}"
+            )
+            finish(fig, title=f"{branch}\n{context}" if branch else context)
+            try:
+                save_figure(fig, directory / name, style=self.style)
+                if self.display:
+                    from IPython.display import Image, display
+
+                    image = BytesIO()
+                    fig.savefig(
+                        image,
+                        format="png",
+                        dpi=self.style.display_dpi,
+                        bbox_inches="tight",
+                        pad_inches=0.06,
+                    )
+                    display(Image(data=image.getvalue()))
+            finally:
+                plt.close(fig)
+
+        emit(plot_learning(result, config, record, style=self.style), "learning")
+        emit(plot_critic_objective(result, config, style=self.style), "critic-losses")
+        if config.algorithm == "sac":
+            emit(plot_actor_losses(result, config, style=self.style), "actor-losses")
         if getattr(result, "transfer_probes", None):
-            probes = result.transfer_probes
-            fig, axes = plt.subplots(1, 3, figsize=(16, 4))
-            steps = [p["step"] for p in probes]
-            axes[0].semilogy(steps, [p["alpha"] for p in probes], marker=".")
-            axes[0].set(
-                title="Temperature (including step zero)",
-                xlabel="Environment steps",
-                ylabel="Alpha",
-            )
-            for goal_id in task_ids:
-                values = [
-                    next(r["success_rate"] for r in p["evaluation"] if r["task_id"] == goal_id)
-                    for p in probes
-                ]
-                axes[1].plot(steps, values, marker=".", label=f"Goal {goal_id}")
-                early = [
-                    (p["updates"], value)
-                    for p, value in zip(probes, values)
-                    if p["updates"] <= 5001
-                ]
-                if early:
-                    axes[2].plot(*zip(*early), marker=".", label=f"Goal {goal_id}")
-            axes[1].set(
-                title="Transfer and retention during training",
-                xlabel="Environment steps",
-                ylim=(-0.05, 1.05),
-            )
-            axes[2].set(
-                title="Before / just after updates begin",
-                xlabel="Optimizer updates",
-                ylim=(-0.05, 1.05),
-            )
-            for ax in axes[1:]:
-                ax.legend()
-            emit(fig, "transfer-probes")
+            emit(plot_transfer(result, task_ids, style=self.style), "transfer-probes")
         gradient_rows = [r for r in result.losses if "actor_current_grad_norm" in r]
-        if algorithm == "sac" and gradient_rows:
-            fig, axes = plt.subplots(1, 2, figsize=(12, 4))
-            steps = [r["step"] for r in gradient_rows]
-            for name in (
-                "current",
-                "replay",
-                "retention_kl",
-                "sigreg",
-                "goal_separation",
-                "phi_norm",
-                "psi_norm",
-            ):
-                axes[0].plot(
-                    steps, [r[f"actor_{name}_grad_norm"] for r in gradient_rows], label=name
-                )
-            axes[0].set(
-                yscale="symlog", title="Weighted actor gradient norms", xlabel="Environment steps"
-            )
-            axes[0].legend()
-            axes[1].plot(steps, [r["actor_current_replay_grad_cosine"] for r in gradient_rows])
-            axes[1].axhline(0, color="grey", linewidth=0.5)
-            axes[1].set(
-                title="Current / replay gradient cosine",
-                xlabel="Environment steps",
-                ylim=(-1.05, 1.05),
-            )
-            emit(fig, "actor-gradients")
+        if config.algorithm == "sac" and gradient_rows:
+            emit(plot_gradients(gradient_rows, style=self.style), "actor-gradients")
+        if changes:
+            emit(plot_parameters(changes, style=self.style), "parameter-changes")
         for name, data in branches.items():
-            fig, axes = plt.subplots(2, 3, figsize=(15, 8))
-            im = axes[0, 0].imshow(data["psi_cosine"], vmin=-1, vmax=1, cmap="coolwarm")
-            fig.colorbar(im, ax=axes[0, 0])
-            axes[0, 0].set(
-                title=f"{name}: goal cosine similarity",
-                xticks=range(len(task_ids)),
-                xticklabels=task_ids,
-            )
-            count = len(data["psi"])
-            points = _pca(np.concatenate([data["psi"], data["phi_fixed"]]))
-            axes[0, 1].scatter(*points[:count].T, marker="*", label="Raw psi")
-            axes[0, 1].scatter(*points[count:].T, label="Fixed raw phi")
-            for i in range(count):
-                axes[0, 1].annotate(str(task_ids[i]), points[i])
-            axes[0, 1].set(title="Joint embedding PCA (per-goal basis)")
-            axes[0, 1].legend()
-            for key in ("psi", "phi_fixed", "phi_replay"):
-                axes[0, 2].hist(np.linalg.norm(data[key], axis=-1), bins=15, alpha=0.5, label=key)
-            axes[0, 2].set(title="Raw embedding norms")
-            axes[0, 2].legend()
-            axes[1, 0].plot(data["covariance_eigenvalues"], marker="o")
-            axes[1, 0].set(title="Replay phi covariance spectrum")
-            keys = list(changes)
-            axes[1, 1].barh(keys, [changes[k]["l2_change"] for k in keys])
-            axes[1, 1].set(title="Parameter L2 change")
-            for key in ("psi_drift", "phi_fixed_drift"):
-                if key in data:
-                    axes[1, 2].plot(data[key], marker="o", label=key)
-            axes[1, 2].set(title="Embedding drift since previous goal")
-            if previous is not None:
-                axes[1, 2].legend()
-            emit(fig, f"embeddings-{name}")
-        if layout is not None and state.shape[1] == 2:
+            emit(plot_embeddings(name, data, task_ids, style=self.style), f"embeddings-{name}")
+            if record["mode"] == "sequential" and "psi_drift" in data:
+                emit(plot_drift(data, task_ids, style=self.style), f"drift-{name}")
+        if layout is not None:
             self._spatial(result, config, record, factory, np.asarray(layout), emit)
 
     @torch.no_grad()
     def _spatial(self, result, config, record, factory, layout, emit):
-        import matplotlib.pyplot as plt
+        from matplotlib.colors import ListedColormap, Normalize
+        from matplotlib.lines import Line2D
+        from matplotlib.patches import Circle
+        from matplotlib.ticker import MaxNLocator
 
-        goal = config.goals[record["task_id"]]
-        model = result.network if config.algorithm == "dqn" else result.actor
+        goal = np.asarray(config.goals[record["task_id"]])
+        discrete = config.algorithm == "dqn"
+        model = result.network if discrete else result.actor
         device = next(model.parameters()).device
         y, x = np.where(layout == 0)
-        states = np.column_stack([x, y]).astype(np.float32)
-        if config.algorithm == "sac":
-            states += 0.5
+        states = np.column_stack([x, y]).astype(np.float32) + (0 if discrete else 0.5)
         obs = torch.as_tensor(states, dtype=torch.float32, device=device)
         goals = (
             torch.as_tensor(goal, dtype=torch.float32, device=device)
             .view(1, -1)
             .expand(len(states), -1)
         )
-        if config.algorithm == "dqn":
+        if discrete:
             values = _array(model.q_val_for_argmax_action(obs, goals))
-            best = values.argmax(-1)
-            arrows = np.array([[0, 1], [0, -1], [-1, 0], [1, 0]])[best]
-            panel_values = [values[:, a] for a in range(4)] + [values.max(-1)]
-            labels = ["Q(up)", "Q(down)", "Q(left)", "Q(right)", "Max Q / greedy policy"]
+            arrows = np.array([[0, 1], [0, -1], [-1, 0], [1, 0]])[values.argmax(-1)]
+            panels = [values[:, a] for a in range(4)] + [values.max(-1)]
+            labels = [
+                "Q(a₀): Δy = +1",
+                "Q(a₁): Δy = −1",
+                "Q(a₂): Δx = −1",
+                "Q(a₃): Δx = +1",
+                "Maximum Q and greedy action",
+            ]
+            policy_index = 4
         else:
+            clip = config.training.get("obs_norm_clip", 10.0)
             if config.training.get("normalize_state_inputs", False):
-                obs = result.state_normalizer.normalize(obs)
+                obs = result.state_normalizer.normalize(obs, clip=clip)
             if config.training.get("normalize_goal_inputs", False):
-                goals = result.goal_normalizer.normalize(goals)
+                goals = result.goal_normalizer.normalize(goals, clip=clip)
             actions = result.actor.deterministic(obs, goals)
             q1 = _array(result.critic.q1_forward(obs, actions, goals)).ravel()
             q2 = _array(result.critic.q2_forward(obs, actions, goals)).ravel()
             arrows = _array(actions)
-            panel_values = [q1, q2, np.minimum(q1, q2), np.abs(q1 - q2)]
-            labels = ["Q1(s, pi, g)", "Q2(s, pi, g)", "Min Q / policy", "Critic disagreement"]
-        fig, axes = plt.subplots(1, len(panel_values), figsize=(4 * len(panel_values), 4))
-        for ax, values, label in zip(axes, panel_values, labels):
+            panels = [q1, q2, np.minimum(q1, q2), np.abs(q1 - q2)]
+            labels = [
+                "Critic 1 at policy action",
+                "Critic 2 at policy action",
+                "Minimum Q and policy action",
+                "Absolute critic disagreement",
+            ]
+            policy_index = 2
+        # Share limits across comparable Q panels; disagreement has its own nonnegative scale.
+        comparable = np.concatenate(panels if discrete else panels[:3])
+        low, high = float(comparable.min()), float(comparable.max())
+        if low == high:
+            low, high = low - 1e-6, high + 1e-6
+        norm = Normalize(low, high)
+        height, width = layout.shape
+        extent = (-0.5, width - 0.5, height - 0.5, -0.5) if discrete else (0, width, height, 0)
+        wall_map = ListedColormap(["#F4F5F7", "#454A52"])
+
+        def maze_axes(ax):
+            ax.imshow(
+                layout,
+                cmap=wall_map,
+                vmin=0,
+                vmax=1,
+                origin="upper",
+                extent=extent,
+                interpolation="nearest",
+            )
+            ax.set(xlabel="Maze x (cells)", ylabel="Maze y (cells)", aspect="equal")
+            ax.xaxis.set_major_locator(MaxNLocator(5, integer=True))
+            ax.yaxis.set_major_locator(MaxNLocator(5, integer=True))
+            ax.scatter(
+                *goal,
+                marker="*",
+                s=85,
+                color="#F0E442",
+                edgecolor="#222222",
+                linewidth=0.7,
+                zorder=5,
+            )
+            if not discrete:
+                ax.add_patch(
+                    Circle(
+                        goal,
+                        config.environment_options.get("goal_radius", 0.5),
+                        fill=False,
+                        linestyle="--",
+                        edgecolor="#222222",
+                        linewidth=0.7,
+                        zorder=4,
+                    )
+                )
+
+        fig, axes = subplots(
+            (len(panels) + 1) // 2,
+            2,
+            style=self.style,
+            height=3.1 * ((len(panels) + 1) // 2),
+            squeeze=False,
+        )
+        for i, (ax, values, label) in enumerate(zip(axes.flat, panels, labels)):
+            maze_axes(ax)
             grid = np.full(layout.shape, np.nan)
             grid[y, x] = values
-            ax.imshow(layout, cmap="Greys", origin="upper")
-            im = ax.imshow(grid, cmap="viridis", origin="upper")
-            fig.colorbar(im, ax=ax)
-            ax.quiver(x, y, arrows[:, 0], -arrows[:, 1], color="white", scale=20)
-            ax.scatter(
-                goal[0] - (0.5 if config.algorithm == "sac" else 0),
-                goal[1] - (0.5 if config.algorithm == "sac" else 0),
-                marker="*",
-                color="red",
+            disagreement = not discrete and i == 3
+            im = ax.imshow(
+                grid,
+                cmap="magma" if disagreement else "viridis",
+                norm=Normalize(0, max(float(values.max()), 1e-6)) if disagreement else norm,
+                origin="upper",
+                extent=extent,
+                interpolation="nearest",
             )
-            ax.set(title=label)
+            fig.colorbar(im, ax=ax, label="|Q₁ − Q₂|" if disagreement else "Q value", shrink=0.85)
+            if i == policy_index:
+                # angles=xy honours the downward-positive maze y axis; no manual sign flip.
+                ax.quiver(
+                    states[:, 0],
+                    states[:, 1],
+                    arrows[:, 0],
+                    arrows[:, 1],
+                    angles="xy",
+                    scale_units="xy",
+                    scale=3,
+                    color="white",
+                    edgecolor="#222222",
+                    linewidth=0.25,
+                    width=0.008,
+                )
+            ax.set_title(f"({chr(97 + i)}) {label}")
+        for ax in list(axes.flat)[len(panels) :]:
+            ax.axis("off")
+        finish(
+            fig,
+            note=f"Goal {record['task_id']} at {tuple(float(v) for v in goal)}: yellow star; dashed circle: continuous success radius. Maze y increases downward. Q panels share a colour scale; disagreement uses a separate scale. Policy arrows: one action unit spans ⅓ cell on this diagram.",
+        )
         emit(fig, "q-policy")
         policy = make_policy(
             result,
@@ -442,8 +456,12 @@ class NotebookDiagnostics:
             clip=config.training.get("obs_norm_clip", 10.0),
         )
         n = self.rollout_episodes
-        fig, axes = plt.subplots(
-            (n + 3) // 4, min(4, n), figsize=(4 * min(4, n), 4 * ((n + 3) // 4)), squeeze=False
+        fig, axes = subplots(
+            (n + 1) // 2,
+            min(2, n),
+            style=self.style,
+            height=2.7 * ((n + 1) // 2) + 0.6,
+            squeeze=False,
         )
         for episode, ax in enumerate(axes.flat):
             if episode >= n:
@@ -461,16 +479,54 @@ class NotebookDiagnostics:
                         break
             finally:
                 env.close()
-            path = np.asarray(path) - (0.5 if config.algorithm == "sac" else 0)
-            ax.imshow(layout, cmap="Greys")
-            ax.plot(*path.T, ".-", markersize=2)
-            ax.scatter(*path[0], color="green", label="Start")
-            ax.scatter(*path[-1], color="red", label="End")
-            ax.scatter(
-                *(np.asarray(goal) - (0.5 if config.algorithm == "sac" else 0)),
-                marker="*",
-                color="gold",
-                s=120,
+            path = np.asarray(path)
+            maze_axes(ax)
+            ax.plot(
+                *path.T,
+                color=COLORS[0],
+                linewidth=1.2,
+                marker=".",
+                markersize=2,
+                markevery=max(1, len(path) // 15),
             )
-            ax.set(title=f"Episode {episode}: return={total:.3f}, length={len(path) - 1}")
+            ax.scatter(
+                *path[0],
+                color=COLORS[0],
+                marker="o",
+                s=25,
+                edgecolor="white",
+                linewidth=0.5,
+                zorder=6,
+            )
+            ax.scatter(
+                *path[-1],
+                color=COLORS[1],
+                marker="s",
+                s=25,
+                edgecolor="white",
+                linewidth=0.5,
+                zorder=6,
+            )
+            outcome = "success" if info.get("success", False) else "not reached"
+            ax.set_title(
+                f"Rollout {episode + 1}: {outcome}\nReturn {total:.2f} · {len(path) - 1} environment steps"
+            )
+        handles = [
+            Line2D([], [], color=COLORS[0], marker="o", linestyle="none", label="Start"),
+            Line2D([], [], color=COLORS[1], marker="s", linestyle="none", label="End"),
+            Line2D(
+                [],
+                [],
+                color="#F0E442",
+                marker="*",
+                markeredgecolor="#222222",
+                linestyle="none",
+                label="Goal",
+            ),
+        ]
+        axes[-1, 0].legend(handles=handles, loc="upper center", bbox_to_anchor=(0.5, -0.23), ncol=3)
+        finish(
+            fig,
+            note="Deterministic policy actions; separate seeded diagnostic rollouts. Environment randomness may still apply. Coordinates match the maze; paths are not smoothed.",
+        )
         emit(fig, "rollouts")
