@@ -8,6 +8,7 @@ from .figure_style import (
     annotate_matrix,
     empty_panel,
     finish,
+    goal_ticks,
     legend,
     numeric_axis,
     subplots,
@@ -95,13 +96,14 @@ def plot_learning(result, config, record, *, style):
             linewidth=1.2,
             hatch="//" if task > record["task_id"] and record["mode"] == "sequential" else None,
         )
-        ax.text(
-            task,
-            row["success_rate"] + 0.025,
-            f"{row['success_rate']:.1%}".replace(".0%", "%"),
-            ha="center",
-            fontsize=7,
-        )
+        if len(rows) <= 12:
+            ax.text(
+                task,
+                row["success_rate"] + 0.025,
+                f"{row['success_rate']:.1%}".replace(".0%", "%"),
+                ha="center",
+                fontsize=7,
+            )
     ax.set(
         title="(d) All-goal success",
         xlabel="Evaluated goal ID",
@@ -109,6 +111,7 @@ def plot_learning(result, config, record, *, style):
         xticks=[r["task_id"] for r in rows],
     )
     numeric_axis(ax, percent=True)
+    goal_ticks(ax, [r["task_id"] for r in rows])
     finish(
         fig,
         note=f"Empirical means over {config.eval_episodes} evaluation episode(s); no confidence interval shown. TD losses are unweighted. Outlined bar: current goal; hatched bars: future goals in a sequential run.",
@@ -277,6 +280,8 @@ def plot_embeddings(name, data, task_ids, *, style):
         yticklabels=task_ids,
     )
     annotate_matrix(axes[0, 0], data["psi_cosine"])
+    goal_ticks(axes[0, 0], task_ids, matrix=True)
+    goal_ticks(axes[0, 0], task_ids, axis="y", matrix=True)
     values = np.concatenate([data["psi"], data["phi_fixed"]])
     centered = values - values.mean(0)
     _, singular, basis = np.linalg.svd(centered, full_matrices=False)
@@ -362,7 +367,7 @@ def plot_drift(data, task_ids, *, style):
         ax.plot(ids, values, marker="o", color=COLORS[0])
         ax.set(title=title, xlabel=xlabel, ylabel=r"Embedding change ($L_2$)")
         if key == "psi_drift":
-            ax.set_xticks(ids)
+            goal_ticks(ax, ids)
         else:
             ax.xaxis.set_major_locator(MaxNLocator(5, integer=True))
         numeric_axis(ax)

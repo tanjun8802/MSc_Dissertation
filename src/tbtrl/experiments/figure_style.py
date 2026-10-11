@@ -121,6 +121,20 @@ def legend(ax, *, columns=2):
         )
 
 
+def goal_ticks(ax, goals, *, axis="x", matrix=False):
+    """Keep goal IDs readable when task sequences exceed a dozen goals."""
+    from math import ceil
+
+    positions = list(range(len(goals))) if matrix else goals
+    stride = max(1, ceil(len(goals) / 12)) if axis == "y" else 1
+    indices = range(0, len(goals), stride)
+    ticks, labels = [positions[i] for i in indices], [goals[i] for i in indices]
+    if axis == "x":
+        ax.set_xticks(ticks, labels=labels, rotation=90 if len(goals) > 12 else 0)
+    else:
+        ax.set_yticks(ticks, labels=labels)
+
+
 def finish(fig, *, title=None, note=None):
     import matplotlib as mpl
 

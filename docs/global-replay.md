@@ -12,6 +12,38 @@ The default capacity on `ExperimentConfig` is larger (1,000,000 total and
 250,000 recent); the notebook explicitly overrides it. DQN can use the same
 mode by setting `replay_mode="global"` and `similarity_threshold=0.8`.
 
+## Task-count experiment
+
+The global-replay notebook now defaults to `GOAL_COUNT = 20`. The original four
+goals remain first, in their original order. Further goals are unique free-cell
+centres selected by farthest-first shortest maze-path distance from the goals
+already selected, with deterministic row-major tie breaking. They are spread
+across traversable corridors rather than selected by straight-line distance
+through walls. All free cells must be connected. The helper
+`tbtrl.experiments.goals.extend_maze_goals` also supports discrete maze coordinates.
+
+Set `GOAL_COUNT = 4` for the original sequence. Both `global_replay` and the
+`temperature_carry` memory control use the same generated sequence for a given
+count. Goal construction does not consume training RNG state. Resolved goal
+coordinates are stored in the existing manifest and task checkpoints, and the
+notebook prints the ordered list before training.
+
+The total/recent capacities, 16-group limit, similarity threshold, per-goal
+training budgets and TBTRL updates remain unchanged. With 20 goals, the maximum
+training interaction budget is five times the four-goal budget; all-goal
+evaluation adds further cost. The ordinary smoke option still reduces the run
+to two goals. A separate automated check executes all 20 goals with small budgets
+to validate the sequence and bounded storage, not to establish performance.
+
+Twenty tasks do not guarantee 20 groups or forced consolidation: sufficiently
+similar goals can share existing groups. The notebook prints each task's nearest
+similarity, admitted candidates, surviving group sizes and any consolidated pair.
+Use those measurements to establish whether a run actually fills the archive or
+reaches the group limit. To study group-limit pressure separately, compare an
+explicitly labelled smaller `MAX_GROUPS` setting while keeping the goal sequence
+and transition budget fixed. Do not interpret an absence of merges as a failure
+of the memory mechanism.
+
 ## Admission and replacement
 
 1. While training, current experience uses the recent circular partition. Old

@@ -11,6 +11,7 @@ from .figure_style import (
     annotate_matrix,
     empty_panel,
     finish,
+    goal_ticks,
     legend,
     numeric_axis,
     save_figure,
@@ -70,6 +71,7 @@ def plot_run(output_dir, *, style=DEFAULT_STYLE, export=True):
             xticks=tasks,
         )
         ax.set_ylim(bottom=0)
+        goal_ticks(ax, tasks)
         numeric_axis(ax, y=True)
         if has_failed:
             ax.add_line(
@@ -132,6 +134,8 @@ def plot_run(output_dir, *, style=DEFAULT_STYLE, export=True):
                 yticklabels=[r["task_id"] for r in sequence],
             )
             annotate_matrix(ax, matrix, percent=True)
+            goal_ticks(ax, evaluated, matrix=True)
+            goal_ticks(ax, [r["task_id"] for r in sequence], axis="y", matrix=True)
             fig.colorbar(
                 im,
                 ax=ax,
@@ -199,6 +203,7 @@ def plot_comparison(output_dir, *, style=DEFAULT_STYLE, export=True):
                 title=f"({chr(97 + row * 2 + column)}) {'Per-goal' if row == 0 else 'Accumulated'} {'sample cost' if column == 0 else 'wall time'}",
             )
             numeric_axis(ax, y=column == 0)
+            goal_ticks(ax, all_tasks)
             legend(ax, columns=1)
     note = (
         "; ".join(counts)
