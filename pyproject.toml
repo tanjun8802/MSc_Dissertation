@@ -12,6 +12,7 @@ dependencies = ["numpy>=1.26", "torch>=2.11", "gymnasium>=1.0"]
 
 [project.optional-dependencies]
 notebooks = ["jupyterlab>=4", "ipykernel>=6", "matplotlib>=3.8"]
+robotics = ["gymnasium-robotics==1.4.2", "mujoco>=3.3,<3.4", "pillow>=10"]
 
 [project.scripts]
 tbtrl = "tbtrl.experiments.cli:main"

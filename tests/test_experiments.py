@@ -5,6 +5,7 @@ import nbformat
 import numpy as np
 import pytest
 
+from tbtrl.environments.registry import make_environment
 from tbtrl.experiments.checkpoints import load_policy
 from tbtrl.experiments.config import load_config
 from tbtrl.experiments.runner import run_experiment
@@ -15,16 +16,23 @@ ROOT = Path(__file__).resolve().parents[1]
 @pytest.mark.parametrize("path", sorted((ROOT / "configs").glob("*.json")), ids=lambda p: p.stem)
 def test_supported_experiment_runs_all_phases_and_saves_loadable_checkpoints(path, tmp_path):
     config = load_config(path).smoke()
+    if config.environment.startswith("fetch-"):
+        pytest.importorskip("gymnasium_robotics")
     records = run_experiment(config, tmp_path / "run")
     assert len(records) == 6
     assert {record["mode"] for record in records} == {"scratch", "sequential", "recovery"}
     assert all(len(record["evaluation"]) == 2 for record in records)
     assert all(record["steps"] > 0 for record in records)
     assert (tmp_path / "run" / "manifest.json").is_file()
-    for checkpoint in (tmp_path / "run").rglob("checkpoint.pt"):
-        policy = load_policy(checkpoint)
-        action = policy(np.array([1.0, 1.0], dtype=np.float32))
-        assert np.isfinite(action).all()
+    env = make_environment(config.environment, config.goals[0], **config.environment_options)
+    try:
+        observation, _ = env.reset(seed=42)
+        for checkpoint in (tmp_path / "run").rglob("checkpoint.pt"):
+            policy = load_policy(checkpoint)
+            action = policy(observation)
+            assert np.isfinite(action).all()
+    finally:
+        env.close()
     with pytest.raises(FileExistsError):
         run_experiment(config, tmp_path / "run")
 
@@ -49,14 +57,14 @@ def test_unknown_config_option_fails_before_training():
 
 def test_working_notebooks_compile_and_new_experiment_has_no_saved_outputs():
     notebooks = list((ROOT / "experiments/working").glob("*.ipynb"))
-    assert len(notebooks) == 6
+    assert len(notebooks) == 8
     for path in notebooks:
         notebook = nbformat.read(path, as_version=4)
         nbformat.validate(notebook)
         for cell in notebook.cells:
             if cell.cell_type == "code":
                 compile(cell.source, str(path), "exec")
-                if path.stem.endswith("SAC_GlobalReplay"):
+                if path.stem.endswith("SAC_GlobalReplay") or path.stem.startswith("TBTRL_Fetch"):
                     assert cell.execution_count is None and cell.outputs == []
                     assert "sys.path" not in cell.source
         assert "run_experiment" in json.dumps(notebook)

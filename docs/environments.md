@@ -24,7 +24,8 @@ factory so core imports work without those dependencies.
 - Follow Gymnasium's seeded reset and five-value step API.
 - Expose a flat numeric Box observation and fixed-size goal vector. Observation
   and goal dimensions may differ. Adapt dictionary/image observations explicitly.
-- Terminate on the goal and distinguish termination from time-limit truncation.
+- Preserve native termination semantics and distinguish termination from time-limit
+  truncation. Maze tasks terminate on success; Fetch tasks continue after success.
   Provide a finite episode horizon for evaluation.
 - Put `success` or `is_success` in step info. Optionally implement
   `goal_distance(observation, goal)`; missing distances are recorded as null.
@@ -66,3 +67,11 @@ Test seeded reset/step behaviour, termination versus time limits, goal reward
 semantics, and a short real training update. For DQN, relabel identical
 transitions under two goals. For SAC, test independent observation and goal
 dimensions and action bounds. Keep long convergence runs separate from CPU CI.
+
+## Simulator diagnostics
+
+Environments can expose `diagnostic_render_mode = "rgb_array"` and accept
+`render_mode="rgb_array"` in their factory. Return uint8 RGB frames from `render()`
+and provide `goal_distance`. `NotebookDiagnostics` then records inline GIFs in
+independent environments, preserving training RNG state. Shared numerical plots
+remain identical. See [Fetch](fetch-experiments.md) for a complete adapter.

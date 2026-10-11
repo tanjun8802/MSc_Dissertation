@@ -6,7 +6,7 @@ from importlib.resources import files
 import numpy as np
 import torch
 
-from . import maze, maze_discrete
+from . import fetch, maze, maze_discrete
 
 _FACTORIES = {}
 
@@ -165,3 +165,5 @@ def _continuous(
 register_environment("maze-discrete", _discrete)
 register_environment("fourrooms-discrete", _fourrooms)
 register_environment("maze-continuous", _continuous)
+register_environment("fetch-reach", fetch.reach)
+register_environment("fetch-pick-and-place", fetch.pick_and_place)

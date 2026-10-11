@@ -26,3 +26,11 @@ Do not commit datasets, checkpoints, PDFs, videos or notebook outputs. Publish
 large research artifacts separately with their configuration identifiers.
 Before a formal open-source release, the owner should select a licence and
 confirm attribution for retained code and research assets.
+
+For Fetch checks, install `uv sync --locked --group dev --extra robotics` and
+retain `--extra robotics` on `uv run` commands. CI uses `MUJOCO_GL=egl` and
+`TBTRL_TEST_RENDER=1` for real headless simulator GIF checks. On a machine without
+a working graphics context, leave `TBTRL_TEST_RENDER` unset and use
+`TBTRL_SKIP_ROBOTICS_RENDER=1` for `scripts/check_notebooks.py`; this skips the
+two Fetch notebook executions, not the physical reset/reward/training tests.
+Report this rendering limitation explicitly.

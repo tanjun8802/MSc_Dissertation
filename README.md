@@ -36,7 +36,7 @@ uv sync --locked --extra notebooks --group dev
 uv run jupyter lab experiments/working
 ```
 
-Select the environment's Python kernel. All six notebooks default to full research training budgets;
+Select the environment's Python kernel. All eight notebooks default to full research training budgets;
 set `SMOKE = True` only for a short execution check. They invoke the same runner as the CLI,
 and use the shared trainer code. The two original Maze result notebooks are preserved as committed.
 
@@ -60,6 +60,16 @@ It includes recent experience in the global limit, shares archive space by goal
 similarity, relabels SAC rewards/termination, and reports allocated replay bytes.
 See [the memory policy and matched control](docs/global-replay.md).
 
+For robotics, use the separate
+[`TBTRL_FetchReach_SAC.ipynb`](experiments/working/TBTRL_FetchReach_SAC.ipynb) and
+[`TBTRL_FetchPickAndPlace_SAC.ipynb`](experiments/working/TBTRL_FetchPickAndPlace_SAC.ipynb)
+notebooks. Each starts with five fixed goals, dense rewards, no HER, and the
+latest factorised actor/global replay setup. Robot and object starts are fixed
+across episodes and goals. Numerical plots use the same shared renderer; inline
+Fetch GIFs replace maze maps. Install with
+`uv sync --locked --group dev --extra notebooks --extra robotics`.
+See [Fetch setup, budgets and reset semantics](docs/fetch-experiments.md).
+
 ## Supported configurations
 
 | Configuration | Actions | Task memory |
@@ -68,6 +78,8 @@ See [the memory policy and matched control](docs/global-replay.md).
 | `configs/tbtrl_gridworldmaze_dqn.json` | Discrete | Goal-similarity buffer sharing, with reward relabelling |
 | `configs/tbtrl_gridworldmaze_sac.json` | Continuous | Separate task buffers and independent twin critics |
 | `configs/tbtrl_gridworldmaze_sac_factorised_actor.json` | Continuous | Factorised actor with policy replay and representation penalties |
+| `configs/tbtrl_fetch_reach_sac.json` | Continuous | Factorised actor and fixed-budget global replay; five reach goals |
+| `configs/tbtrl_fetch_pick_and_place_sac.json` | Continuous | Factorised actor and fixed-budget global replay; five lifting goals |
 
 Layouts, goals, model sizes and loss settings are explicit. The three original configurations
 retain the working notebooks' settings: FourRooms uses seeds 42, 123 and 456;
@@ -79,7 +91,7 @@ scientific comparisons should use additional seeds and task orders.
 
 ```text
 configs/                    Experiment settings
-experiments/working/        Six supported notebooks
+experiments/working/        Eight supported notebooks
 src/tbtrl/
   environments/             Gymnasium environments, layouts and registration
   models/                   Factorised DQN and SAC models

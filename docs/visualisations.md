@@ -20,8 +20,14 @@ Per-goal files include `learning`, `critic-losses`, `actor-losses`, `actor-gradi
 `rollouts`, where the relevant data exist. Summary calls export
 `figures/run-overview.*` and `figures/cost-comparison.*` under the run directory.
 Parameter changes are shown once per goal, instead of repeated for every encoder.
-Generic environments receive numerical diagnostics; spatial plots currently
-require a maze layout and two-dimensional observations.
+Generic environments receive numerical diagnostics. Maze spatial plots require
+a layout and two-dimensional observations. Fetch uses the same numerical plots
+and inline RGB rollout GIFs in place of Q maps, arrows and maze trajectories.
+`NotebookDiagnostics(gif_episodes=1)` controls the number of simulator episodes
+per trained goal. GIFs include goal, seed, timestep, return, distance and success;
+`rollouts.json` stores their reset state and evaluation metadata. Each GIF also
+has a final PNG frame. GIFs are raster simulator views; the numerical figures
+retain the shared vector/300 dpi export formats.
 
 Use one immutable style object throughout a notebook to adapt the figures to a
 venue. Dimensions are in inches and font sizes in points. The default width of

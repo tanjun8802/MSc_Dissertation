@@ -1,5 +1,6 @@
 """Execute supported notebooks with fresh kernels and isolated smoke outputs."""
 
+import importlib.util
 import json
 import os
 import sys
@@ -33,6 +34,14 @@ with tempfile.TemporaryDirectory(prefix="tbtrl-notebooks-") as directory:
     os.environ["JUPYTER_RUNTIME_DIR"] = str(work / "runtime")
     cases = []
     for path in sorted((root / "experiments/working").glob("*.ipynb")):
+        if path.stem.startswith("TBTRL_Fetch") and (
+            importlib.util.find_spec("gymnasium_robotics") is None
+            or os.environ.get("TBTRL_SKIP_ROBOTICS_RENDER") == "1"
+        ):
+            print(
+                f"Skipped {path.name}: robotics dependencies or rendering unavailable", flush=True
+            )
+            continue
         variants = (
             ["baseline", "factorised_only", "mlp_replay", "factorised_tbtrl"]
             if "FactorisedActor" in path.stem
@@ -90,6 +99,9 @@ with tempfile.TemporaryDirectory(prefix="tbtrl-notebooks-") as directory:
         ]
         assert any("Training task=" in out.get("text", "") for out in outputs)
         assert any("image/png" in out.get("data", {}) for out in outputs)
+        if path.stem.startswith("TBTRL_Fetch"):
+            assert any("image/gif" in out.get("data", {}) for out in outputs)
+            assert any("fixed start verified" in out.get("text", "") for out in outputs)
         if experiment is not None:
             run = next((work / "runs").glob(f"*-{experiment}-factorised_tbtrl-*"))
             probes = list(run.rglob("transfer-probes.json"))

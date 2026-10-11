@@ -12,6 +12,7 @@ import torch
 import torch.nn.functional as F
 
 from tbtrl.evaluation import make_policy
+from tbtrl.random import preserve_rng_state
 
 from .diagnostic_plots import (
     plot_actor_losses,
@@ -74,15 +75,19 @@ class NotebookDiagnostics:
     a maze layout and two-dimensional observations.
     """
 
-    def __init__(self, *, display=True, rollout_episodes=8, style=DEFAULT_STYLE):
+    def __init__(self, *, display=True, rollout_episodes=8, gif_episodes=1, style=DEFAULT_STYLE):
         if not isinstance(rollout_episodes, int) or rollout_episodes < 1:
             raise ValueError("rollout_episodes must be a positive integer.")
         self.style = style
+        if not isinstance(gif_episodes, int) or gif_episodes < 1:
+            raise ValueError("gif_episodes must be a positive integer.")
+        self.gif_episodes = gif_episodes
         self.display = display
         self.rollout_episodes = rollout_episodes
         self.history = {}
 
     @torch.no_grad()
+    @preserve_rng_state()
     @styled
     def __call__(self, *, result, config, factory, record, task_goals, before, directory):
         algorithm = config.algorithm
@@ -93,9 +98,19 @@ class NotebookDiagnostics:
         env = factory(goal=goal)
         states, actions = [], []
         try:
+            render_mode = getattr(env, "diagnostic_render_mode", None)
             rng = np.random.default_rng(record["seed"] + 10_000)
             for index in range(10):
                 obs, _ = env.reset(seed=record["seed"] + 10_000 + index)
+                if render_mode == "rgb_array":
+                    # Fixed-start environments otherwise yield ten identical
+                    # probes. Seeded short trajectories stay fixed across goals.
+                    for _ in range(index):
+                        obs, _, terminated, truncated, _ = env.step(
+                            rng.uniform(-1, 1, env.action_space.shape).astype(np.float32)
+                        )
+                        if terminated or truncated:
+                            break
                 states.append(obs)
                 actions.append(
                     index % env.action_space.n
@@ -225,6 +240,8 @@ class NotebookDiagnostics:
             branches=branches,
             weight_changes=changes,
         )
+        if render_mode is not None:
+            diagnostic["rollout_render_mode"] = render_mode
         directory = Path(directory)
         (directory / "diagnostics.json").write_text(
             json.dumps(_serializable(diagnostic), indent=2, allow_nan=False) + "\n"
@@ -308,6 +325,18 @@ class NotebookDiagnostics:
                 emit(plot_drift(data, task_ids, style=self.style), f"drift-{name}")
         if layout is not None:
             self._spatial(result, config, record, factory, np.asarray(layout), emit)
+        elif factory is not None and diagnostic.get("rollout_render_mode") == "rgb_array":
+            from .rollouts import render_rollout_gifs
+
+            render_rollout_gifs(
+                result,
+                config,
+                record,
+                factory,
+                directory,
+                display=self.display,
+                episodes=self.gif_episodes,
+            )
 
     @torch.no_grad()
     def _spatial(self, result, config, record, factory, layout, emit):

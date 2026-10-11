@@ -9,6 +9,7 @@ from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import asdict, replace
 from functools import partial
+from importlib.metadata import version
 from pathlib import Path
 
 import gymnasium
@@ -270,6 +271,9 @@ def _run_experiment(
         device=str(device),
         modes=list(modes),
     )
+    if config.environment.startswith("fetch-"):
+        manifest["gymnasium_robotics"] = version("gymnasium-robotics")
+        manifest["mujoco"] = version("mujoco")
     (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     records = []
     for seed in config.seeds:

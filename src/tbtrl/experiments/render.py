@@ -105,6 +105,7 @@ def render_saved_run(
             if spatial:
                 env = factory(goal=config.goals[record["task_id"]])
                 try:
+                    diagnostic["rollout_render_mode"] = getattr(env, "diagnostic_render_mode", None)
                     if env.observation_space.shape == (2,):
                         layout = getattr(env.unwrapped, "maze", None)
                 finally:
