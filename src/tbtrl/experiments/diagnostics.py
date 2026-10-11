@@ -72,7 +72,7 @@ class NotebookDiagnostics:
     Each task saves diagnostics.json and publication PNG/PDF/SVG figures next to its checkpoint. Display can
     be disabled for automated checks. Unknown environments still receive numeric
     embedding, loss, weight and learning-curve diagnostics; spatial plots require
-    a maze layout and two-dimensional observations.
+    a maze layout and two-dimensional observations. RGB environments use rollout GIFs.
     """
 
     def __init__(self, *, display=True, rollout_episodes=8, gif_episodes=1, style=DEFAULT_STYLE):

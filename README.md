@@ -4,7 +4,8 @@ Research code for an Imperial College London MSc dissertation on transferring
 factorised value representations between goal-conditioned RL tasks.
 
 The supported experiments are **FourRooms DQN**, **Gridworld Maze DQN**, and
-**Gridworld Maze SAC**, plus an experimental **factorised SAC actor** variant. They compare fresh training, sequential transfer,
+**Gridworld Maze SAC**, an experimental **factorised SAC actor** variant, and
+five-goal **FetchReach / FetchPickAndPlace SAC** runs. They compare fresh training, sequential transfer,
 retention on earlier tasks, and independent recovery from the final transferred
 model. The update rules come from the working dissertation trainers.
 See [the method](docs/method.md) for objectives and task-boundary behaviour.
