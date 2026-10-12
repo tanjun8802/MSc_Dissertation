@@ -4,6 +4,11 @@ import numpy as np
 import torch
 
 
+def task_evaluation_seed(seed, task_id):
+    """Shared start seed for post-training metrics and matching visual rollouts."""
+    return seed + 1_000_000 + task_id * 100
+
+
 def evaluate_policy_with_success(env, policy_fn, goal=None, episodes=8, seed=0):
     """Return mean return, length, success and final goal distance.
 

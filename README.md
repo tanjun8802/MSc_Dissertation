@@ -65,8 +65,8 @@ For robotics, use the separate
 [`TBTRL_FetchReach_SAC.ipynb`](experiments/working/TBTRL_FetchReach_SAC.ipynb) and
 [`TBTRL_FetchPickAndPlace_SAC.ipynb`](experiments/working/TBTRL_FetchPickAndPlace_SAC.ipynb)
 notebooks. Each starts with five fixed goals, dense rewards, no HER, and the
-latest factorised actor/global replay setup. Robot and object starts are fixed
-across episodes and goals. Numerical plots use the same shared renderer; inline
+latest factorised actor/global replay setup. The arm starts are fixed across episodes and goals; PickAndPlace samples a new
+block position each episode within the native table region. Numerical plots use the same shared renderer; inline
 Fetch GIFs replace maze maps. Install with
 `uv sync --locked --group dev --extra notebooks --extra robotics`.
 See [Fetch setup, budgets and reset semantics](docs/fetch-experiments.md).

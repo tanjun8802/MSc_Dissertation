@@ -2,7 +2,7 @@
 
 Open `experiments/working/TBTRL_FetchReach_SAC.ipynb` or
 `experiments/working/TBTRL_FetchPickAndPlace_SAC.ipynb`. Each loads its own JSON
-configuration, checks the fixed physical reset, and runs scratch, sequential
+configuration, checks the arm reset (and PickAndPlace block variation), and runs scratch, sequential
 transfer and independent recovery across five ordered goals. Logs, actor/critic
 diagnostics and simulator GIFs appear directly in the training cell after each
 trained goal. Summary figures use the existing shared plotting functions.
@@ -36,15 +36,17 @@ uv run --extra robotics tbtrl --config configs/tbtrl_fetch_pick_and_place_sac.js
 | Setting | Both notebooks |
 | --- | --- |
 | Tasks | Five configured 3D target positions, in metres |
-| Training seeds | `[42]`, editable independently of the physical reset |
-| Physical reset seed | `initial_state_seed=42` for every reset |
+| Training seeds | `[42]`; also seed the reproducible PickAndPlace block sequence |
+| Arm reset | Identical native initial pose every episode |
+| Block reset (PickAndPlace) | `randomize_object=true`; native table sampling, seeded reproducibly |
+| Fallback reset seed | `initial_state_seed=42`; used on every Reach reset, or an initially unseeded Pick reset |
 | Reward | Native dense reward, negative Euclidean goal distance |
 | HER | Disabled; no achieved/future-goal resampling |
 | Forward training | Up to 500,000 steps per goal; 10,000 warm-up steps |
 | Independent recovery | Up to 100,000 steps per goal |
 | Early stopping | Success rate 1.0 for three evaluations, every 10,000 steps |
 | Episode horizon | 50 steps, with native continuing-task semantics |
-| Evaluation episodes | Eight; one separately rendered episode per goal |
+| Evaluation episodes | Eight; all eight rendered per trained goal |
 | Replay budget | 100,000 transitions including a 50,000 recent partition |
 | Archive policy | Keep final 40%, similarity threshold 0.8, up to 16 groups |
 | Networks | Factorised actor and twin critics, hidden width 256, latent size 16 |
@@ -66,12 +68,19 @@ grasping without HER.
 
 ## Fixed starts and replay rewards
 
-The adapter resets the native simulator with the configured physical seed every
-time, then sets the requested target. This fixes both robot and object state
-across goals, episodes, training seeds, recovery, evaluation and GIF recording.
-Learning seeds still control exploration, replay and model initialisation. The
-notebook verifies the entire observation after movement and across goals; tests
-also compare simulator positions, velocities, controls and mocap state.
+The native simulator restores the same robot joint configuration on every reset,
+then samples the PickAndPlace block within its valid table region. With
+`randomize_object=true`, an explicit reset seed starts a reproducible sequence;
+subsequent `reset()` calls advance the RNG and sample fresh positions. Repeating
+an explicit seed deliberately reproduces the same start. Training, evaluation,
+recovery and GIFs all use this protocol. This samples the native reachable
+region, not the entire visible tabletop.
+
+Reach has no block and retains its fixed physical reset. For a controlled
+fixed-block PickAndPlace ablation, set `randomize_object=false`; only that mode
+reuses `initial_state_seed` on every reset. Tests check robot joint positions,
+velocities, controls and mocap state after motion across all goals, block
+variation within bounds and reproducibility of complete sampled sequences.
 
 Fetch does not terminate when it reaches the goal. Its native time limit produces
 truncation, and the existing trainer handles bootstrapping separately from
@@ -87,10 +96,13 @@ The same shared memory budget applies regardless of the number of tasks. Its
 actual capacity, grouping and allocated transition bytes are printed by the
 notebook and saved in each task's memory metadata.
 
-Fixed starts plus deterministic evaluation mean the eight episodes can be
-identical: they are not eight independent initial-state trials. Success fractions
-may therefore jump between zero and one. Use additional training seeds for
-uncertainty across trained models, and report this fixed-start protocol.
+Reach evaluation retains identical initial states, so its eight deterministic
+episodes are not independent initial-state trials. PickAndPlace evaluation uses
+eight different seeds to sample block positions and measures success across
+those starts. Use additional training seeds for uncertainty across trained models.
+All eight GIFs use the same seeds as the post-training evaluation for the current
+goal. Early-stopping evaluations still run during training on their own seeds;
+the GIFs are post-training replays, not recordings of every intermediate check.
 
 ## Plots and GIFs
 
@@ -101,7 +113,8 @@ GIFs run at the simulator's 25 fps and record the entire evaluation episode,
 including what happens after first success. Captions report whether success was
 ever reached; JSON also records final-step success and distance.
 
-Each task saves `rollout-01.gif`, `rollout-01-final.png` and `rollouts.json` beside
+Each trained task saves `rollout-01.gif` through `rollout-08.gif`, numbered final
+PNG frames and `rollouts.json` beside
 its numerical plots. `render_saved_run(output, display=True)` can regenerate
 these on independent environments; `spatial=False` omits simulator rendering.
 Diagnostic evaluation preserves training random states and uses the same saved

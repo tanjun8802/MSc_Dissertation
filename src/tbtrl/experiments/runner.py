@@ -17,7 +17,7 @@ import numpy as np
 import torch
 
 from tbtrl.environments.registry import make_environment
-from tbtrl.evaluation import evaluate_policy_with_success, make_policy
+from tbtrl.evaluation import evaluate_policy_with_success, make_policy, task_evaluation_seed
 from tbtrl.global_replay import GlobalReplayMemory
 from tbtrl.models.dqn import FactorisedQNetwork
 from tbtrl.models.sac import FactorisedGaussianActor, FactorisedTwinCritic, GaussianActor
@@ -165,7 +165,7 @@ def _evaluate(config, result, factory, seed):
                 clip=config.training.get("obs_norm_clip", 10.0),
             )
             ret, length, success, distance = evaluate_policy_with_success(
-                env, policy, goal, config.eval_episodes, seed=seed + 1_000_000 + task_id * 100
+                env, policy, goal, config.eval_episodes, seed=task_evaluation_seed(seed, task_id)
             )
             rows.append(
                 dict(

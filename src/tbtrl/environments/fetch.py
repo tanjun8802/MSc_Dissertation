@@ -1,4 +1,4 @@
-"""Fetch adapters: fixed physical resets, external goals, flat SAC observations."""
+"""Fetch adapters: fixed arm resets, external goals, flat SAC observations."""
 
 import gymnasium as gym
 import numpy as np
@@ -8,9 +8,9 @@ import torch
 class FixedStartFetch(gym.Wrapper):
     """Keep native Fetch rewards and continuing-task/time-limit semantics.
 
-    A separate reset seed fixes the robot AND object across training seeds,
-    episodes, goals and evaluation/rendering instances. The desired goal is
-    passed separately to TBTRL; it must not leak into the flat state vector.
+    Native Fetch resets fix the robot pose. PickAndPlace can randomize the object
+    using Gymnasium's seeded RNG; unseeded resets advance that RNG. The desired
+    goal is passed separately to TBTRL, outside the flat state vector.
     """
 
     diagnostic_render_mode = "rgb_array"
@@ -22,6 +22,7 @@ class FixedStartFetch(gym.Wrapper):
         *,
         max_horizon=50,
         initial_state_seed=42,
+        randomize_object=False,
         reward_type="dense",
         render_mode=None,
         width=640,
@@ -36,6 +37,8 @@ class FixedStartFetch(gym.Wrapper):
         gym.register_envs(gymnasium_robotics)
         if env_id not in ("FetchReach-v4", "FetchPickAndPlace-v4"):
             raise ValueError("Use a supported v4 Fetch environment.")
+        if randomize_object and env_id != "FetchPickAndPlace-v4":
+            raise ValueError("Object randomization is only supported for PickAndPlace.")
         goal = np.asarray(goal, dtype=np.float32)
         if goal.shape != (3,) or not np.isfinite(goal).all():
             raise ValueError("Fetch goals must be finite (x, y, z) positions in metres.")
@@ -56,6 +59,8 @@ class FixedStartFetch(gym.Wrapper):
         super().__init__(env)
         self.fixed_goal = goal.copy()
         self.initial_state_seed = initial_state_seed
+        self.randomize_object = randomize_object
+        self._has_reset = False
         self.reward_type = reward_type
         self.achieved_slice = slice(0, 3) if env_id == "FetchReach-v4" else slice(3, 6)
         space = env.observation_space["observation"]
@@ -64,10 +69,15 @@ class FixedStartFetch(gym.Wrapper):
         )
 
     def reset(self, *, seed=None, options=None):
-        # Deliberately independent of the caller's learning/evaluation seed.
-        observation, info = self.env.reset(seed=self.initial_state_seed, options=options)
+        # Native reset restores the arm independently of the object RNG. Seed
+        # once, then let unseeded episode resets advance the block-position RNG.
+        reset_seed = self.initial_state_seed
+        if self.randomize_object:
+            reset_seed = seed if seed is not None or self._has_reset else self.initial_state_seed
+        observation, info = self.env.reset(seed=reset_seed, options=options)
+        self._has_reset = True
         self.env.unwrapped.goal = self.fixed_goal.astype(np.float64)
-        info = dict(info, initial_state_seed=self.initial_state_seed)
+        info = dict(info, initial_state_seed=reset_seed, randomize_object=self.randomize_object)
         return np.asarray(observation["observation"], dtype=np.float32), info
 
     def step(self, action):
@@ -104,4 +114,5 @@ def reach(goal, **options):
 
 
 def pick_and_place(goal, **options):
+    options.setdefault("randomize_object", True)
     return FixedStartFetch("FetchPickAndPlace-v4", goal, **options)

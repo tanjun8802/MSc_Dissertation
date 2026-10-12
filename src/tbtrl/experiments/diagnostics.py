@@ -75,11 +75,11 @@ class NotebookDiagnostics:
     a maze layout and two-dimensional observations. RGB environments use rollout GIFs.
     """
 
-    def __init__(self, *, display=True, rollout_episodes=8, gif_episodes=1, style=DEFAULT_STYLE):
+    def __init__(self, *, display=True, rollout_episodes=8, gif_episodes=None, style=DEFAULT_STYLE):
         if not isinstance(rollout_episodes, int) or rollout_episodes < 1:
             raise ValueError("rollout_episodes must be a positive integer.")
         self.style = style
-        if not isinstance(gif_episodes, int) or gif_episodes < 1:
+        if gif_episodes is not None and (not isinstance(gif_episodes, int) or gif_episodes < 1):
             raise ValueError("gif_episodes must be a positive integer.")
         self.gif_episodes = gif_episodes
         self.display = display
@@ -335,7 +335,7 @@ class NotebookDiagnostics:
                 factory,
                 directory,
                 display=self.display,
-                episodes=self.gif_episodes,
+                episodes=self.gif_episodes or config.eval_episodes,
             )
 
     @torch.no_grad()

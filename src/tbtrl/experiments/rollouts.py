@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
-from tbtrl.evaluation import make_policy
+from tbtrl.evaluation import make_policy, task_evaluation_seed
 from tbtrl.random import preserve_rng_state
 
 from .figure_style import MODES
@@ -30,7 +30,7 @@ def render_rollout_gifs(result, config, record, factory, directory, *, display=T
     font = ImageFont.truetype(findfont("DejaVu Sans"), 14)
     summaries = []
     for episode in range(episodes):
-        seed = record["seed"] + 500_000 + episode
+        seed = task_evaluation_seed(record["seed"], record["task_id"]) + episode
         env = factory(goal=goal, render_mode="rgb_array")
         frames, total, steps, success = [], 0.0, 0, False
         try:
@@ -47,7 +47,7 @@ def render_rollout_gifs(result, config, record, factory, directory, *, display=T
                 draw = ImageDraw.Draw(canvas)
                 draw.text(
                     (10, 5),
-                    f"{MODES[record['mode']][0]} | Goal {record['task_id']} | Seed {record['seed']} | Step {steps}",
+                    f"{MODES[record['mode']][0]} | Goal {record['task_id']} | Episode {episode + 1}/{episodes} | Step {steps}",
                     fill="black",
                     font=font,
                 )
@@ -59,7 +59,7 @@ def render_rollout_gifs(result, config, record, factory, directory, *, display=T
                 )
                 draw.text(
                     (10, 45),
-                    f"Success reached: {success} | Distance: {env.goal_distance(obs, goal):.3f} m",
+                    f"Eval seed: {seed} | Reached: {success} | Distance: {env.goal_distance(obs, goal):.3f} m",
                     fill="black",
                     font=font,
                 )
@@ -78,6 +78,7 @@ def render_rollout_gifs(result, config, record, factory, directory, *, display=T
                 episode=episode + 1,
                 seed=seed,
                 initial_state_seed=reset_info.get("initial_state_seed"),
+                randomize_object=reset_info.get("randomize_object", False),
                 initial_observation=initial_observation,
                 goal=goal,
                 steps=steps,
@@ -105,7 +106,7 @@ def render_rollout_gifs(result, config, record, factory, directory, *, display=T
         summary["gif"] = destination.name
         summaries.append(summary)
         print(
-            f"Rollout GIF: {destination.name} | goal={record['task_id']} | steps={steps} | return={total:.3f} | success={success}",
+            f"Evaluation episode {episode + 1}/{episodes}: {destination.name} | goal={record['task_id']} | seed={seed} | steps={steps} | return={total:.3f} | success={success}",
             flush=True,
         )
         if display:

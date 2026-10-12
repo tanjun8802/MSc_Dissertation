@@ -23,8 +23,9 @@ Parameter changes are shown once per goal, instead of repeated for every encoder
 Generic environments receive numerical diagnostics. Maze spatial plots require
 a layout and two-dimensional observations. Fetch uses the same numerical plots
 and inline RGB rollout GIFs in place of Q maps, arrows and maze trajectories.
-`NotebookDiagnostics(gif_episodes=1)` controls the number of simulator episodes
-per trained goal. GIFs include goal, seed, timestep, return, distance and success;
+`NotebookDiagnostics` defaults to rendering all configured evaluation episodes
+(eight in the Fetch notebooks), numbered and using the same post-training
+evaluation seeds. An explicit `gif_episodes=1` requests just one preview. GIFs include goal, seed, timestep, return, distance and success;
 `rollouts.json` stores their reset state and evaluation metadata. Each GIF also
 has a final PNG frame. GIFs are raster simulator views; the numerical figures
 retain the shared vector/300 dpi export formats.

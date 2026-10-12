@@ -37,7 +37,8 @@
     "initial_state_seed": 42,
     "reward_type": "dense",
     "width": 640,
-    "height": 480
+    "height": 480,
+    "randomize_object": true
   },
   "model": {
     "hidden_dim": 256,
