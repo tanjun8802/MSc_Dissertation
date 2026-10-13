@@ -181,6 +181,47 @@ def test_five_goal_fetch_pipeline_uses_latest_global_sac(name, tmp_path):
 
 
 @pytest.mark.parametrize("name", NAMES)
+def test_notebook_summary_handles_skipped_recovery_and_missing_memory(name, tmp_path, capsys):
+    import matplotlib.pyplot as plt
+    import nbformat
+
+    from tbtrl.experiments.plots import plot_run
+
+    config = config_for(name).smoke()
+    # Force the real skip branch without relying on a smoke policy solving Fetch.
+    config.recovery_threshold = 0.0
+    output = tmp_path / name
+    run_experiment(config, output, verbose=False)
+    records = json.loads((output / "summary.json").read_text())
+    skipped = [r for r in records if r.get("recovery_performed") is False]
+    assert len(skipped) == 2
+    assert all(r["steps"] == 0 and "replay_memory" not in r for r in skipped)
+    # Also cover older/non-global records without inventing zero memory usage.
+    legacy_record = dict(records[0])
+    legacy_record.pop("replay_memory")
+    notebook = nbformat.read(
+        ROOT / f"experiments/working/{config_for(name).name}.ipynb", as_version=4
+    )
+    cell = next(c for c in notebook.cells if "for row in records:" in c.source)
+    capsys.readouterr()
+    context = dict(
+        records=records + [legacy_record],
+        output=output,
+        plot_run=lambda directory: plot_run(directory, style=FAST),
+    )
+    try:
+        exec(compile(cell.source, "notebook memory summary", "exec"), context)
+        printed = capsys.readouterr().out
+        assert printed.count("recovery skipped: already meets success threshold") == 2
+        assert printed.count("replay memory metadata unavailable") == 1
+        assert printed.count("allocated=") == 4
+        assert context["figure"] is not None
+        assert (output / "figures/run-overview.png").exists()
+    finally:
+        plt.close("all")
+
+
+@pytest.mark.parametrize("name", NAMES)
 def test_fetch_diagnostics_with_stub_frames_do_not_change_training(name, tmp_path, monkeypatch):
     # This verifies GIF encoding, inline delivery and RNG isolation, NOT OpenGL.
     # The separate opt-in test below and CI notebook runs exercise native rendering.
