@@ -34,6 +34,12 @@ with tempfile.TemporaryDirectory(prefix="tbtrl-notebooks-") as directory:
     os.environ["JUPYTER_RUNTIME_DIR"] = str(work / "runtime")
     cases = []
     for path in sorted((root / "experiments/working").glob("*.ipynb")):
+        if path.stem.startswith(("TBTRL_PMO", "TBTRL_MADE")):
+            print(
+                f"{path.name}: use scripts/check_discovery_notebooks.py (optional dependencies)",
+                flush=True,
+            )
+            continue
         if path.stem.startswith("TBTRL_Fetch") and (
             importlib.util.find_spec("gymnasium_robotics") is None
             or os.environ.get("TBTRL_SKIP_ROBOTICS_RENDER") == "1"

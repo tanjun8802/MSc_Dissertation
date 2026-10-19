@@ -13,6 +13,12 @@ dependencies = ["numpy>=1.26", "torch>=2.11", "gymnasium>=1.0"]
 [project.optional-dependencies]
 notebooks = ["jupyterlab>=4", "ipykernel>=6", "matplotlib>=3.8"]
 robotics = ["gymnasium-robotics==1.4.2", "mujoco>=3.3,<3.4", "pillow>=10"]
+pmo = ["rdkit==2024.9.6", "PyTDC==0.3.6", "six>=1.16"]
+# MADE itself is installed separately at a pinned Git commit with --no-deps.
+# Its full dependency list also includes optional cloud/LLM/generator packages.
+materials = ["ase>=3.25,<4", "average-minimum-distance==1.6.1", "dspy>=3,<4",
+             "hydra-core>=1.3,<2", "mace-torch==0.3.16", "mp-api>=0.45.8,<0.47",
+             "orb-models==0.5.4", "pymatgen>=2025.6.14", "smact==3.2.0"]
 
 [project.scripts]
 tbtrl = "tbtrl.experiments.cli:main"
@@ -25,6 +31,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "tbtrl.environments" = ["*.json"]
+"tbtrl.benchmarks._vendor" = ["*.txt"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -33,7 +40,8 @@ addopts = "-ra"
 [tool.ruff]
 # Preserve the user's committed result notebooks byte-for-byte. Their cells are
 # still executed in fresh kernels in CI; new source notebooks remain linted.
-extend-exclude = ["experiments/working/TBTRL_GridworldMaze_DQN.ipynb", "experiments/working/TBTRL_GridworldMaze_SAC.ipynb", "experiments/working/TBTRL_GridworldMaze_SAC_FactorisedActor.ipynb", "experiments/working/TBTRL_GridworldMaze_SAC_Transfer.ipynb"]
+# Legacy sandbox notebooks are archived separately via LFS, outside the maintained experiments.
+extend-exclude = ["src/experiments", "experiments/working/TBTRL_GridworldMaze_DQN.ipynb", "experiments/working/TBTRL_GridworldMaze_SAC.ipynb", "experiments/working/TBTRL_GridworldMaze_SAC_FactorisedActor.ipynb", "experiments/working/TBTRL_GridworldMaze_SAC_Transfer.ipynb"]
 target-version = "py312"
 line-length = 100
 

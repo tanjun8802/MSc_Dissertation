@@ -37,7 +37,7 @@ uv sync --locked --extra notebooks --group dev
 uv run jupyter lab experiments/working
 ```
 
-Select the environment's Python kernel. All eight notebooks default to full research training budgets;
+Select the environment's Python kernel. The eight maze/robotics notebooks default to full research training budgets;
 set `SMOKE = True` only for a short execution check. They invoke the same runner as the CLI,
 and use the shared trainer code. The two original Maze result notebooks are preserved as committed.
 
@@ -71,6 +71,15 @@ Fetch GIFs replace maze maps. Install with
 `uv sync --locked --group dev --extra notebooks --extra robotics`.
 See [Fetch setup, budgets and reset semantics](docs/fetch-experiments.md).
 
+Two additional notebooks apply candidate-action TBTRL to scientific discovery:
+[`TBTRL_PMO_Molecular_Optimisation.ipynb`](experiments/working/TBTRL_PMO_Molecular_Optimisation.ipynb)
+and [`TBTRL_MADE_Materials_Discovery.ipynb`](experiments/working/TBTRL_MADE_Materials_Discovery.ipynb).
+Each compares scratch with sequential transfer across five tasks, with inline
+training diagnostics, domain-specific figures and explicit oracle budgets.
+They preserve the native molecular-edit/materials-discovery mechanisms and use
+optional dependencies plus a separate candidate-aware trainer. See
+[installation, preserved semantics and experiment interpretation](docs/discovery-benchmarks.md).
+
 ## Supported configurations
 
 | Configuration | Actions | Task memory |
@@ -92,7 +101,7 @@ scientific comparisons should use additional seeds and task orders.
 
 ```text
 configs/                    Experiment settings
-experiments/working/        Eight supported notebooks
+experiments/working/        Ten notebooks (including two optional discovery benchmarks)
 src/tbtrl/
   environments/             Gymnasium environments, layouts and registration
   models/                   Factorised DQN and SAC models

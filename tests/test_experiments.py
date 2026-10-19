@@ -57,7 +57,7 @@ def test_unknown_config_option_fails_before_training():
 
 def test_working_notebooks_compile_and_new_experiment_has_no_saved_outputs():
     notebooks = list((ROOT / "experiments/working").glob("*.ipynb"))
-    assert len(notebooks) == 8
+    assert len(notebooks) == 10
     for path in notebooks:
         notebook = nbformat.read(path, as_version=4)
         nbformat.validate(notebook)
