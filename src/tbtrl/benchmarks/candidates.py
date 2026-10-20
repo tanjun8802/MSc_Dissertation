@@ -6,6 +6,7 @@ but maximises only over the candidate set observed at the next state.
 """
 
 import json
+import math
 import random
 import time
 from collections import Counter
@@ -38,6 +39,12 @@ class CandidateConfig:
     covariance_coef: float = 0.01
     separation_coef: float = 0.01
     norm_coef: float = 0.001
+    covariance_target_variance: float = 1.0
+    separation_target_cosine: float = 0.85
+    regularizer_batch_size: int | None = None
+    gradient_diagnostics: bool = False
+    balanced_replay: bool = False
+    sample_without_replacement: bool = False
     epsilon_start: float = 1.0
     epsilon_end: float = 0.05
     capacity: int = 500
@@ -46,6 +53,7 @@ class CandidateConfig:
     keep_fraction: float = 0.4
     similarity_threshold: float = 0.8
     max_groups: int = 16
+    archive_strategy: str = "similarity_admission"
     log_frequency: int = 100
 
     def __post_init__(self):
@@ -71,6 +79,20 @@ class CandidateConfig:
             raise ValueError("Invalid learning settings")
         if not 0 <= self.epsilon_end <= self.epsilon_start <= 1:
             raise ValueError("Invalid exploration schedule")
+        for key in ("replay_coef", "covariance_coef", "separation_coef", "norm_coef"):
+            if not math.isfinite(getattr(self, key)) or getattr(self, key) < 0:
+                raise ValueError(f"{key} must be finite and nonnegative")
+        if (
+            not math.isfinite(self.covariance_target_variance)
+            or self.covariance_target_variance <= 0
+        ):
+            raise ValueError("covariance_target_variance must be finite and positive")
+        if not -1 <= self.separation_target_cosine < 1:
+            raise ValueError("Invalid separation_target_cosine")
+        if self.regularizer_batch_size is not None and self.regularizer_batch_size < 2:
+            raise ValueError("regularizer_batch_size must be at least two")
+        if self.archive_strategy not in ("similarity_admission", "capacity_only"):
+            raise ValueError("Unknown archive_strategy")
 
 
 @dataclass(frozen=True)
@@ -146,9 +168,11 @@ class CandidateMemory:
             similarity = float(cosine[-1, nearest])
             if similarity > self.config.similarity_threshold:
                 group = reps[nearest]
-                fraction = (1 - min(similarity, 1)) / (1 - self.config.similarity_threshold)
-                # At least one ORIGINAL-label example survives admission for a new objective.
-                incoming = incoming[-max(1, int(count * fraction)) :]
+                if self.config.archive_strategy == "similarity_admission":
+                    # Historical PMO setting. MADE now groups similar tasks without
+                    # dropping their samples until the archive actually exceeds its budget.
+                    fraction = (1 - min(similarity, 1)) / (1 - self.config.similarity_threshold)
+                    incoming = incoming[-max(1, int(count * fraction)) :]
             elif len(reps) >= self.config.max_groups and len(reps) > 1:
                 left, right = np.triu_indices(len(reps), 1)
                 index = int(np.argmax(cosine[left, right]))
@@ -159,13 +183,23 @@ class CandidateMemory:
                 group = reps[nearest]
         self.groups.setdefault(group, []).extend(incoming)
         archive_capacity = self.config.capacity - self.config.recent_capacity
+        evicted = 0
         while (
             sum(map(len, self.groups.values())) > archive_capacity
             or sum(t.nbytes for t in self.archive) > self.config.byte_budget // 2
         ):
             # Thin the largest group; keep original task IDs even after a group merge.
             largest = max(self.groups, key=lambda g: sum(t.nbytes for t in self.groups[g]))
-            self.groups[largest].pop(0)
+            index = 0
+            if self.config.archive_strategy == "capacity_only":
+                # A merged group must not let its first task monopolise its allocation.
+                counts = Counter(t.task for t in self.groups[largest])
+                overrepresented = max(counts, key=counts.get)
+                index = next(
+                    i for i, t in enumerate(self.groups[largest]) if t.task == overrepresented
+                )
+            self.groups[largest].pop(index)
+            evicted += 1
             if not self.groups[largest]:
                 del self.groups[largest]
         self.admission = dict(
@@ -175,6 +209,8 @@ class CandidateMemory:
             tail_candidates=count,
             admitted_candidates=len(incoming),
             merged_groups=merged,
+            evicted_for_capacity=evicted,
+            retained_incoming=sum(t.task == task for t in self.archive),
         )
         self.recent.clear()  # completed individual buffer is discarded
 
@@ -183,6 +219,10 @@ class CandidateMemory:
         return dict(
             capacity=self.config.capacity,
             byte_budget=self.config.byte_budget,
+            recent_byte_budget=self.config.byte_budget // 2,
+            archive_byte_budget=self.config.byte_budget // 2,
+            archive_capacity=self.config.capacity - self.config.recent_capacity,
+            archive_strategy=self.config.archive_strategy,
             recent_samples=len(self.recent),
             archive_samples=len(archive),
             payload_bytes=sum(t.nbytes for t in self.recent + archive),
@@ -251,31 +291,99 @@ class CandidateLearner:
         q = self.network(states, actions, goals).flatten()
         return F.mse_loss(q, targets), states, actions
 
+    def sample(self, pool, size, *, balanced=False):
+        """Balance original task labels, regardless of similarity-group membership."""
+        if not pool:
+            raise ValueError("Cannot sample an empty replay pool")
+        if balanced:
+            by_task = {}
+            for transition in pool:
+                by_task.setdefault(transition.task, []).append(transition)
+            ids = list(by_task)
+            chosen = []
+            while len(chosen) < size:
+                chosen.extend(self.rng.permutation(ids).tolist())
+            counts = Counter(chosen[:size])
+            batch = [t for task, count in counts.items() for t in self.sample(by_task[task], count)]
+            self.rng.shuffle(batch)
+            return batch
+        if self.config.sample_without_replacement:
+            indices = self.rng.choice(len(pool), size=size, replace=len(pool) < size)
+        else:
+            # Preserve the original PMO random stream unless explicitly opted in.
+            indices = self.rng.integers(len(pool), size=size)
+        return [pool[i] for i in indices]
+
     def update(self, transfer):
         config = self.config
-
-        def sample(pool):
-            indices = self.rng.integers(len(pool), size=config.batch_size)
-            return [pool[i] for i in indices]
-
-        td, states, actions = self.td_loss(sample(self.memory.recent))
+        td, states, actions = self.td_loss(self.sample(self.memory.recent, config.batch_size))
         old = self.memory.archive
-        replay = self.td_loss(sample(old))[0] if transfer and old else td * 0
-        covariance = self.regularizer(self.network.encode_state_action(states, actions))
-        separation, _ = online_goal_separation_loss(self.network, self.seen, self.device)
+        replay = (
+            self.td_loss(self.sample(old, config.batch_size, balanced=config.balanced_replay))[0]
+            if transfer and old
+            else td * 0
+        )
+        if config.regularizer_batch_size is not None:
+            size = config.regularizer_batch_size
+            historical_size = size // 2 if transfer and old else 0
+            samples = self.sample(self.memory.recent, size - historical_size)
+            if historical_size:
+                samples += self.sample(old, historical_size, balanced=config.balanced_replay)
+            states = self.tensor([t.state for t in samples])
+            actions = self.tensor([t.action for t in samples])
+        phi = self.network.encode_state_action(states, actions)
+        # Normalise by a stated variance target rather than demanding 64 units
+        # of centred squared norm from representations that initially have little spread.
+        covariance = self.regularizer(phi / math.sqrt(config.covariance_target_variance))
+        separation, cosines = online_goal_separation_loss(
+            self.network, self.seen, self.device, target_cosine=config.separation_target_cosine
+        )
         raw_phi = self.network.sa_encoder(torch.cat([states, actions], dim=-1))
         raw_psi = self.network.goal_encoder(self.tensor(list(self.seen.values())))
         norm = norm_penalty_loss_l1(raw_phi, config.phi_max_norm - 0.1)
         norm = norm + norm_penalty_loss_l1(raw_psi, config.psi_max_norm - 0.1)
-        loss = (
-            td
-            + config.replay_coef * replay
-            + config.covariance_coef * covariance
-            + config.separation_coef * separation
-            + config.norm_coef * norm
+        components = dict(
+            td=td,
+            replay=config.replay_coef * replay,
+            covariance=config.covariance_coef * covariance,
+            separation=config.separation_coef * separation,
+            norm=config.norm_coef * norm,
         )
+        loss = sum(components.values())
         if not torch.isfinite(loss):
             raise FloatingPointError("Non-finite candidate TBTRL loss")
+        diagnostics = {}
+        if config.gradient_diagnostics:
+            parameters = tuple(self.network.parameters())
+            gradients = {}
+            for name, component in components.items():
+                grads = (
+                    torch.autograd.grad(component, parameters, retain_graph=True, allow_unused=True)
+                    if component.requires_grad
+                    else (None,) * len(parameters)
+                )
+                vector = torch.cat(
+                    [
+                        (torch.zeros_like(p) if g is None else g).detach().flatten()
+                        for p, g in zip(parameters, grads)
+                    ]
+                )
+                gradients[name] = vector
+                diagnostics[f"grad_{name}"] = vector.norm().item()
+            diagnostics["td_replay_grad_cosine"] = F.cosine_similarity(
+                gradients["td"], gradients["replay"], dim=0
+            ).item()
+        with torch.no_grad():
+            diagnostics.update(
+                phi_std_mean=phi.std(dim=0, unbiased=False).mean().item(),
+                phi_norm_mean=phi.norm(dim=-1).mean().item(),
+                psi_norm_mean=raw_psi.norm(dim=-1).mean().item(),
+                task_cosine_max=(
+                    cosines[torch.triu(torch.ones_like(cosines), diagonal=1).bool()].max().item()
+                    if len(self.seen) > 1
+                    else 0.0
+                ),
+            )
         self.optimizer.zero_grad(set_to_none=True)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(self.network.parameters(), 10)
@@ -283,7 +391,7 @@ class CandidateLearner:
         with torch.no_grad():
             for target, online in zip(self.target.parameters(), self.network.parameters()):
                 target.lerp_(online, config.tau)
-        return {
+        return diagnostics | {
             k: float(v.detach())
             for k, v in dict(
                 td=td,
@@ -292,6 +400,7 @@ class CandidateLearner:
                 separation=separation,
                 norm=norm,
                 total=loss,
+                **{f"weighted_{k}": v for k, v in components.items()},
             ).items()
         }
 

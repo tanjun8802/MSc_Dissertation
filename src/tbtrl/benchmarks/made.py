@@ -8,6 +8,8 @@ state representation, not a claim of a fully observed Markov encoding.
 
 import json
 import random
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -33,20 +35,39 @@ def make_tasks(systems=DEFAULT_SYSTEMS):
 class CountingOracle:
     """Count proposal AND reference-setup evaluations; no shared reward cache."""
 
-    def __init__(self, oracle):
+    def __init__(self, oracle, log_path=None):
         self.oracle, self.evaluations = oracle, 0
+        self.log_path = Path(log_path) if log_path is not None else None
+
+    @contextmanager
+    def _output(self):
+        # The pinned MADE version ignores logfile in relax_kwargs and constructs
+        # FIRE with stdout logging. Scope redirection to the synchronous oracle call;
+        # never patch ASE or capture the trainer's progress/figures. Exceptions propagate.
+        if self.log_path is None:
+            yield
+            return
+        self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        with (
+            self.log_path.open("a") as log,
+            redirect_stdout(log),
+            redirect_stderr(log),
+        ):
+            yield
 
     def __getattr__(self, name):
         return getattr(self.oracle, name)
 
     def evaluate(self, structure):
         self.evaluations += 1
-        return self.oracle.evaluate(structure)
+        with self._output():
+            return self.oracle.evaluate(structure)
 
     def compute_elemental_energies_from_structures(self, entries):
         # The delegate evaluates each reference internally (not through this wrapper).
         self.evaluations += len(entries)
-        return self.oracle.compute_elemental_energies_from_structures(entries)
+        with self._output():
+            return self.oracle.compute_elemental_energies_from_structures(entries)
 
 
 def structure_features(structure):
@@ -85,6 +106,7 @@ class MaterialsEnvironment:
         start_with_all_stable=True,
         stability_tolerance=0.1,
         filter_by_smact=True,
+        oracle_log_path=None,
     ):
         from made.envs import ConvexHullEnvironment
 
@@ -103,8 +125,9 @@ class MaterialsEnvironment:
             start_with_all_stable=start_with_all_stable,
             stability_tolerance=stability_tolerance,
             filter_by_smact=filter_by_smact,
+            oracle_log_path=str(oracle_log_path) if oracle_log_path is not None else None,
         )
-        self.oracle = CountingOracle(oracle)
+        self.oracle = CountingOracle(oracle, oracle_log_path)
         self.env = ConvexHullEnvironment(
             dataset=dataset,
             oracle=self.oracle,

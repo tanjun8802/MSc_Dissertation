@@ -40,6 +40,21 @@ uv pip install --python .venv/bin/python --no-deps \
 .venv/bin/jupyter lab experiments/working/TBTRL_MADE_Materials_Discovery.ipynb
 ```
 
+To keep an existing robotics/PMO environment intact, use a dedicated MADE
+environment from the repository root instead:
+
+```bash
+UV_PROJECT_ENVIRONMENT=.venv-made uv sync --locked --no-dev --extra notebooks --extra materials
+uv pip install --python .venv-made/bin/python --no-deps \
+  'made @ git+https://github.com/diffractivelabs/MADE.git@bffda0c9a1fa1904b35c0ef67b455881c975df86'
+.venv-made/bin/python -m ipykernel install --user --name tbtrl-made --display-name "TBTRL MADE"
+```
+
+Select **TBTRL MADE** in the notebook. TBTRL's core dependencies and editable
+source are installed in this environment too. After an exact resync, reinstall
+the separately pinned MADE package. No API key is needed in smoke mode; the
+full notebook prompts for it using `getpass` if the kernel environment lacks it.
+
 Run the notebook with that installed kernel. Use `.venv/bin/python` and
 `.venv/bin/jupyter` after installing MADE: a subsequent default `uv sync`/`uv run`
 can remove packages outside the lockfile. `--no-deps` on MADE is intentional:
@@ -86,6 +101,96 @@ energies are recomputed through the selected oracle, not silently taken from
 an absent reference file. The random generator is MADE's native baseline, not
 an approximation of its Chemeleon agent. These runs do not reproduce the whole
 paper's set of agents or chemical systems.
+
+## Revised MADE pilot (after the 2026-10-19 results)
+
+The original executed notebook is preserved byte-for-byte in
+[`experiments/recorded/TBTRL_MADE_Pilot_20261019.ipynb`](../experiments/recorded/TBTRL_MADE_Pilot_20261019.ipynb).
+The working notebook is cleared and identifies its new protocol as
+`made-transfer-v2-capacity-regularization`. These are development settings, not
+established improvements. Full ORB training must be rerun before judging them.
+The generator, oracle, rewards, five chemical systems, 50-proposal campaigns,
+five campaigns and the user's single-seed pilot remain the same.
+
+| Setting | Original MADE pilot | Revised MADE pilot |
+| --- | --- | --- |
+| Replay payload limit | 64 MiB | 1 GiB (allocated as data arrive) |
+| Recent/archive payload allowance | 32/32 MiB | 512/512 MiB |
+| Recent/archive transition limits | 250/250 | 500/2,000 |
+| Admission | Tail reduced immediately by similarity | Keep 40% tail; discard only under archive capacity pressure |
+| Historical sampling | Uniform over stored transitions | Balanced over original task IDs |
+| TD batch / warmup | 16 / 16 | 32 / 32 |
+| Covariance batch | Same 16 TD samples | Separate 128 samples, half current/half historical when available |
+| Covariance target variance | 1 | 1/64 |
+| Historical TD coefficient | 1 | 0.5 |
+| Covariance coefficient | 0.01 | 0.1 |
+| Task-separation coefficient | 0.01 | 1 |
+| Norm coefficient / threshold | 0.001 / 7.9 | Unchanged safety penalty |
+| Notebook progress interval | Every proposal | Every 10 proposals and campaign end |
+
+The covariance loss is now applied to `phi / sqrt(v)` in this notebook, i.e.
+it measures `||Cov(phi)/v - I||_F^2 / d`. With `v=1/d`, its target centred
+squared norm is one, leaving room inside the existing norm bound for a mean
+component carrying value magnitude. A 16-sample covariance has rank at most
+15, so it cannot match a 64-dimensional identity. The larger regularisation
+batch reduces this constraint once enough distinct transitions exist; repeated
+samples during early warmup still cannot manufacture extra rank. Sampling is
+without replacement whenever the relevant pool is large enough.
+
+The task-separation threshold stays at cosine 0.85. Its coefficient is increased
+because the original embeddings became almost parallel. Historical TD is
+downweighted rather than removed, and balanced task sampling avoids letting the
+largest archived task dominate rehearsal. These choices require ablation; scalar
+loss size alone is not a gradient measurement. Logs now include weighted losses,
+weighted gradient norms before clipping, current/historical gradient cosine,
+representation spread/norms and maximum task cosine.
+
+The norm penalty is deliberately not forced to activate. It guards excessive
+embedding magnitude; it does not by itself create diverse representations.
+
+Similar tasks can share an archive group without losing samples. When slots or
+bytes are exhausted, the largest group is thinned, starting with its most
+represented original task and oldest samples. The recent buffer is cleared at
+task end. Task identity, reward, next candidates and terminal flags survive
+grouping. This MADE option does not change the legacy PMO defaults or maze/Fetch
+trainers. All replay bytes exclude Python/model/oracle/dataset overhead.
+
+ORB still uses CPU on Apple Silicon (CUDA when available); its device is separate
+from the TBTRL learner's device. Pinned MADE ignores `logfile` in `relax_kwargs`,
+so the adapter redirects stdout/stderr **only during synchronous oracle and
+reference-evaluation calls** to `oracle-details.log`. FIRE lines and oracle
+warnings no longer fill the notebook; errors still propagate. Inspect this file
+when diagnosing relaxation. Run one experiment at a time in a notebook kernel:
+Python stream redirection is process-wide for the duration of each call.
+
+The plots now show weighted regulariser losses/gradients, numeric task similarities,
+and endpoint discovery counts by campaign. The summary explicitly distinguishes
+mean mSUN/AUDC over campaigns from last-campaign mSUN; campaigns are not treated
+as independent seeds.
+
+### RL audit and limits
+
+- The learner is **candidate-action Double DQN**, with no separate SAC actor.
+  It selects the next action using the online network and evaluates that same
+  action using the target network. Targets use only saved valid next candidates.
+- `gamma=1` and the incremental discovery reward make a campaign's return equal
+  its final discovery count. The 50-proposal campaign is a finite task horizon:
+  the final transition is terminal and never bootstraps into the next campaign.
+  The Q bound is 64, sufficient for at most 50 additional discoveries here.
+- Sequential mode carries both encoders, target and Adam state; scratch resets
+  all three. Epsilon resets per task and decays to 0.05 after the first third of
+  its budget; it does not reset per campaign. One optimiser/soft-target update
+  is made per transition after warmup (`tau=0.01`, learning rate `1e-4`).
+- Historical learning uses the original task's reward/context. It cannot safely
+  recompute a MADE reward for another chemistry or current hull. Replay calls
+  neither the oracle nor evaluation-only ground-truth metrics.
+- The hand-built observation summarises history and is not guaranteed Markov.
+  Candidate descriptors omit many aspects of chemistry. Better representations
+  remain a separate experiment, not an effect established by retuning.
+- The pinned native oracle returns relaxed **energies**, but the native environment
+  attaches the original proposal geometry to phase-diagram entries and novelty
+  checks. This upstream behaviour is preserved; mSUN must be interpreted under
+  that convention, not as experimental validation of relaxed distinct materials.
 
 ## TBTRL and candidate actions
 
@@ -142,7 +247,7 @@ representation**; it does not establish full Markov sufficiency.
 
 ## Memory and oracle accounting
 
-The candidate pool is ragged, unlike maze actions. The new candidate replay
+The candidate pool is ragged, unlike maze actions. The default (legacy PMO) candidate replay
 therefore enforces **both** a fixed transition capacity (500) and a numpy payload
 byte budget (64 MiB), split between recent and archived experience. At task end,
 the most recent 40% of the retained recent buffer is eligible for admission.

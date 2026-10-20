@@ -88,6 +88,159 @@ def test_replay_stays_bounded_discards_individual_buffer_and_preserves_labels():
         memory.add(transition(count=1000))
 
 
+def test_capacity_archive_does_not_discard_similar_tasks_before_full():
+    cfg = config(
+        capacity=100,
+        recent_capacity=10,
+        byte_budget=1024**2,
+        archive_strategy="capacity_only",
+    )
+    goals = {i: [1.0, 0.0] for i in range(3)}
+    learner = CandidateLearner(2, 3, goals, cfg, 42)
+    for task in goals:
+        for _ in range(10):
+            learner.memory.add(transition(task))
+        learner.memory.finish_task(task, learner.network, goals, "cpu")
+        assert learner.memory.admission["admitted_candidates"] == 4
+        assert learner.memory.admission["evicted_for_capacity"] == 0
+        assert not learner.memory.recent
+    assert learner.memory.stats()["original_task_counts"] == {0: 4, 1: 4, 2: 4}
+    assert len(learner.memory.groups) == 1  # grouping is not premature deletion
+
+
+@pytest.mark.parametrize("byte_budget", [8192, 400])
+def test_capacity_archive_thins_only_under_pressure_and_preserves_task_labels(byte_budget):
+    cfg = config(archive_strategy="capacity_only", keep_fraction=1, byte_budget=byte_budget)
+    goals = {i: [1.0, 0.0] for i in range(8)}
+    learner = CandidateLearner(2, 3, goals, cfg, 42)
+    for task in goals:
+        for _ in range(6):
+            learner.memory.add(transition(task, count=3))
+        learner.memory.finish_task(task, learner.network, goals, "cpu")
+        archive = learner.memory.archive
+        assert len(archive) <= 6
+        assert sum(t.nbytes for t in archive) <= byte_budget // 2
+        assert archive[-1].task == task
+        assert all(t.reward == 1 and not t.done for t in archive)
+    assert learner.memory.admission["evicted_for_capacity"] > 0
+
+
+def test_balanced_replay_samples_original_tasks_even_inside_one_similarity_group():
+    learner = CandidateLearner(
+        2, 3, {0: [1, 0], 1: [0, 1]}, config(sample_without_replacement=True), 42
+    )
+    pool = [transition(0) for _ in range(100)] + [transition(1)]
+    batch = learner.sample(pool, 16, balanced=True)
+    assert sum(t.task == 0 for t in batch) == sum(t.task == 1 for t in batch) == 8
+    unique = learner.sample(pool, len(pool))
+    assert len({id(t) for t in unique}) == len(pool)
+
+
+def test_double_dqn_selects_online_but_evaluates_target_without_terminal_bootstrap():
+    class LinearQ(torch.nn.Module):
+        def __init__(self, scale):
+            super().__init__()
+            self.scale = scale
+
+        def forward(self, states, actions, goals):
+            return self.scale * actions[:, :1] * goals[..., :1]
+
+    learner = CandidateLearner(2, 3, {0: [1, 0]}, config(), 42)
+    learner.network, learner.target = LinearQ(1), LinearQ(-2)
+    continuing = replace(transition(), next_actions=np.array([[1, 0, 0], [3, 0, 0]], np.float32))
+    # Online selects action 3; target evaluates it as -6. Target=1-6=-5, Q=1.
+    assert learner.td_loss([continuing])[0].item() == pytest.approx(36)
+    terminal = replace(continuing, done=True, next_actions=np.empty((0, 3), np.float32))
+    assert learner.td_loss([terminal])[0].item() == pytest.approx(0)
+
+
+def test_regulariser_and_gradient_diagnostics_match_weighted_objective():
+    cfg = config(
+        covariance_target_variance=0.5,
+        regularizer_batch_size=8,
+        gradient_diagnostics=True,
+        separation_target_cosine=-0.9,
+        covariance_coef=0.1,
+        separation_coef=1.0,
+        replay_coef=0.5,
+        balanced_replay=True,
+        sample_without_replacement=True,
+    )
+    learner = CandidateLearner(2, 3, {0: [1, 0], 1: [0, 1]}, cfg, 42)
+    learner.seen = learner.goals.copy()
+    for i in range(6):
+        learner.memory.add(replace(transition(1), state=np.array([i, -i], np.float32)))
+    learner.memory.groups[0] = [transition(0)]
+    control = CandidateLearner(2, 3, learner.goals, replace(cfg, gradient_diagnostics=False), 42)
+    control.seen = learner.seen.copy()
+    control.memory.recent = list(learner.memory.recent)
+    control.memory.groups = {0: list(learner.memory.groups[0])}
+    previous_target = [p.detach().clone() for p in learner.target.parameters()]
+    result = learner.update(True)
+    control.update(True)
+    for measured, unmeasured in zip(learner.network.parameters(), control.network.parameters()):
+        torch.testing.assert_close(measured, unmeasured, rtol=0, atol=0)
+    assert all(np.isfinite(v) for v in result.values())
+    assert result["weighted_replay"] == pytest.approx(0.5 * result["replay"])
+    assert result["weighted_covariance"] == pytest.approx(0.1 * result["covariance"])
+    assert result["total"] == pytest.approx(
+        sum(v for k, v in result.items() if k.startswith("weighted_"))
+    )
+    assert result["grad_td"] > 0 and result["grad_replay"] > 0
+    assert result["grad_separation"] > 0 and result["grad_covariance"] > 0
+    for before, target, online in zip(
+        previous_target, learner.target.parameters(), learner.network.parameters()
+    ):
+        torch.testing.assert_close(target, before.lerp(online, cfg.tau))
+
+
+def test_oracle_output_is_scoped_and_does_not_hide_exceptions(tmp_path, capsys):
+    from tbtrl.benchmarks.made import CountingOracle
+
+    class NoisyOracle:
+        def evaluate(self, structure):
+            print("FIRE: 0 energy fmax")
+            print("oracle warning", file=sys.stderr)
+            if structure == "bad":
+                raise RuntimeError("oracle failed")
+            return {"energy": 1.0}
+
+        def compute_elemental_energies_from_structures(self, entries):
+            for entry in entries:
+                self.evaluate(entry)
+            return {"Li": 1.0}
+
+    path = tmp_path / "oracle.log"
+    oracle = CountingOracle(NoisyOracle(), path)
+    assert oracle.evaluate("ok")["energy"] == 1
+    oracle.compute_elemental_energies_from_structures(["Li", "O"])
+    with pytest.raises(RuntimeError, match="oracle failed"):
+        oracle.evaluate("bad")
+    print("Training step=1")
+    output = capsys.readouterr()
+    assert output.out == "Training step=1\n" and output.err == ""
+    assert path.read_text().count("FIRE:") == 4
+    assert "oracle warning" in path.read_text()
+    assert oracle.evaluations == 4
+
+
+def test_native_fire_output_goes_to_file(tmp_path, capsys):
+    pytest.importorskip("made")
+    from made.oracles import AnalyticOracle
+    from pymatgen.core import Lattice, Structure
+
+    from tbtrl.benchmarks.made import CountingOracle
+
+    native = AnalyticOracle("lj", relax=True, relax_kwargs={"steps": 2, "relax_unit_cell": False})
+    path = tmp_path / "oracle.log"
+    oracle = CountingOracle(native, path)
+    capsys.readouterr()  # constructor notices are outside the evaluation scope
+    result = oracle.evaluate(Structure(Lattice.cubic(4), ["Li", "Li"], [[0, 0, 0], [0.3, 0, 0]]))
+    assert np.isfinite(result["energy"])
+    assert "FIRE:" in path.read_text()
+    assert "FIRE:" not in capsys.readouterr().out
+
+
 def test_pmo_auc_matches_upstream_log_frequency_convention():
     assert top_auc([0.2, 0.6, 0.8, 1.0], 4, frequency=2, top_n=1) == pytest.approx(0.55)
     assert top_auc([0.5], 10, finish=True, top_n=10) == pytest.approx(0.475)

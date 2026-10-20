@@ -77,6 +77,50 @@ class NotebookDiagnostics:
         if self.display:
             display(fig)
         plt.close(fig)
+        if self.benchmark == "made" and record["losses"]:
+            losses = record["losses"]
+            if "weighted_covariance" in losses[0]:
+                fig, axes = subplots(1, 2, style=self.style, height=3.2)
+                steps = [row["step"] for row in losses]
+                for key, label in (
+                    ("covariance", "Covariance"),
+                    ("separation", "Task separation"),
+                    ("norm", "Norm"),
+                ):
+                    axes[0].plot(steps, [r[f"weighted_{key}"] for r in losses], label=label)
+                for key, label in (
+                    ("td", "Current TD"),
+                    ("replay", "Historical TD"),
+                    ("covariance", "Covariance"),
+                    ("separation", "Separation"),
+                    ("norm", "Norm"),
+                ):
+                    if f"grad_{key}" in losses[0]:
+                        axes[1].plot(steps, [r[f"grad_{key}"] for r in losses], label=label)
+                axes[0].set(
+                    xlabel="Training transitions",
+                    ylabel="Weighted regularisation loss",
+                    yscale="symlog",
+                )
+                axes[1].set(
+                    xlabel="Training transitions",
+                    ylabel="Weighted gradient L2 norm",
+                    yscale="symlog",
+                )
+                for ax in axes:
+                    ax.set_yscale("symlog", linthresh=1e-4)
+                    ax.set_ylim(bottom=0)
+                    numeric_axis(ax, x=True)
+                    legend(ax)
+                finish(
+                    fig,
+                    title=f"{record['task']} · objective contributions",
+                    note="Gradients are measured before global clipping. Zero norm penalty means its threshold is inactive.",
+                )
+                save_figure(fig, path / "objective-diagnostics", style=self.style)
+                if self.display:
+                    display(fig)
+                plt.close(fig)
         domain = environment.plot_domain()
         if self.benchmark == "pmo":
             svg = domain.data if hasattr(domain, "data") else domain
@@ -120,6 +164,17 @@ class NotebookDiagnostics:
         fig, ax = subplots(style=self.style, height=3.1)
         matrix = embeddings @ embeddings.T
         im = ax.imshow(matrix, vmin=-1, vmax=1, cmap="RdBu_r")
+        if len(matrix) <= 10:
+            for row in range(len(matrix)):
+                for col in range(len(matrix)):
+                    ax.text(
+                        col,
+                        row,
+                        f"{matrix[row, col]:.3f}",
+                        ha="center",
+                        va="center",
+                        color="white" if abs(matrix[row, col]) > 0.6 else "black",
+                    )
         ids = list(learner.seen)
         ax.set(
             xticks=range(len(ids)),
@@ -187,6 +242,44 @@ def plot_comparison(records, benchmark, output_dir, *, style=DEFAULT_STYLE, disp
     if display:
         show(fig)
     plt.close(fig)
+    if benchmark == "made":
+        fig, axes = subplots((len(tasks) + 1) // 2, 2, style=style, squeeze=False)
+        for task, ax in zip(tasks, axes.flat):
+            selected = [r for r in records if r["task_id"] == task]
+            for mode in ("scratch", "sequential"):
+                values = []
+                for record in selected:
+                    if record["mode"] == mode:
+                        metrics = json.loads((Path(record["path"]) / "benchmark.json").read_text())[
+                            "campaign_metrics"
+                        ]
+                        values.append([m["num_newly_discovered_stable"] for m in metrics])
+                values = np.asarray(values)
+                label, color, _, line = MODES[mode]
+                x = np.arange(1, values.shape[1] + 1)
+                mean = values.mean(axis=0)
+                ax.plot(x, mean, color=color, linestyle=line, marker="o", label=label)
+                if len(values) > 1:
+                    sd = values.std(axis=0, ddof=1)
+                    ax.fill_between(x, mean - sd, mean + sd, color=color, alpha=0.15)
+            ax.set(
+                title=f"Task {task}: {selected[0]['task']}",
+                xlabel="Campaign number",
+                ylabel="Final discoveries (mSUN)",
+                xticks=x,
+            )
+            legend(ax)
+        for ax in list(axes.flat)[len(tasks) :]:
+            ax.set_visible(False)
+        finish(
+            fig,
+            title="Adaptation across campaigns",
+            note="Environment/candidate pool resets each campaign; model keeps learning. Means ±1 sample SD across seeds, not independent campaign replicates.",
+        )
+        save_figure(fig, Path(output_dir) / "campaign-comparison", style=style)
+        if display:
+            show(fig)
+        plt.close(fig)
     fig, axes = subplots(1, 2, style=style, height=3.1)
     for seed in sorted({r["seed"] for r in records}):
         rows = [r for r in records if r["mode"] == "sequential" and r["seed"] == seed]
