@@ -43,6 +43,7 @@ class CandidateConfig:
     separation_target_cosine: float = 0.85
     regularizer_batch_size: int | None = None
     gradient_diagnostics: bool = False
+    independent_rng: bool = False
     balanced_replay: bool = False
     sample_without_replacement: bool = False
     epsilon_start: float = 1.0
@@ -236,7 +237,7 @@ class CandidateLearner:
     def __init__(self, state_dim, action_dim, goals, config, seed, device="cpu"):
         self.config, self.goals, self.device = config, goals, device
         torch.manual_seed(seed)
-        self.rng = np.random.default_rng(seed)
+        self.reset_rng(seed)
         self.network = FactorisedQNetwork(
             state_dim,
             action_dim,
@@ -252,6 +253,13 @@ class CandidateLearner:
         self.memory = CandidateMemory(config)
         self.seen = {}
 
+    def reset_rng(self, seed):
+        """Opt-in independent exploration, replay and regularisation streams."""
+        self.rng = np.random.default_rng(seed)
+        streams = np.random.SeedSequence(seed).spawn(2)
+        self.exploration_rng = np.random.default_rng(streams[0])
+        self.regularizer_rng = np.random.default_rng(streams[1])
+
     def tensor(self, value):
         return torch.as_tensor(np.asarray(value), dtype=torch.float32, device=self.device)
 
@@ -263,8 +271,9 @@ class CandidateLearner:
     def choose(self, state, candidates, task, epsilon):
         if len(candidates) == 0:
             raise ValueError("No valid candidates returned by benchmark")
-        if self.rng.random() < epsilon:
-            return int(self.rng.integers(len(candidates)))
+        rng = self.exploration_rng if self.config.independent_rng else self.rng
+        if rng.random() < epsilon:
+            return int(rng.integers(len(candidates)))
         with torch.no_grad():
             return int(self.values(self.network, state, candidates, task).argmax())
 
@@ -291,8 +300,9 @@ class CandidateLearner:
         q = self.network(states, actions, goals).flatten()
         return F.mse_loss(q, targets), states, actions
 
-    def sample(self, pool, size, *, balanced=False):
+    def sample(self, pool, size, *, balanced=False, rng=None):
         """Balance original task labels, regardless of similarity-group membership."""
+        rng = self.rng if rng is None else rng
         if not pool:
             raise ValueError("Cannot sample an empty replay pool")
         if balanced:
@@ -302,16 +312,20 @@ class CandidateLearner:
             ids = list(by_task)
             chosen = []
             while len(chosen) < size:
-                chosen.extend(self.rng.permutation(ids).tolist())
+                chosen.extend(rng.permutation(ids).tolist())
             counts = Counter(chosen[:size])
-            batch = [t for task, count in counts.items() for t in self.sample(by_task[task], count)]
-            self.rng.shuffle(batch)
+            batch = [
+                t
+                for task, count in counts.items()
+                for t in self.sample(by_task[task], count, rng=rng)
+            ]
+            rng.shuffle(batch)
             return batch
         if self.config.sample_without_replacement:
-            indices = self.rng.choice(len(pool), size=size, replace=len(pool) < size)
+            indices = rng.choice(len(pool), size=size, replace=len(pool) < size)
         else:
             # Preserve the original PMO random stream unless explicitly opted in.
-            indices = self.rng.integers(len(pool), size=size)
+            indices = rng.integers(len(pool), size=size)
         return [pool[i] for i in indices]
 
     def update(self, transfer):
@@ -326,9 +340,12 @@ class CandidateLearner:
         if config.regularizer_batch_size is not None:
             size = config.regularizer_batch_size
             historical_size = size // 2 if transfer and old else 0
-            samples = self.sample(self.memory.recent, size - historical_size)
+            rng = self.regularizer_rng if config.independent_rng else self.rng
+            samples = self.sample(self.memory.recent, size - historical_size, rng=rng)
             if historical_size:
-                samples += self.sample(old, historical_size, balanced=config.balanced_replay)
+                samples += self.sample(
+                    old, historical_size, balanced=config.balanced_replay, rng=rng
+                )
             states = self.tensor([t.state for t in samples])
             actions = self.tensor([t.action for t in samples])
         phi = self.network.encode_state_action(states, actions)
@@ -459,7 +476,7 @@ def run_experiment(
                     learner = CandidateLearner(
                         len(state), candidates.shape[1], goals, config, seed, device
                     )
-                learner.rng = np.random.default_rng(task_seed)
+                learner.reset_rng(task_seed)
                 learner.memory.begin_task()
                 learner.seen[task_id] = goals[task_id]
                 path = output / f"seed_{seed}" / mode / f"task_{task_id}"

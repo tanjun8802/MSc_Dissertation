@@ -72,7 +72,10 @@ class NotebookDiagnostics:
         for ax in axes:
             numeric_axis(ax, x=True)
             legend(ax)
-        finish(fig, title=f"{record['task']} · {MODES[record['mode']][0]} · seed {record['seed']}")
+        finish(
+            fig,
+            title=f"{record['task']} · {record.get('method_label', MODES[record['mode']][0])} · seed {record['seed']}",
+        )
         save_figure(fig, path / "training-diagnostics", style=self.style)
         if self.display:
             display(fig)

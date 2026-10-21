@@ -74,6 +74,10 @@ See [Fetch setup, budgets and reset semantics](docs/fetch-experiments.md).
 Two additional notebooks apply candidate-action TBTRL to scientific discovery:
 [`TBTRL_PMO_Molecular_Optimisation.ipynb`](experiments/working/TBTRL_PMO_Molecular_Optimisation.ipynb)
 and [`TBTRL_MADE_Materials_Discovery.ipynb`](experiments/working/TBTRL_MADE_Materials_Discovery.ipynb).
+The [controlled MADE study](experiments/working/TBTRL_MADE_Transfer_Study.ipynb)
+adds matched baselines/ablations, campaign checkpoints, held-out retention and
+independent recovery runs. See the [study guide](docs/discovery-benchmarks.md#controlled-made-study-and-resuming)
+for resume limits and oracle budgets.
 Each compares scratch with sequential transfer across five tasks, with inline
 training diagnostics, domain-specific figures and explicit oracle budgets.
 They preserve the native molecular-edit/materials-discovery mechanisms and use

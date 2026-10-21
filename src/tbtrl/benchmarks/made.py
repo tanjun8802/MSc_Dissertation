@@ -144,6 +144,47 @@ class MaterialsEnvironment:
         self.campaign_states, self.campaign_structures = [], []
         self.action_dim = 146  # 118 composition + 9 cell + 16 distance bins + 3 context
 
+    def checkpoint(self):
+        """Native state at a completed campaign; excludes oracle models and credentials."""
+        if self.env.query_count != self.settings["budget"]:
+            raise ValueError("MADE checkpoints require a completed campaign")
+        transient = {
+            "oracle",
+            "env",
+            "planner",
+            "generator",
+            "filter",
+            "candidates",
+            "_feature_cache",
+        }
+        return {
+            "adapter": {k: v for k, v in vars(self).items() if k not in transient},
+            "native": {k: v for k, v in vars(self.env).items() if k not in {"dataset", "oracle"}},
+            "oracle_evaluations": self.oracle.evaluations,
+            "element_reference_energies": self.oracle.element_reference_energies,
+        }
+
+    @classmethod
+    def from_checkpoint(cls, checkpoint, dataset, oracle, *, oracle_log_path=None):
+        """Restore without constructing the native env or repeating reference evaluations.
+
+        Only load locally generated checkpoints with the same pinned MADE version.
+        The next reset reconstructs the next campaign's planner and candidate pool.
+        """
+        from copy import deepcopy
+
+        from made.envs import ConvexHullEnvironment
+
+        instance = cls.__new__(cls)
+        instance.__dict__.update(deepcopy(checkpoint["adapter"]))
+        instance.oracle = CountingOracle(oracle, oracle_log_path)
+        instance.oracle.evaluations = checkpoint["oracle_evaluations"]
+        oracle.set_element_reference_energies(checkpoint["element_reference_energies"])
+        instance.env = ConvexHullEnvironment.__new__(ConvexHullEnvironment)
+        instance.env.__dict__.update(deepcopy(checkpoint["native"]))
+        instance.env.dataset, instance.env.oracle = dataset, instance.oracle
+        return instance
+
     @property
     def finished(self):
         return self.total_queries >= self.settings["budget"] * self.settings["campaigns"]

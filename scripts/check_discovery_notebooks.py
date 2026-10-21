@@ -37,7 +37,12 @@ with tempfile.TemporaryDirectory(prefix="tbtrl-discovery-") as directory:
     os.environ["JUPYTER_PATH"] = str(work) + os.pathsep + os.environ.get("JUPYTER_PATH", "")
     os.environ["JUPYTER_RUNTIME_DIR"] = str(work / "runtime")
     for benchmark in ("PMO", "MADE"):
-        path = next((root / "experiments/working").glob(f"TBTRL_{benchmark}_*.ipynb"))
+        name = (
+            "TBTRL_PMO_Molecular_Optimisation.ipynb"
+            if benchmark == "PMO"
+            else "TBTRL_MADE_Materials_Discovery.ipynb"
+        )
+        path = root / "experiments/working" / name
         notebook = nbformat.read(path, as_version=4)
         for cell in notebook.cells:
             if "parameters" in cell.metadata.get("tags", []):

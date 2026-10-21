@@ -317,3 +317,108 @@ It tests interfaces/budgets, not realistic crystal energies or ORB convergence.
 Full Materials Project/ORB and optional Chemeleon runs require their external
 data/models and are deliberately not performed by CI. Core/robotics checks do
 not install these optional research dependencies.
+
+## Controlled MADE study and resuming
+
+Use [TBTRL_MADE_Transfer_Study.ipynb](../experiments/working/TBTRL_MADE_Transfer_Study.ipynb)
+for the next experiments. The executed pilot notebook is preserved. The study
+keeps the revised pilot configuration, but separates exploration, TD replay and
+regularisation random-number streams. Therefore rerun seed 42 under this protocol;
+do not include the old pilot as one of its replicates.
+
+The notebook defaults to three seeds, five systems and scratch/TBTRL. Each method
+uses five 50-proposal online campaigns per task. The optional method sets are:
+
+| Method | Transfer | Historical sampling | Covariance / separation |
+| --- | --- | --- | --- |
+| Scratch | New network, target and optimiser each task | None | Pilot coefficients within current task; separation is zero with one task |
+| TBTRL | Network, target, optimiser and archive | Task-balanced | Pilot coefficients |
+| Fine-tuning | Network, target and optimiser | None; no archive | Both off |
+| Uniform replay | Network, target, optimiser and same tail archive | Uniform over stored transitions | Both off |
+| No covariance | As TBTRL | As TBTRL | Only covariance off |
+| No separation | As TBTRL | As TBTRL | Only separation off |
+| Smaller archive | As TBTRL, at most 100 archived transitions | As TBTRL | Pilot coefficients |
+
+Uniform replay here controls the **sampling distribution**, not a different
+reservoir admission scheme. It uses the same 40% tail and capacity-driven archive
+allocation, retaining original task labels. The smaller archive keeps the recent
+buffer and byte limit unchanged; only the archive's transition limit changes
+(100 in the full configuration; scaled down in smoke mode). All methods retain
+norm safety bounds/penalties and the same factorised architecture. Separate
+ablations are needed to isolate factorisation itself or similarity-based eviction.
+
+### What is resumable?
+
+Keep `RUN_ID`, settings and software versions unchanged and rerun the notebook
+with `RESUME=True`. After **each completed campaign**, an atomic `resume.pt`
+contains:
+
+- online and target networks, Adam state and regulariser state;
+- recent and archived transitions, original task IDs and grouping state;
+- exploration/replay/regularisation and global RNG states;
+- native observed phase diagram, discovery history, reference energies and
+  evaluation counters; oracle weights and credentials are excluded;
+- completed campaign logs, losses and elapsed committed-work time.
+
+Restoration bypasses MADE environment construction, avoiding repeated reference
+and proposal evaluations for completed campaigns. The next reset creates the next
+campaign's candidate pool. If interrupted during campaign 4, campaigns 1–3 remain
+committed and campaign 4 starts again. Up to one unfinished campaign's proposals
+and reference setup may be repeated. The interrupted campaign's previous calls
+are real extra compute; result budgets/time describe committed work, not all
+aborted attempts. This is **not** interruption recovery inside an ORB relaxation.
+
+Completed tasks have `complete.pt` and `results.json`; completed jobs are skipped.
+Training, retention and recovery all use this mechanism. A process lock prevents
+two kernels writing the same run. Manifests reject changes to task order, seeds,
+methods, configs, device, recorded dependency versions, implementation hashes and
+notebook-provided oracle/environment/data fingerprints. Choose a new `RUN_ID` for
+changes. Old pilot checkpoints cannot be resumed because they lack optimiser,
+replay and native-environment state. A manifest is a consistency check, not a
+promise of bitwise reproducibility across hardware or nondeterministic kernels.
+
+Only load your own local checkpoint files: restoration uses pickle for native
+phase diagrams and replay arrays. Runtime files remain ignored by Git. Full
+learner checkpoints are retained at task boundaries for later evaluation/recovery;
+these can occupy several GiB across seeds/methods. That disk storage is separate
+from the bounded in-memory replay payload. Recovery additionally retains its
+campaign-boundary checkpoints. Frozen evaluation checkpoints omit replay and Adam
+state, avoiding large archive copies for every probe. Existing completed task plots are redisplayed inline on resume. Rerunning
+the summary cells regenerates aggregate inline plots without oracle calls.
+
+### Retention and recovery
+
+`RUN_RETENTION=False` and `RUN_RECOVERY=False` by default. The notebook reports
+proposal budgets before either is enabled; reference evaluations are additional.
+Evaluation does not update parameters, optimiser or replay. Greedy frozen policies
+use held-out task/campaign seeds shared across methods and stages. Scratch gets
+one evaluation of each independent model on its own task. Sequential methods
+get all learned tasks evaluated after every acquisition. Heatmap diagonals are
+post-acquisition reference performance; later rows show retention.
+
+Each recovery branch loads a fresh copy of the final sequential learner and
+retrains one earlier task for a fixed budget (default two campaigns). Main training
+and other recovery branches are untouched. All tasks are evaluated before recovery
+and after every recovery campaign, with the same held-out seeds used for retention.
+The table reports the first measured boundary regaining 90% of that task's own
+post-acquisition mSUN. Missing/zero references and failure within budget are
+explicitly reported; passing at step zero means no recovery was needed. Probe
+calls are reported separately and do not count as training proposals.
+
+Summary curves average campaigns **within each seed**, then show mean ±1 sample SD
+across seeds. Campaigns are not independent replicates. Candidate diagnostics show
+composition-level proposal counts/rewards, predicted Q versus realised remaining
+campaign return, feature covariance eigenvalues and current/replay gradient cosine.
+Returns follow an exploratory changing policy, so the Q scatter is diagnostic,
+not a direct unbiased test of optimal Q calibration. Neither covariance nor task
+cosine alone demonstrates behavioural retention.
+
+Run the dedicated fresh-kernel offline check with:
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/check_made_study.py
+```
+
+It exercises the new notebook in smoke mode, including retention/recovery and a
+second pass that must reuse all completed work. It never uses Materials Project
+credentials or downloads ORB weights.
