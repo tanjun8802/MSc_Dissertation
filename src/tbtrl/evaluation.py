@@ -9,32 +9,51 @@ def task_evaluation_seed(seed, task_id):
     return seed + 1_000_000 + task_id * 100
 
 
-def evaluate_policy_with_success(env, policy_fn, goal=None, episodes=8, seed=0):
-    """Return mean return, length, success and final goal distance.
-
-    Success comes from the environment's info contract. Environments may expose
-    `goal_distance(observation, goal)` for observations unlike goal vectors.
-    """
-    if episodes < 1:
-        raise ValueError("episodes must be positive.")
-    returns, lengths, successes, distances = [], [], [], []
+def evaluate_policy_metrics(
+    env, policy_fn, goal=None, episodes=8, seed=0, *, success_metric="ever", hold_steps=10
+):
+    """Reach, final-position and sustained end-of-episode success on the same rollouts."""
+    if episodes < 1 or hold_steps < 1:
+        raise ValueError("episodes and hold_steps must be positive.")
+    if success_metric not in ("ever", "final", "hold"):
+        raise ValueError("success_metric must be ever, final or hold.")
+    returns, lengths, ever, final, hold, distances = [], [], [], [], [], []
     for episode in range(episodes):
         obs, _ = env.reset(seed=seed + episode)
-        total, length, succeeded = 0.0, 0, False
+        total, successes = 0.0, []
         while True:
             obs, reward, terminated, truncated, info = env.step(policy_fn(obs))
             total += float(reward)
-            length += 1
-            succeeded |= bool(info.get("success", info.get("is_success", False)))
+            successes.append(bool(info.get("success", info.get("is_success", False))))
             if terminated or truncated:
                 break
         distance_fn = getattr(env, "goal_distance", None)
-        distance = distance_fn(obs, goal) if goal is not None and distance_fn else float("nan")
+        distances.append(
+            distance_fn(obs, goal) if goal is not None and distance_fn else float("nan")
+        )
         returns.append(total)
-        lengths.append(length)
-        successes.append(float(succeeded))
-        distances.append(distance)
-    return tuple(float(np.mean(values)) for values in (returns, lengths, successes, distances))
+        lengths.append(len(successes))
+        ever.append(any(successes))
+        final.append(successes[-1])
+        hold.append(len(successes) >= hold_steps and all(successes[-hold_steps:]))
+    result = dict(
+        mean_return=float(np.mean(returns)),
+        mean_length=float(np.mean(lengths)),
+        ever_success_rate=float(np.mean(ever)),
+        final_success_rate=float(np.mean(final)),
+        hold_success_rate=float(np.mean(hold)),
+        final_distance=float(np.mean(distances)),
+    )
+    result["success_rate"] = result[f"{success_metric}_success_rate"]
+    return result
+
+
+def evaluate_policy_with_success(env, policy_fn, goal=None, episodes=8, seed=0, **options):
+    """Compatibility tuple; by default success means reaching at least once."""
+    metrics = evaluate_policy_metrics(env, policy_fn, goal, episodes, seed, **options)
+    return tuple(
+        metrics[k] for k in ("mean_return", "mean_length", "success_rate", "final_distance")
+    )
 
 
 def evaluate_policy(env, policy_fn, episodes=8, seed=0):

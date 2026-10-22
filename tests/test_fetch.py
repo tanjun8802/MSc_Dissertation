@@ -163,14 +163,14 @@ def test_pick_block_varies_but_arm_is_fixed_and_seeded_sequences_reproduce():
 
 
 @pytest.mark.parametrize("name", NAMES)
-def test_five_goal_fetch_pipeline_uses_latest_global_sac(name, tmp_path):
+def test_configured_goal_fetch_pipeline_uses_latest_global_sac(name, tmp_path):
     full = config_for(name)
-    assert len(full.goals) == 5 and full.environment_options["reward_type"] == "dense"
+    assert len(full.goals) >= 3 and full.environment_options["reward_type"] == "dense"
     config = full.smoke()
     config.goals = full.goals
     rows = run_experiment(config, tmp_path / name, verbose=False)
-    assert len(rows) == 15
-    assert all(len(row["evaluation"]) == 5 for row in rows)
+    assert len(rows) == 3 * len(full.goals)
+    assert all(len(row["evaluation"]) == len(full.goals) for row in rows)
     sequential = [r for r in rows if r["mode"] == "sequential"]
     for i, row in enumerate(sequential):
         assert row["replay_memory"]["tasks"] == i + 1

@@ -1,7 +1,44 @@
+import math
 from itertools import chain
 
 import torch
 from torch import nn
+from torch.nn import functional as F
+
+
+class MLPTwinCritic(nn.Module):
+    """Conventional SAC control: independent Q(s, a, g) MLPs, no factor penalties."""
+
+    def __init__(self, state_dim, action_dim, goal_dim, hidden_dim=256, latent_dim=None):
+        super().__init__()
+
+        def head():
+            return nn.Sequential(
+                nn.Linear(state_dim + action_dim + goal_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, 1),
+            )
+
+        self.q1, self.q2 = head(), head()
+
+    def q1_forward(self, state, action, goal):
+        return self.q1(torch.cat((state, action, goal), dim=-1))
+
+    def q2_forward(self, state, action, goal):
+        return self.q2(torch.cat((state, action, goal), dim=-1))
+
+    def critic1_parameters(self):
+        return self.q1.parameters()
+
+    def critic2_parameters(self):
+        return self.q2.parameters()
+
+
+def tanh_log_jacobian(value):
+    """Stable even when float32 tanh(value) rounds to exactly +/-1."""
+    return 2 * (math.log(2) - value - F.softplus(-2 * value))
 
 
 class FactorisedTwinCritic(nn.Module):
@@ -237,7 +274,7 @@ class GaussianActor(nn.Module):
         pre_tanh_action = normal.rsample()
         action = torch.tanh(pre_tanh_action)
         log_prob = normal.log_prob(pre_tanh_action)
-        tanh_correction = torch.log(1.0 - action.pow(2) + 1e-06)
+        tanh_correction = tanh_log_jacobian(pre_tanh_action)
         log_prob = (log_prob - tanh_correction).sum(dim=-1, keepdim=True)
         deterministic_action = torch.tanh(mean)
         return (action, log_prob, deterministic_action)

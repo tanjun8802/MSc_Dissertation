@@ -8,7 +8,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn, optim
 
-from tbtrl.evaluation import evaluate_policy_with_success
+from tbtrl.evaluation import evaluate_policy_metrics, evaluate_policy_with_success
 from tbtrl.losses import CovarianceRegularizer
 from tbtrl.normalization import RunningMeanStd
 from tbtrl.random import preserve_rng_state, set_seed
@@ -85,6 +85,15 @@ def train_sac(
     actor_gradient_diagnostics: bool = False,
     current_buffer: ReplayBuffer | None = None,
     relabel_rewards: bool = False,
+    min_alpha: float | None = None,
+    max_alpha: float | None = None,
+    entropy_tuning_start: int = 0,
+    warmup_action: str = "random",
+    critic_loss: str = "mse",
+    max_abs_q: float | None = None,
+    eval_success_metric: str = "ever",
+    eval_hold_steps: int = 10,
+    optimizer_state: dict | None = None,
 ):
     """
     Factorised SAC-TBTRL trainer with independent critic branches.
@@ -201,6 +210,26 @@ def train_sac(
     ):
         raise ValueError("transfer_probe_steps must contain nonnegative integer environment steps.")
     probe_steps = set(transfer_probe_steps or [])
+    if warmup_action not in ("random", "policy") or critic_loss not in ("mse", "huber"):
+        raise ValueError("Invalid warmup_action or critic_loss.")
+    if eval_success_metric not in ("ever", "final", "hold") or eval_hold_steps < 1:
+        raise ValueError("Invalid evaluation success criterion.")
+    if not isinstance(entropy_tuning_start, int) or entropy_tuning_start < 0:
+        raise ValueError("entropy_tuning_start must be a nonnegative integer.")
+    for name, value in (
+        ("min_alpha", min_alpha),
+        ("max_alpha", max_alpha),
+        ("max_abs_q", max_abs_q),
+    ):
+        if value is not None and (not np.isfinite(value) or value <= 0):
+            raise ValueError(f"{name} must be finite and positive.")
+    if min_alpha is not None and max_alpha is not None and min_alpha > max_alpha:
+        raise ValueError("min_alpha must not exceed max_alpha.")
+    has_critic_factors = callable(getattr(critic, "phi1_forward", None))
+    if not has_critic_factors and any(
+        (sigreg_coef, goal_separation_coef, phi_raw_norm_coef, psi_raw_norm_coef)
+    ):
+        raise ValueError("Critic factor penalties require factorised critics.")
     actor_options = ActorTBTRLOptions.from_dict(actor_tbtrl or {})
     actor_regularizer = ActorRegularizer(actor, actor_options) if actor_tbtrl is not None else None
     if {id(p) for p in actor.parameters()} & {id(p) for p in critic.parameters()}:
@@ -238,6 +267,8 @@ def train_sac(
         "phi2_forward",
         "psi2_forward",
     ]
+    if not has_critic_factors:
+        required_methods = ["q1_forward", "q2_forward"]
     missing_methods = [
         method_name for method_name in required_methods if not hasattr(critic, method_name)
     ]
@@ -344,6 +375,31 @@ def train_sac(
         fixed_ent_coef = torch.as_tensor(float(ent_coef), dtype=torch.float32, device=device)
         log_ent_coef = None
         opt_ent_coef = None
+    if log_ent_coef is not None:
+        with torch.no_grad():
+            if min_alpha is not None:
+                log_ent_coef.clamp_(min=np.log(min_alpha))
+            if max_alpha is not None:
+                log_ent_coef.clamp_(max=np.log(max_alpha))
+    if optimizer_state is not None:
+        for name, optimizer in (
+            ("actor", opt_actor),
+            ("critic1", opt_critic1),
+            ("critic2", opt_critic2),
+        ):
+            optimizer.load_state_dict(deepcopy(optimizer_state[name]))
+        if opt_ent_coef is not None and optimizer_state.get("entropy") is not None:
+            opt_ent_coef.load_state_dict(deepcopy(optimizer_state["entropy"]))
+        # Carry moments, but respect the new phase's explicitly selected rates.
+        for optimizer, rate in (
+            (opt_actor, lr_actor),
+            (opt_critic1, lr_critic),
+            (opt_critic2, lr_critic),
+            (opt_ent_coef, lr_ent_coef),
+        ):
+            if optimizer is not None:
+                for group in optimizer.param_groups:
+                    group["lr"] = rate
     state_rms = RunningMeanStd(shape=(obs_dim,), device=device)
     goal_rms = RunningMeanStd(shape=(goal_dim,), device=device)
 
@@ -443,8 +499,16 @@ def train_sac(
             raise RuntimeError(f"Q1 shape {q1.shape} does not match target shape {target.shape}.")
         if q2.shape != target.shape:
             raise RuntimeError(f"Q2 shape {q2.shape} does not match target shape {target.shape}.")
-        td_loss1 = F.mse_loss(q1, target)
-        td_loss2 = F.mse_loss(q2, target)
+        for name, value in (("target", target), ("q1", q1), ("q2", q2)):
+            if not torch.isfinite(value).all() or (
+                max_abs_q is not None and value.detach().abs().max() > max_abs_q
+            ):
+                raise FloatingPointError(
+                    f"Unstable {name} at task={task_id} step={global_step}; inspect training.log before resuming."
+                )
+        loss_fn = F.mse_loss if critic_loss == "mse" else F.smooth_l1_loss
+        td_loss1 = loss_fn(q1, target)
+        td_loss2 = loss_fn(q2, target)
         return (td_loss1, td_loss2)
 
     def seen_goals_tensor() -> torch.Tensor:
@@ -531,6 +595,9 @@ def train_sac(
     def tbtrl_norm_losses(
         state: torch.Tensor, action: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
+        if not has_critic_factors:
+            z = zero_scalar()
+            return z, z, z, z, {}
         phi1 = critic.phi1_forward(state, action)
         phi2 = critic.phi2_forward(state, action)
         all_seen_goals = normalize_goal(seen_goals_tensor())
@@ -551,6 +618,7 @@ def train_sac(
         return (phi_norm1, psi_norm1, phi_norm2, psi_norm2, statistics)
 
     transfer_probes = []
+    evaluation_details = []
 
     def record_transfer_probe(step, updates):
         if transfer_probe_steps is None:
@@ -581,6 +649,8 @@ def train_sac(
                         probe_goal,
                         eval_episodes,
                         seed=seed + 2_000_000 + probe_task_id * 100,
+                        success_metric=eval_success_metric,
+                        hold_steps=eval_hold_steps,
                     )
                     row = dict(
                         task_id=probe_task_id,
@@ -643,7 +713,7 @@ def train_sac(
             state_rms.update(state_t)
             if normalize_goal_inputs:
                 goal_rms.update(goal_t)
-        if global_step < warmup_steps:
+        if global_step < warmup_steps and warmup_action == "random":
             action = env.action_space.sample().astype(np.float32)
         else:
             with torch.no_grad():
@@ -764,13 +834,13 @@ def train_sac(
             opt_critic1.zero_grad(set_to_none=True)
             critic1_total_loss.backward()
             critic1_grad_norm = nn.utils.clip_grad_norm_(
-                critic1_params, max_norm=critic_grad_clip_norm
+                critic1_params, max_norm=critic_grad_clip_norm, error_if_nonfinite=True
             )
             opt_critic1.step()
             opt_critic2.zero_grad(set_to_none=True)
             critic2_total_loss.backward()
             critic2_grad_norm = nn.utils.clip_grad_norm_(
-                critic2_params, max_norm=critic_grad_clip_norm
+                critic2_params, max_norm=critic_grad_clip_norm, error_if_nonfinite=True
             )
             opt_critic2.step()
             state_batch = normalize_state(current_batch.obs)
@@ -851,7 +921,7 @@ def train_sac(
                 opt_actor.zero_grad(set_to_none=True)
                 actor_loss.backward()
                 actor_grad_norm = nn.utils.clip_grad_norm_(
-                    actor.parameters(), max_norm=actor_grad_clip_norm
+                    actor.parameters(), max_norm=actor_grad_clip_norm, error_if_nonfinite=True
                 )
                 opt_actor.step()
             finally:
@@ -870,7 +940,13 @@ def train_sac(
                     ent_coef_loss = -(log_ent_coef * residual).mean()
                 opt_ent_coef.zero_grad(set_to_none=True)
                 ent_coef_loss.backward()
-                opt_ent_coef.step()
+                if global_step >= entropy_tuning_start:
+                    opt_ent_coef.step()
+                    with torch.no_grad():
+                        if min_alpha is not None:
+                            log_ent_coef.clamp_(min=np.log(min_alpha))
+                        if max_alpha is not None:
+                            log_ent_coef.clamp_(max=np.log(max_alpha))
             else:
                 ent_coef_loss = zero_scalar()
             polyak_update_critic()
@@ -947,14 +1023,26 @@ def train_sac(
                 )
             return eval_action.squeeze(0).cpu().numpy()
 
-        (mean_return, mean_length, success_rate, mean_final_distance) = (
-            evaluate_policy_with_success(
-                eval_env,
-                eval_policy,
-                goal=training_goal,
-                episodes=eval_episodes,
-                seed=seed + 100000 + global_step,
+        evaluation = evaluate_policy_metrics(
+            eval_env,
+            eval_policy,
+            goal=training_goal,
+            episodes=eval_episodes,
+            seed=seed + 100000 + global_step,
+            success_metric=eval_success_metric,
+            hold_steps=eval_hold_steps,
+        )
+        evaluation_details.append(
+            dict(
+                evaluation,
+                step=global_step,
+                final_distance=evaluation["final_distance"]
+                if np.isfinite(evaluation["final_distance"])
+                else None,
             )
+        )
+        mean_return, mean_length, success_rate, mean_final_distance = (
+            evaluation[k] for k in ("mean_return", "mean_length", "success_rate", "final_distance")
         )
         eval_returns.append((global_step, mean_return))
         eval_success_rates.append((global_step, success_rate))
@@ -968,6 +1056,14 @@ def train_sac(
             success_rate,
             mean_final_distance,
             loss_history[-1] if loss_history else {},
+        )
+        logger.info(
+            "Evaluation criterion=%s reached=%.3f final=%.3f hold=%.3f alpha=%.6g",
+            eval_success_metric,
+            evaluation["ever_success_rate"],
+            evaluation["final_success_rate"],
+            evaluation["hold_success_rate"],
+            current_ent_coef().item(),
         )
         eval_env.close()
         if early_stop_success_rate is not None:
@@ -1005,4 +1101,11 @@ def train_sac(
         current_ent_coef().detach().item(),
         loss_history,
         transfer_probes,
+        evaluation_details,
+        {
+            "actor": opt_actor.state_dict(),
+            "critic1": opt_critic1.state_dict(),
+            "critic2": opt_critic2.state_dict(),
+            "entropy": opt_ent_coef.state_dict() if opt_ent_coef else None,
+        },
     )

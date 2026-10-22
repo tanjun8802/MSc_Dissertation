@@ -17,6 +17,10 @@ class ExperimentConfig:
     model: dict = field(default_factory=dict)
     entropy_transfer: str = "reset"
     actor_type: str = "mlp"
+    critic_type: str = "factorised"
+    archive_compression: str = "similarity"
+    carry_optimizer_state: bool = False
+    independent_model_initialization: bool = False
     actor_model: dict = field(default_factory=dict)
     training: dict = field(default_factory=dict)
     replay_keep_fraction: float = 0.4
@@ -34,11 +38,36 @@ class ExperimentConfig:
     recovery: dict = field(default_factory=dict)
     recovery_threshold: float | None = None
     eval_episodes: int = 8
+    post_eval_episodes: int | None = None
 
     def validate(self):
         from tbtrl.training.dqn import train_dqn
         from tbtrl.training.sac import train_sac
 
+        if self.critic_type not in ("factorised", "mlp"):
+            raise ValueError("critic_type must be factorised or mlp.")
+        if self.archive_compression not in ("similarity", "capacity"):
+            raise ValueError("archive_compression must be similarity or capacity.")
+        if self.critic_type == "mlp":
+            if self.algorithm != "sac" or self.replay_mode == "global":
+                raise ValueError("MLP critic controls require SAC with per_task replay.")
+            for phase in ({}, self.scratch, self.first_task, self.recovery):
+                settings = dict(self.training, **phase)
+                if any(
+                    settings.get(k, 0)
+                    for k in (
+                        "sigreg_coef",
+                        "goal_separation_coef",
+                        "phi_raw_norm_coef",
+                        "psi_raw_norm_coef",
+                    )
+                ):
+                    raise ValueError("MLP critics cannot use factor regularisers.")
+
+        if self.post_eval_episodes is not None and self.post_eval_episodes < 1:
+            raise ValueError("post_eval_episodes must be positive.")
+        if self.carry_optimizer_state and self.algorithm != "sac":
+            raise ValueError("Optimiser carry is supported for SAC only.")
         if self.algorithm not in ("dqn", "sac"):
             raise ValueError("algorithm must be dqn or sac.")
         if not self.goals or not self.seeds or self.eval_episodes < 1:
@@ -128,6 +157,7 @@ class ExperimentConfig:
             "task_id",
             "make_env",
             "task_goals",
+            "optimizer_state",
             "replay_task_buffers",
             "current_buffer",
             "q_network",
@@ -178,6 +208,7 @@ class ExperimentConfig:
             environment_options=dict(self.environment_options, max_horizon=8),
             recovery=dict(self.recovery, total_steps=16, warmup_steps=4, enable_early_stop=False),
             eval_episodes=1,
+            post_eval_episodes=1 if self.post_eval_episodes is not None else None,
             recovery_threshold=None,
             global_replay_capacity=64
             if self.replay_mode == "global"

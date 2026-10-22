@@ -175,6 +175,7 @@ class NotebookDiagnostics:
                     ),
                 )
                 for head in (1, 2)
+                if hasattr(model, f"phi{head}_forward")
             }
             if hasattr(result.actor, "state_factors"):
                 actor_psi = _array(result.actor.goal_factors(goals))

@@ -18,6 +18,7 @@ import typing
 from dataclasses import dataclass
 from itertools import chain
 from pathlib import Path
+from types import MethodType
 
 import numpy as np
 import torch
@@ -145,6 +146,12 @@ for label, algo, config in cases:
 
     model, actor = components(False)
     legacy_model, legacy_actor = components(True)
+    if algo == "sac":
+        # The production policy intentionally fixes the legacy epsilon-biased
+        # tanh Jacobian. Align that one sampling operation in the reference so
+        # this fixture still isolates trainer/replay/regulariser equivalence.
+        # The saturated-density value/gradient has a separate analytic test.
+        legacy_actor.sample = MethodType(GaussianActor.sample, legacy_actor)
     for key, value in model.state_dict().items():
         torch.testing.assert_close(value, legacy_model.state_dict()[key], rtol=0, atol=0)
     # Keep old-task batches eligible even at the original notebook batch sizes.
@@ -242,6 +249,7 @@ for label, algo, config in cases:
         environment_steps=kw["total_steps"],
         evaluation_points=len(curves),
         model_source="original vs refactored",
+        sac_density_aligned=algo == "sac",
         old_replay=True,
         regularizers=True,
         max_parameter_difference=max(deltas),

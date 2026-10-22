@@ -41,7 +41,7 @@ addopts = "-ra"
 # Preserve the user's committed result notebooks byte-for-byte. Their cells are
 # still executed in fresh kernels in CI; new source notebooks remain linted.
 # Legacy sandbox notebooks are archived separately via LFS, outside the maintained experiments.
-extend-exclude = ["src/experiments", "experiments/recorded", "experiments/working/TBTRL_GridworldMaze_DQN.ipynb", "experiments/working/TBTRL_GridworldMaze_SAC.ipynb", "experiments/working/TBTRL_GridworldMaze_SAC_FactorisedActor.ipynb", "experiments/working/TBTRL_GridworldMaze_SAC_Transfer.ipynb"]
+extend-exclude = ["experiments/working/TBTRL_FetchReach_SAC.ipynb", "experiments/working/TBTRL_FetchPickAndPlace_SAC.ipynb", "src/experiments", "experiments/recorded", "experiments/working/TBTRL_GridworldMaze_DQN.ipynb", "experiments/working/TBTRL_GridworldMaze_SAC.ipynb", "experiments/working/TBTRL_GridworldMaze_SAC_FactorisedActor.ipynb", "experiments/working/TBTRL_GridworldMaze_SAC_Transfer.ipynb"]
 target-version = "py312"
 line-length = 100
 

@@ -50,7 +50,19 @@ def plot_learning(result, config, record, *, style):
     ax = axes[0, 1]
     success = getattr(result, "success_rates", [])
     if success:
-        ax.plot(*zip(*success), marker="o", color=COLORS[0])
+        details = getattr(result, "evaluation_details", [])
+        if details:
+            for key, label in (
+                ("ever_success_rate", "Reached"),
+                ("final_success_rate", "At end"),
+                ("hold_success_rate", "Held at end"),
+            ):
+                ax.plot(
+                    [r["step"] for r in details], [r[key] for r in details], marker="o", label=label
+                )
+            legend(ax)
+        else:
+            ax.plot(*zip(*success), marker="o", color=COLORS[0])
     else:
         empty_panel(ax, "Per-checkpoint success was not recorded\nfor this trainer")
     ax.set(
@@ -79,7 +91,9 @@ def plot_learning(result, config, record, *, style):
     ax.set(
         title="(c) Critic TD losses",
         xlabel="Environment steps",
-        ylabel="Mean squared TD error",
+        ylabel="Huber TD loss"
+        if getattr(config, "training", {}).get("critic_loss") == "huber"
+        else "Mean squared TD error",
     )
     numeric_axis(ax, x=True)
     legend(ax)
@@ -114,7 +128,7 @@ def plot_learning(result, config, record, *, style):
     goal_ticks(ax, [r["task_id"] for r in rows])
     finish(
         fig,
-        note=f"Empirical means over {config.eval_episodes} evaluation episode(s); no confidence interval shown. TD losses are unweighted. Outlined bar: current goal; hatched bars: future goals in a sequential run.",
+        note=f"Training checks: {config.eval_episodes} episodes; final table: {getattr(config, 'post_eval_episodes', None) or config.eval_episodes}. Success criterion: {getattr(config, 'training', {}).get('eval_success_metric', 'ever')}. No confidence interval shown. TD losses are unweighted. Outline: current goal; hatch: future goals.",
     )
     return fig
 

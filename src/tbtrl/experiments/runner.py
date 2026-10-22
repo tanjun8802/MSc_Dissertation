@@ -5,7 +5,7 @@ import logging
 import platform
 import subprocess
 import sys
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from copy import deepcopy
 from dataclasses import asdict, replace
 from functools import partial
@@ -17,11 +17,16 @@ import numpy as np
 import torch
 
 from tbtrl.environments.registry import make_environment
-from tbtrl.evaluation import evaluate_policy_with_success, make_policy, task_evaluation_seed
+from tbtrl.evaluation import evaluate_policy_metrics, make_policy, task_evaluation_seed
 from tbtrl.global_replay import GlobalReplayMemory
 from tbtrl.models.dqn import FactorisedQNetwork
-from tbtrl.models.sac import FactorisedGaussianActor, FactorisedTwinCritic, GaussianActor
-from tbtrl.random import set_seed
+from tbtrl.models.sac import (
+    FactorisedGaussianActor,
+    FactorisedTwinCritic,
+    GaussianActor,
+    MLPTwinCritic,
+)
+from tbtrl.random import preserve_rng_state, set_seed
 from tbtrl.replay import TaskReplayMemory
 from tbtrl.training.dqn import train_dqn
 from tbtrl.training.sac import train_sac
@@ -59,15 +64,31 @@ def _models(config, factory, device):
             actor = GaussianActor(
                 obs_dim, act_dim, goal_dim, net_arch=(config.model.get("hidden_dim", 64),) * 2
             ).to(device)
-        critic = FactorisedTwinCritic(obs_dim, act_dim, goal_dim, **config.model).to(device)
-        target = FactorisedTwinCritic(obs_dim, act_dim, goal_dim, **config.model).to(device)
+        critic_class = FactorisedTwinCritic if config.critic_type == "factorised" else MLPTwinCritic
+        with preserve_rng_state() if config.independent_model_initialization else nullcontext():
+            if config.independent_model_initialization:
+                set_seed(int(torch.initial_seed()) + 7919)
+            critic = critic_class(obs_dim, act_dim, goal_dim, **config.model).to(device)
+            target = critic_class(obs_dim, act_dim, goal_dim, **config.model).to(device)
         target.load_state_dict(critic.state_dict())
         return actor, critic, target
     finally:
         env.close()
 
 
-def _train(config, models, factory, task_id, seed, device, goals, buffers, settings, memory=None):
+def _train(
+    config,
+    models,
+    factory,
+    task_id,
+    seed,
+    device,
+    goals,
+    buffers,
+    settings,
+    memory=None,
+    optimizer_state=None,
+):
     env = factory(goal=config.goals[task_id])
     common = dict(
         seed=seed,
@@ -92,7 +113,13 @@ def _train(config, models, factory, task_id, seed, device, goals, buffers, setti
     try:
         if config.algorithm == "dqn":
             return train_dqn(q_network=models[0], q_target_network=models[1], **common)
-        return train_sac(actor=models[0], critic=models[1], critic_target=models[2], **common)
+        return train_sac(
+            actor=models[0],
+            critic=models[1],
+            critic_target=models[2],
+            optimizer_state=optimizer_state,
+            **common,
+        )
     finally:
         env.close()
 
@@ -114,6 +141,7 @@ def _memory(config, factory, device):
             keep_fraction=config.replay_keep_fraction,
             similarity_threshold=config.similarity_threshold,
             max_groups=config.replay_max_groups,
+            compression=config.archive_compression,
         )
     finally:
         env.close()
@@ -164,18 +192,25 @@ def _evaluate(config, result, factory, seed):
                 normalize_goal=config.training.get("normalize_goal_inputs", False),
                 clip=config.training.get("obs_norm_clip", 10.0),
             )
-            ret, length, success, distance = evaluate_policy_with_success(
-                env, policy, goal, config.eval_episodes, seed=task_evaluation_seed(seed, task_id)
-            )
-            rows.append(
+            options = (
                 dict(
-                    task_id=task_id,
-                    mean_return=ret,
-                    mean_length=length,
-                    success_rate=success,
-                    final_distance=distance if np.isfinite(distance) else None,
+                    success_metric=config.training.get("eval_success_metric", "ever"),
+                    hold_steps=config.training.get("eval_hold_steps", 10),
                 )
+                if config.algorithm == "sac"
+                else {}
             )
+            metrics = evaluate_policy_metrics(
+                env,
+                policy,
+                goal,
+                config.post_eval_episodes or config.eval_episodes,
+                seed=task_evaluation_seed(seed, task_id),
+                **options,
+            )
+            if not np.isfinite(metrics["final_distance"]):
+                metrics["final_distance"] = None
+            rows.append(dict(task_id=task_id, **metrics))
         finally:
             env.close()
     return rows
@@ -210,7 +245,13 @@ def _save_task(directory, result, config, seed, task_id, mode, evaluations):
             "goal_normalizer": _normalizer_state(result.goal_normalizer),
             "entropy_coefficient": result.entropy_coefficient,
         }
+        record["parameter_counts"] = {
+            "actor": sum(p.numel() for p in result.actor.parameters()),
+            "critic": sum(p.numel() for p in result.critic.parameters()),
+        }
         record["success_curve"] = result.success_rates
+        record["evaluation_details"] = result.evaluation_details
+        record["success_metric"] = config.training.get("eval_success_metric", "ever")
         record["initial_alpha"] = (
             config.training.get("initial_alpha", 1.0)
             if config.training.get("ent_coef", "auto") == "auto"
@@ -289,6 +330,7 @@ def _run_experiment(
             task_goals = {}
             for task_id, goal in enumerate(config.goals):
                 if mode == "scratch":
+                    set_seed(training_seed(config, seed, mode, task_id))
                     models = _models(config, factory, device)
                     if config.replay_mode == "global":
                         memory = _memory(config, factory, device)
@@ -320,6 +362,11 @@ def _run_experiment(
                     memory.buffers if mode == "sequential" else {},
                     settings,
                     memory,
+                    final_result.optimizer_state
+                    if config.carry_optimizer_state
+                    and mode == "sequential"
+                    and final_result is not None
+                    else None,
                 )
                 task_config = replace(config, training=settings)
                 if mode == "sequential" and isinstance(memory, GlobalReplayMemory):
@@ -451,6 +498,7 @@ def _run_experiment(
                     buffers,
                     settings,
                     recovery_memory,
+                    final_result.optimizer_state if config.carry_optimizer_state else None,
                 )
                 task_config = replace(config, training=settings)
                 evaluation = _evaluate(task_config, result, factory, seed)

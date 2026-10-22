@@ -70,6 +70,8 @@ jobs:
         run: uv run --extra robotics python scripts/verify_legacy_equivalence.py
       - name: Execute supported notebooks in fresh kernels
         run: uv run --extra robotics python scripts/check_notebooks.py
+      - name: Execute Fetch baseline studies in fresh kernels
+        run: uv run --extra robotics python scripts/check_fetch_study.py
       - name: Build wheel and source distribution
         run: uv run --extra robotics python -m build
       - name: Verify wheel imports outside the checkout

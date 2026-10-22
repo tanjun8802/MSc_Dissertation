@@ -1,5 +1,11 @@
 # Fetch experiments
 
+For new baseline and retention investigations, start with the separate
+[Fetch baseline study](fetch-baseline-study.md). It adds conventional SAC controls,
+explicit entropy comparisons, sustained-holding evaluation and gated transfer
+runs without overwriting historical notebooks. The protocol below describes the
+original notebooks; consult their saved manifests for the exact executed settings.
+
 Open `experiments/working/TBTRL_FetchReach_SAC.ipynb` or
 `experiments/working/TBTRL_FetchPickAndPlace_SAC.ipynb`. Each loads its own JSON
 configuration, checks the arm reset (and PickAndPlace block variation), and runs scratch, sequential

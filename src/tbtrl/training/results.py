@@ -35,3 +35,5 @@ class SACResult:
     entropy_coefficient: float
     losses: list = field(default_factory=list)
     transfer_probes: list = field(default_factory=list)
+    evaluation_details: list = field(default_factory=list)
+    optimizer_state: dict = field(default_factory=dict)

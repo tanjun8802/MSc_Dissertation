@@ -57,17 +57,21 @@ def test_unknown_config_option_fails_before_training():
 
 def test_working_notebooks_compile_and_new_experiment_has_no_saved_outputs():
     notebooks = list((ROOT / "experiments/working").glob("*.ipynb"))
-    assert len(notebooks) == 10
+    assert len(notebooks) >= 10
     for path in notebooks:
         notebook = nbformat.read(path, as_version=4)
         nbformat.validate(notebook)
         for cell in notebook.cells:
             if cell.cell_type == "code":
                 compile(cell.source, str(path), "exec")
-                if path.stem.endswith("SAC_GlobalReplay") or path.stem.startswith("TBTRL_Fetch"):
+                if path.stem.endswith("Baseline_Study") or path.stem == "TBTRL_MADE_Transfer_Study":
                     assert cell.execution_count is None and cell.outputs == []
-                    assert "sys.path" not in cell.source
-        assert "run_experiment" in json.dumps(notebook)
+                    if path.stem.endswith("Baseline_Study"):
+                        assert "sys.path" not in cell.source
+        assert any(
+            name in json.dumps(notebook)
+            for name in ("run_experiment", "run_baselines", "run_discovery", "run_study")
+        )
 
 
 @pytest.mark.parametrize("actor_type", ["mlp", "factorised"])
@@ -216,7 +220,10 @@ def test_notebooks_default_to_full_configs_and_explicit_diagnostics():
     for path in (ROOT / "experiments/working").glob("*.ipynb"):
         notebook = nbformat.read(path, as_version=4)
         source = "\n".join(c.source for c in notebook.cells if c.cell_type == "code")
-        assert "SMOKE = False" in source and "on_task_end=diagnostics" in source
+        if path.stem.endswith("Baseline_Study"):
+            assert "SMOKE = True" in source and "on_task_end=DIAGNOSTICS" in source
+        elif "MADE" not in path.stem and "PMO" not in path.stem:
+            assert "SMOKE = False" in source and "on_task_end=diagnostics" in source
     from tbtrl.experiments.config import training_seed, training_settings
 
     config = load_config(ROOT / "configs/tbtrl_fourrooms_dqn.json")

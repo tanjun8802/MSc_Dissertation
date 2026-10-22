@@ -22,6 +22,7 @@ class GlobalReplayMemory:
         keep_fraction=0.4,
         similarity_threshold=0.8,
         max_groups=16,
+        compression="similarity",
     ):
         if not 1 <= recent_capacity < capacity:
             raise ValueError("Recent capacity must leave space for the shared archive.")
@@ -35,6 +36,9 @@ class GlobalReplayMemory:
         self.recent = ReplayBuffer.view(self.storage, 0, recent_capacity)
         self.keep_fraction, self.similarity_threshold = keep_fraction, similarity_threshold
         self.max_groups = max_groups
+        if compression not in ("similarity", "capacity"):
+            raise ValueError("compression must be similarity or capacity.")
+        self.compression = compression
         self.groups = {}  # representative task ID -> (start, stop) in storage
         self.task_groups = {}  # task ID -> representative task ID; no transition copies
         self.buffers = {}
@@ -102,7 +106,8 @@ class GlobalReplayMemory:
                 group = reps[best]
                 fraction = (1 - similarity) / (1 - self.similarity_threshold)
                 count = 0 if abs(similarity - 1) < 1e-6 else max(1, int(count * fraction))
-                incoming = incoming[-count:] if count else incoming[:0]
+                if self.compression == "similarity":
+                    incoming = incoming[-count:] if count else incoming[:0]
             elif len(reps) == self.max_groups:
                 # Consolidate redundant groups rather than dropping a whole old task.
                 left, right = np.triu_indices(len(reps), k=1)
@@ -153,6 +158,7 @@ class GlobalReplayMemory:
             keep_fraction=self.keep_fraction,
             similarity_threshold=self.similarity_threshold,
             max_groups=self.max_groups,
+            compression=self.compression,
         )
         for name in ReplayBuffer.fields:
             getattr(result.storage, name)[self.recent_capacity :] = getattr(self.storage, name)[
@@ -167,6 +173,7 @@ class GlobalReplayMemory:
         archive_size = sum(stop - start for start, stop in self.groups.values())
         return dict(
             capacity=self.storage.capacity,
+            compression=self.compression,
             recent_capacity=self.recent_capacity,
             archive_capacity=self.archive_capacity,
             recent_samples=len(self.recent),
