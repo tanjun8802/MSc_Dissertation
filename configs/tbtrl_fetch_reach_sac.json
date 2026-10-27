@@ -54,7 +54,7 @@
     "replay_ratio": 0.5,
     "replay_loss_coef": 0.05,
     "early_stop_success_rate": 1.0,
-    "early_stop_patience": 5,
+    "early_stop_patience": 3,
     "enable_early_stop": true,
     "sigreg_coef": 1e-05,
     "sketch_dim": 16,
