@@ -10,6 +10,7 @@ from pathlib import Path
 
 import numpy as np
 
+from .config import training_settings
 from .figure_style import DEFAULT_STYLE, save_figure, styled, subplots
 from .runner import run_experiment
 
@@ -25,15 +26,24 @@ RETENTION = (
 )
 
 
+def _merge_settings(base, overrides):
+    """Recursively apply explicit JSON case overrides; an empty dict clears a field."""
+    merged = deepcopy(base)
+    for key, value in overrides.items():
+        if isinstance(value, dict) and value and isinstance(merged.get(key), dict):
+            merged[key] = _merge_settings(merged[key], value)
+        else:
+            merged[key] = deepcopy(value)
+    return merged
+
+
 def configure_fetch_study(
     base, *, exploration="bounded", architecture="plain_sac", retention="control"
 ):
-    """New protocol, independent of historical notebook configs.
+    """Resolve base JSON followed by its selected exploration/architecture/retention cases.
 
-    Automatic/bounded/fixed temperature cases share initial alpha and all other
-    settings. Bounded adds a floor, ceiling and delayed adaptation as one named
-    intervention. Actor controls share the environment, data budget and rates;
-    network parameter counts are not matched across architectures.
+    No numerical study presets live in Python. Per-phase settings remain intact
+    and are applied by training_settings after these explicit case overrides.
     """
     if (
         exploration not in EXPLORATION
@@ -43,101 +53,23 @@ def configure_fetch_study(
         raise ValueError("Unknown Fetch study case.")
     if not base.environment.startswith("fetch-") or base.algorithm != "sac":
         raise ValueError("Use a Fetch SAC config.")
-    c = deepcopy(base)
-    c.name = f"{base.name}-study-{exploration}-{architecture}-{retention}"
-    c.entropy_transfer = "reset" if exploration == "fixed" else "carry"
-    c.eval_episodes, c.post_eval_episodes = 32, 100
-    c.scratch, c.first_task, c.recovery = {}, {}, {"total_steps": 100000}
-    c.carry_optimizer_state = False
-    c.independent_model_initialization = True
-    c.recovery_threshold = 0.9
-    c.training.update(
-        total_steps=500000,
-        warmup_steps=10000,
-        batch_size=256,
-        eval_freq=5000,
-        lr_actor=3e-4,
-        lr_critic=3e-4,
-        lr_ent_coef=1e-4,
-        initial_alpha=0.03,
-        ent_coef=0.03 if exploration == "fixed" else "auto",
-        min_alpha=0.01 if exploration == "bounded" else None,
-        max_alpha=0.2 if exploration == "bounded" else None,
-        entropy_tuning_start=50000 if exploration == "bounded" else 0,
-        target_entropy=-4.0,
-        warmup_action="random",
-        critic_loss="huber",
-        max_abs_q=1000.0,
-        relabel_rewards=True,
-        normalize_state_inputs=False,
-        normalize_goal_inputs=False,
-        q_target_min=None,
-        q_target_max=None,
-        eval_success_metric="hold",
-        eval_hold_steps=10,
-        early_stop_success_rate=0.9,
-        early_stop_patience=3,
-        enable_early_stop=True,
-        sigreg_coef=0.0,
-        goal_separation_coef=0.0,
-        phi_raw_norm_coef=0.0,
-        psi_raw_norm_coef=0.0,
-        actor_tbtrl=None,
-        replay_ratio=0.5,
-        replay_loss_coef=0.05,
-        transfer_probe_steps=[0, 9999, 10000, 10100, 11000, 15000],
-        actor_gradient_diagnostics=True,
-    )
-    c.critic_type = "mlp" if architecture == "plain_sac" else "factorised"
-    c.actor_type = "factorised" if architecture in ("factorised_actor_critic", "tbtrl") else "mlp"
-    if c.actor_type == "mlp":
-        c.actor_model = {}
-    c.replay_mode = "per_task" if c.critic_type == "mlp" else "global"
-    c.similarity_threshold = None if c.critic_type == "mlp" else 0.8
-    c.archive_compression = "similarity"
-    if architecture == "tbtrl":
-        c.training.update(
-            sigreg_coef=1e-5,
-            goal_separation_coef=1e-5,
-            phi_raw_norm_coef=0.003,
-            psi_raw_norm_coef=0.003,
-            phi_norm_target=8.0,
-            psi_norm_target=8.0,
-        )
-        rank = c.actor_model.get("latent_dim", 16)
-        c.training["actor_tbtrl"] = dict(
-            replay_loss_coef=1.0,
-            retention_kl_coef=0.0,
-            sigreg_coef=1e-5,
-            covariance_target_variance=2.0 / rank,
-            sketch_dim=rank,
-            goal_separation_coef=1e-5,
-            goal_separation_target_cosine=0.85,
-            phi_norm_coef=0.003,
-            psi_norm_coef=0.003,
-            phi_norm_target=2.0,
-            psi_norm_target=2.0,
-        )
     if retention != "control" and architecture != "tbtrl":
         raise ValueError("Retention interventions require architecture='tbtrl'.")
-    if retention in ("critic_replay", "combined"):
-        c.training["replay_loss_coef"] = 1.0
-    if retention in ("policy_anchor", "combined"):
-        c.training["actor_tbtrl"]["retention_kl_coef"] = 0.01
-    if retention in ("capacity_archive", "combined"):
-        c.archive_compression = "capacity"
-    if retention in ("gentle_transition", "combined"):
-        c.carry_optimizer_state = True
-        c.training.update(
-            warmup_action="policy", lr_actor=1e-4, lr_critic=1e-4, reset_target_from_critic=False
-        )
-    # Scratch and the first sequential task use the same acquisition settings.
-    acquisition = dict(
-        warmup_action="random", lr_actor=3e-4, lr_critic=3e-4, reset_target_from_critic=True
-    )
-    c.scratch.update(acquisition)
-    c.first_task.update(acquisition)
-    return c.validate()
+    values = base.to_dict()
+    for section, case in (
+        ("exploration", exploration),
+        ("architecture", architecture),
+        ("retention", retention),
+    ):
+        try:
+            overrides = base.study_overrides[section][case]
+        except KeyError as exc:
+            raise ValueError(
+                f"Define study_overrides.{section}.{case} in the experiment JSON."
+            ) from exc
+        values = _merge_settings(values, overrides)
+    values["name"] = f"{base.name}-study-{exploration}-{architecture}-{retention}"
+    return type(base)(**values).validate()
 
 
 def _fingerprint(config, modes, device):
@@ -165,6 +97,18 @@ def run_study_job(config, directory, *, modes=("scratch",), device="cpu", on_tas
     is reconstructed from evaluation-only checkpoints.
     """
     directory = Path(directory)
+    print(f"Study job: {directory}", flush=True)
+    for mode in modes:
+        for task_id in range(min(len(config.goals), 2)):
+            print(
+                f"Resolved {mode} task={task_id}: "
+                + json.dumps(training_settings(config, mode, task_id), sort_keys=True),
+                flush=True,
+            )
+    print(
+        f"Held-out evaluation episodes: {config.post_eval_episodes or config.eval_episodes}",
+        flush=True,
+    )
     fingerprint = _fingerprint(config, modes, device)
     receipt = directory / "study-complete.json"
     if directory.exists():
@@ -293,7 +237,7 @@ def plot_baselines(records, directory, *, style=DEFAULT_STYLE):
                 color="C0",
             )
     for ax, title in zip(
-        axes, ("Reached at any time", "Held for final 10 steps", "Training cost (× = unsolved)")
+        axes, ("Reached at any time", "Held at episode end", "Training cost (× = unsolved)")
     ):
         ax.set(title=title, xticks=range(len(labels)), xticklabels=labels)
         ax.tick_params(axis="x", rotation=35)

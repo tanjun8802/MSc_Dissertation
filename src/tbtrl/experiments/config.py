@@ -39,10 +39,26 @@ class ExperimentConfig:
     recovery_threshold: float | None = None
     eval_episodes: int = 8
     post_eval_episodes: int | None = None
+    study_overrides: dict = field(default_factory=dict)
 
     def validate(self):
         from tbtrl.training.dqn import train_dqn
         from tbtrl.training.sac import train_sac
+
+        if not isinstance(self.study_overrides, dict) or set(self.study_overrides) - {
+            "exploration",
+            "architecture",
+            "retention",
+        }:
+            raise ValueError("Unknown study_overrides section.")
+        for cases in self.study_overrides.values():
+            if not isinstance(cases, dict):
+                raise ValueError("Study sections must map case names to config overrides.")
+            for overrides in cases.values():
+                if not isinstance(overrides, dict) or set(overrides) - (
+                    self.__dataclass_fields__.keys() - {"study_overrides"}
+                ):
+                    raise ValueError("Unknown or recursive study config override.")
 
         if self.critic_type not in ("factorised", "mlp"):
             raise ValueError("critic_type must be factorised or mlp.")

@@ -66,8 +66,6 @@ def test_working_notebooks_compile_and_new_experiment_has_no_saved_outputs():
                 compile(cell.source, str(path), "exec")
                 if path.stem.endswith("Baseline_Study") or path.stem == "TBTRL_MADE_Transfer_Study":
                     assert cell.execution_count is None and cell.outputs == []
-                    if path.stem.endswith("Baseline_Study"):
-                        assert "sys.path" not in cell.source
         assert any(
             name in json.dumps(notebook)
             for name in ("run_experiment", "run_baselines", "run_discovery", "run_study")

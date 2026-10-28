@@ -87,7 +87,15 @@
       11000,
       15000
     ],
-    "actor_gradient_diagnostics": true
+    "actor_gradient_diagnostics": true,
+    "critic_loss": "huber",
+    "max_abs_q": 1000.0,
+    "relabel_rewards": true,
+    "normalize_state_inputs": false,
+    "normalize_goal_inputs": false,
+    "eval_success_metric": "hold",
+    "eval_hold_steps": 10,
+    "warmup_action": "random"
   },
   "replay_keep_fraction": 0.4,
   "replay_schedule": "constant",
@@ -116,5 +124,204 @@
     "q_target_max": null
   },
   "recovery_threshold": 0.9,
-  "eval_episodes": 8
+  "eval_episodes": 8,
+  "independent_model_initialization": true,
+  "post_eval_episodes": 100,
+  "study_overrides": {
+    "exploration": {
+      "auto": {
+        "training": {
+          "ent_coef": "auto",
+          "min_alpha": null,
+          "max_alpha": null,
+          "entropy_tuning_start": 0
+        }
+      },
+      "bounded": {
+        "training": {
+          "ent_coef": "auto",
+          "min_alpha": 0.01,
+          "max_alpha": 0.2,
+          "entropy_tuning_start": 50000
+        }
+      },
+      "fixed": {
+        "entropy_transfer": "reset",
+        "training": {
+          "ent_coef": 0.1,
+          "min_alpha": null,
+          "max_alpha": null,
+          "entropy_tuning_start": 0
+        }
+      }
+    },
+    "architecture": {
+      "plain_sac": {
+        "training": {
+          "sigreg_coef": 0.0,
+          "goal_separation_coef": 0.0,
+          "phi_raw_norm_coef": 0.0,
+          "psi_raw_norm_coef": 0.0,
+          "actor_tbtrl": null
+        },
+        "scratch": {
+          "sigreg_coef": 0.0,
+          "goal_separation_coef": 0.0,
+          "phi_raw_norm_coef": 0.0,
+          "psi_raw_norm_coef": 0.0,
+          "actor_tbtrl": null
+        },
+        "first_task": {
+          "sigreg_coef": 0.0,
+          "goal_separation_coef": 0.0,
+          "phi_raw_norm_coef": 0.0,
+          "psi_raw_norm_coef": 0.0,
+          "actor_tbtrl": null
+        },
+        "recovery": {
+          "sigreg_coef": 0.0,
+          "goal_separation_coef": 0.0,
+          "phi_raw_norm_coef": 0.0,
+          "psi_raw_norm_coef": 0.0,
+          "actor_tbtrl": null
+        },
+        "critic_type": "mlp",
+        "actor_type": "mlp",
+        "actor_model": {},
+        "replay_mode": "per_task",
+        "similarity_threshold": null
+      },
+      "factorised_critic": {
+        "training": {
+          "sigreg_coef": 0.0,
+          "goal_separation_coef": 0.0,
+          "phi_raw_norm_coef": 0.0,
+          "psi_raw_norm_coef": 0.0,
+          "actor_tbtrl": null
+        },
+        "scratch": {
+          "sigreg_coef": 0.0,
+          "goal_separation_coef": 0.0,
+          "phi_raw_norm_coef": 0.0,
+          "psi_raw_norm_coef": 0.0,
+          "actor_tbtrl": null
+        },
+        "first_task": {
+          "sigreg_coef": 0.0,
+          "goal_separation_coef": 0.0,
+          "phi_raw_norm_coef": 0.0,
+          "psi_raw_norm_coef": 0.0,
+          "actor_tbtrl": null
+        },
+        "recovery": {
+          "sigreg_coef": 0.0,
+          "goal_separation_coef": 0.0,
+          "phi_raw_norm_coef": 0.0,
+          "psi_raw_norm_coef": 0.0,
+          "actor_tbtrl": null
+        },
+        "critic_type": "factorised",
+        "actor_type": "mlp",
+        "actor_model": {}
+      },
+      "factorised_actor_critic": {
+        "training": {
+          "sigreg_coef": 0.0,
+          "goal_separation_coef": 0.0,
+          "phi_raw_norm_coef": 0.0,
+          "psi_raw_norm_coef": 0.0,
+          "actor_tbtrl": null
+        },
+        "scratch": {
+          "sigreg_coef": 0.0,
+          "goal_separation_coef": 0.0,
+          "phi_raw_norm_coef": 0.0,
+          "psi_raw_norm_coef": 0.0,
+          "actor_tbtrl": null
+        },
+        "first_task": {
+          "sigreg_coef": 0.0,
+          "goal_separation_coef": 0.0,
+          "phi_raw_norm_coef": 0.0,
+          "psi_raw_norm_coef": 0.0,
+          "actor_tbtrl": null
+        },
+        "recovery": {
+          "sigreg_coef": 0.0,
+          "goal_separation_coef": 0.0,
+          "phi_raw_norm_coef": 0.0,
+          "psi_raw_norm_coef": 0.0,
+          "actor_tbtrl": null
+        },
+        "critic_type": "factorised",
+        "actor_type": "factorised"
+      },
+      "tbtrl": {}
+    },
+    "retention": {
+      "control": {},
+      "critic_replay": {
+        "training": {
+          "replay_loss_coef": 1.0
+        }
+      },
+      "policy_anchor": {
+        "training": {
+          "actor_tbtrl": {
+            "retention_kl_coef": 0.01
+          }
+        }
+      },
+      "capacity_archive": {
+        "archive_compression": "capacity"
+      },
+      "gentle_transition": {
+        "carry_optimizer_state": true,
+        "training": {
+          "warmup_action": "policy",
+          "lr_actor": 0.0001,
+          "lr_critic": 0.0001,
+          "reset_target_from_critic": false
+        },
+        "scratch": {
+          "lr_actor": 0.0005,
+          "lr_critic": 0.0005,
+          "warmup_action": "random",
+          "reset_target_from_critic": true
+        },
+        "first_task": {
+          "lr_actor": 0.0005,
+          "lr_critic": 0.0005,
+          "warmup_action": "random",
+          "reset_target_from_critic": true
+        }
+      },
+      "combined": {
+        "carry_optimizer_state": true,
+        "training": {
+          "warmup_action": "policy",
+          "lr_actor": 0.0001,
+          "lr_critic": 0.0001,
+          "reset_target_from_critic": false,
+          "replay_loss_coef": 1.0,
+          "actor_tbtrl": {
+            "retention_kl_coef": 0.01
+          }
+        },
+        "scratch": {
+          "lr_actor": 0.0005,
+          "lr_critic": 0.0005,
+          "warmup_action": "random",
+          "reset_target_from_critic": true
+        },
+        "first_task": {
+          "lr_actor": 0.0005,
+          "lr_critic": 0.0005,
+          "warmup_action": "random",
+          "reset_target_from_critic": true
+        },
+        "archive_compression": "capacity"
+      }
+    }
+  }
 }

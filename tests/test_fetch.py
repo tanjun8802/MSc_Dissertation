@@ -189,6 +189,9 @@ def test_fetch_diagnostics_with_stub_frames_do_not_change_training(name, tmp_pat
     )
     config = config_for(name).smoke()
     config.eval_episodes = 8
+    # Match the eight rendered episodes to the held-out numerical evaluation.
+    # Smoke mode separately reduces an explicit post_eval_episodes to one.
+    config.post_eval_episodes = 8
     baseline = tmp_path / "baseline"
     actual = tmp_path / "actual"
     run_experiment(config, baseline, modes=("sequential",), verbose=False)
