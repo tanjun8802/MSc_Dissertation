@@ -8,6 +8,7 @@ but maximises only over the candidate set observed at the next state.
 import json
 import math
 import random
+import shutil
 import time
 from collections import Counter
 from copy import deepcopy
@@ -19,6 +20,16 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
+from tbtrl.continuation import (
+    atomic_json,
+    atomic_torch,
+    load_boundary,
+    prepare_run,
+    restore_rng,
+    rng_state,
+    run_lock,
+    save_progress,
+)
 from tbtrl.losses import CovarianceRegularizer, norm_penalty_loss_l1, online_goal_separation_loss
 from tbtrl.models.dqn import FactorisedQNetwork
 
@@ -422,7 +433,7 @@ class CandidateLearner:
         }
 
 
-def run_experiment(
+def _run_experiment(
     tasks,
     make_environment,
     output_dir,
@@ -441,7 +452,7 @@ def run_experiment(
     campaigns are online learning curves, not additional free evaluation runs.
     """
     output = Path(output_dir).resolve()
-    output.mkdir(parents=True, exist_ok=False)
+    output.mkdir(parents=True, exist_ok=True)
     goals = {i: np.asarray(task["goal"], dtype=np.float32) for i, task in enumerate(tasks)}
     manifest = dict(
         tasks=tasks,
@@ -461,8 +472,30 @@ def run_experiment(
     records = []
     for seed in seeds:
         for mode in ("scratch", "sequential"):
+            from tbtrl.benchmarks.study import pack_learner, unpack_learner
+
             learner = None
+            boundary = output / f"seed_{seed}" / mode / "boundary.pt"
+            completed = 0
+            if boundary.exists():
+                saved = load_boundary(boundary)
+                completed = saved["completed"]
+                if mode == "sequential":
+                    learner = unpack_learner(saved["learner"], device)
+                    learner.goals = goals
+                restore_rng(saved["rng"])
             for task_id, task in enumerate(tasks):
+                path = output / f"seed_{seed}" / mode / f"task_{task_id}"
+                if task_id < completed:
+                    record = json.loads((path / "results.json").read_text())
+                    record["path"] = str(path)
+                    records.append(record)
+                    print(f"Reusing completed {mode}: {task['name']} seed={seed}", flush=True)
+                    if on_task_end is not None and hasattr(on_task_end, "show_cached"):
+                        on_task_end.show_cached(record)
+                    continue
+                if path.exists():
+                    shutil.rmtree(path)
                 # Matched task-local RNGs; source tasks cannot advance target generators' RNGs.
                 task_seed = seed + 1009 * task_id
                 random.seed(task_seed)
@@ -547,9 +580,60 @@ def run_experiment(
                     path=str(path),
                 )
                 records.append(record)
-                (path / "results.json").write_text(json.dumps(record, indent=2))
-                (output / "summary.json").write_text(json.dumps(records, indent=2))
+                atomic_json(path / "results.json", record)
+                atomic_torch(
+                    boundary,
+                    dict(
+                        completed=task_id + 1,
+                        learner=pack_learner(learner) if mode == "sequential" else None,
+                        rng=rng_state(),
+                    ),
+                )
+                save_progress(output / "summary.json", records)
                 if on_task_end:
                     on_task_end(record=record, environment=env, learner=learner)
                 del env
-    return records
+    atomic_json(output / "summary.json", records)
+    return json.loads((output / "summary.json").read_text())
+
+
+def run_experiment(
+    tasks,
+    make_environment,
+    output_dir,
+    *,
+    config=CandidateConfig(),
+    seeds=(42, 123, 456),
+    device="cpu",
+    on_task_end=None,
+    metadata=None,
+    resume=False,
+):
+    """Resume at task boundaries; scratch and TBTRL checkpoints are independent."""
+    if not tasks or not seeds or len(set(seeds)) != len(seeds):
+        raise ValueError("Supply tasks and distinct seeds")
+    output = Path(output_dir).resolve()
+    output.mkdir(parents=True, exist_ok=resume)
+    with run_lock(output):
+        prepare_run(
+            output,
+            dict(
+                kind="candidate",
+                config=asdict(config),
+                seeds=list(seeds),
+                device=str(device),
+                metadata=metadata or {},
+            ),
+            tasks,
+            resume=resume,
+        )
+        return _run_experiment(
+            tasks,
+            make_environment,
+            output,
+            config=config,
+            seeds=seeds,
+            device=device,
+            on_task_end=on_task_end,
+            metadata=metadata,
+        )

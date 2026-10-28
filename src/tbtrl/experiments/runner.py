@@ -3,6 +3,7 @@
 import json
 import logging
 import platform
+import shutil
 import subprocess
 import sys
 from contextlib import contextmanager, nullcontext
@@ -16,6 +17,7 @@ import gymnasium
 import numpy as np
 import torch
 
+from tbtrl.continuation import atomic_json, prepare_run, run_lock, save_progress
 from tbtrl.environments.registry import make_environment
 from tbtrl.evaluation import evaluate_policy_metrics, make_policy, task_evaluation_seed
 from tbtrl.global_replay import GlobalReplayMemory
@@ -32,6 +34,7 @@ from tbtrl.training.dqn import train_dqn
 from tbtrl.training.sac import train_sac
 
 from .config import training_seed, training_settings
+from .continuation import load_sequence, save_sequence
 
 logger = logging.getLogger(__name__)
 
@@ -227,6 +230,8 @@ def _save_task(directory, result, config, seed, task_id, mode, evaluations):
         task_id=task_id,
         goal=config.goals[task_id],
         mode=mode,
+        observed_goal_count=len(config.goals),
+        **(dict(after_tasks=len(config.goals)) if mode == "recovery" else {}),
         steps=result.steps,
         steps_to_threshold=result.steps_to_threshold,
         solved=result.steps_to_threshold is not None,
@@ -284,8 +289,8 @@ def _run_experiment(
 ):
     """Run explicit task sequences; recovery starts from the same final model each time.
 
-    Output paths must be new. Checkpoints support evaluation, not exact optimiser
-    resume. The public trainers return live models for programmatic continuation.
+    Full state is committed between tasks. Incomplete tasks restart from the
+    preceding boundary; scratch and sequential progress are independent.
     """
     config.validate()
     if not modes or set(modes) - {"scratch", "sequential", "recovery"}:
@@ -328,7 +333,40 @@ def _run_experiment(
             models = _models(config, factory, device) if mode == "sequential" else None
             memory = _memory(config, factory, device)
             task_goals = {}
+            mode_dir = output / f"seed_{seed}" / mode
+            boundary = mode_dir / "boundary.pt"
+            completed_path = mode_dir / "completed.json"
+            completed = 0
+            if mode == "sequential" and boundary.exists():
+                saved = load_sequence(boundary, device)
+                completed = saved["completed"]
+                final_result = saved["result"]
+                memory, task_goals = saved["memory"], saved["goals"]
+                models = (
+                    (final_result.network, final_result.target)
+                    if config.algorithm == "dqn"
+                    else (final_result.actor, final_result.critic, final_result.target)
+                )
+                sequential_memory, sequential_goals = memory, task_goals
+            elif mode == "scratch" and completed_path.exists():
+                completed = json.loads(completed_path.read_text())["completed"]
+                if config.scratch_seen_goals:
+                    task_goals = {
+                        i: np.asarray(g, dtype=np.float32)
+                        for i, g in enumerate(config.goals[:completed])
+                    }
             for task_id, goal in enumerate(config.goals):
+                directory = mode_dir / f"task_{task_id}"
+                if task_id < completed:
+                    record = json.loads((directory / "metrics.json").read_text())
+                    records.append(record)
+                    logger.info("Reusing completed %s seed=%s task=%s", mode, seed, task_id)
+                    if on_task_end is not None and hasattr(on_task_end, "show_cached"):
+                        on_task_end.show_cached(record, directory)
+                    continue
+                if directory.exists():
+                    # The manifest was validated and no boundary committed this task.
+                    shutil.rmtree(directory)
                 if mode == "scratch":
                     set_seed(training_seed(config, seed, mode, task_id))
                     models = _models(config, factory, device)
@@ -386,16 +424,6 @@ def _run_experiment(
                 _record_memory(
                     output / f"seed_{seed}" / mode / f"task_{task_id}", records[-1], memory
                 )
-                if on_task_end:
-                    on_task_end(
-                        result=result,
-                        config=task_config,
-                        factory=factory,
-                        record=records[-1],
-                        task_goals=deepcopy(task_goals),
-                        before=before,
-                        directory=output / f"seed_{seed}" / mode / f"task_{task_id}",
-                    )
                 logger.info(
                     "Completed %s task=%s steps=%s threshold_steps=%s elapsed=%.2fs",
                     mode,
@@ -425,9 +453,47 @@ def _run_experiment(
                     if not isinstance(memory, GlobalReplayMemory):
                         memory.add(task_id, result.buffer, similarities)
                     final_result, sequential_memory, sequential_goals = result, memory, task_goals
+                    save_sequence(
+                        boundary,
+                        result=result,
+                        memory=memory,
+                        goals=task_goals,
+                        completed=task_id + 1,
+                    )
+                else:
+                    atomic_json(completed_path, dict(completed=task_id + 1))
+                save_progress(output / "summary.json", records, endpoint=len(config.goals))
+                if on_task_end:
+                    on_task_end(
+                        result=result,
+                        config=task_config,
+                        factory=factory,
+                        record=records[-1],
+                        task_goals=deepcopy(task_goals),
+                        before=before,
+                        directory=output / f"seed_{seed}" / mode / f"task_{task_id}",
+                    )
         if "recovery" in modes:
-            retention = _evaluate(config, final_result, factory, seed)
+            recovery_root = output / f"seed_{seed}" / "recovery" / f"after_{len(config.goals)}"
+            retention = (
+                _evaluate(config, final_result, factory, seed)
+                if any(
+                    not (recovery_root / f"task_{i}" / "complete.json").exists()
+                    for i in range(len(config.goals))
+                )
+                else None
+            )
             for task_id, goal in enumerate(config.goals):
+                directory = recovery_root / f"task_{task_id}"
+                receipt = directory / "complete.json"
+                if receipt.exists():
+                    record = json.loads((directory / "metrics.json").read_text())
+                    records.append(record)
+                    if on_task_end is not None and hasattr(on_task_end, "show_cached"):
+                        on_task_end.show_cached(record, directory)
+                    continue
+                if directory.exists():
+                    shutil.rmtree(directory)
                 recovery_memory = None
                 if (
                     config.recovery_threshold is not None
@@ -438,6 +504,7 @@ def _run_experiment(
                         task_id=task_id,
                         goal=goal,
                         mode="recovery",
+                        after_tasks=len(config.goals),
                         recovery_performed=False,
                         steps=0,
                         steps_to_threshold=0,
@@ -446,10 +513,12 @@ def _run_experiment(
                         learning_curve=[],
                         evaluation=retention,
                     )
-                    directory = output / f"seed_{seed}" / "recovery" / f"task_{task_id}"
+                    directory = recovery_root / f"task_{task_id}"
                     directory.mkdir(parents=True)
                     (directory / "metrics.json").write_text(json.dumps(record, indent=2) + "\n")
                     records.append(record)
+                    atomic_json(receipt, dict(after_tasks=len(config.goals)))
+                    save_progress(output / "summary.json", records, endpoint=len(config.goals))
                     logger.info(
                         "Recovery skipped: seed=%s task=%s success=%.3f threshold=%.3f",
                         seed,
@@ -504,7 +573,7 @@ def _run_experiment(
                 evaluation = _evaluate(task_config, result, factory, seed)
                 records.append(
                     _save_task(
-                        output / f"seed_{seed}" / "recovery" / f"task_{task_id}",
+                        recovery_root / f"task_{task_id}",
                         result,
                         task_config,
                         seed,
@@ -514,10 +583,12 @@ def _run_experiment(
                     )
                 )
                 _record_memory(
-                    output / f"seed_{seed}" / "recovery" / f"task_{task_id}",
+                    recovery_root / f"task_{task_id}",
                     records[-1],
                     recovery_memory,
                 )
+                atomic_json(receipt, dict(after_tasks=len(config.goals)))
+                save_progress(output / "summary.json", records, endpoint=len(config.goals))
                 if on_task_end:
                     on_task_end(
                         result=result,
@@ -526,7 +597,7 @@ def _run_experiment(
                         record=records[-1],
                         task_goals=deepcopy(sequential_goals),
                         before=before,
-                        directory=output / f"seed_{seed}" / "recovery" / f"task_{task_id}",
+                        directory=recovery_root / f"task_{task_id}",
                     )
                 logger.info(
                     "Completed recovery task=%s steps=%s threshold_steps=%s elapsed=%.2fs",
@@ -535,8 +606,8 @@ def _run_experiment(
                     result.steps_to_threshold,
                     result.elapsed_seconds,
                 )
-    (output / "summary.json").write_text(json.dumps(records, indent=2, allow_nan=False) + "\n")
-    return records
+    atomic_json(output / "summary.json", records)
+    return json.loads((output / "summary.json").read_text())
 
 
 def _snapshot(models, algorithm):
@@ -579,6 +650,7 @@ def run_experiment(
     modes=("scratch", "sequential", "recovery"),
     on_task_end=None,
     verbose=True,
+    resume=False,
 ):
     """Run experiments with live/file logging and an optional per-goal diagnostic callback.
 
@@ -587,6 +659,22 @@ def run_experiment(
     """
     config.validate()
     output = Path(output_dir)
-    output.mkdir(parents=True, exist_ok=False)
-    with _training_log(output, verbose):
-        return _run_experiment(config, output, device=device, modes=modes, on_task_end=on_task_end)
+    output.mkdir(parents=True, exist_ok=resume)
+    with run_lock(output):
+        settings = asdict(config)
+        settings.pop("goals")
+        prepare_run(
+            output,
+            dict(
+                kind="rl",
+                config=settings,
+                device=str(device),
+                modes=[m for m in modes if m != "recovery"],
+            ),
+            config.goals,
+            resume=resume,
+        )
+        with _training_log(output, verbose):
+            return _run_experiment(
+                config, output, device=device, modes=modes, on_task_end=on_task_end
+            )

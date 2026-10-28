@@ -48,7 +48,10 @@ def test_transfer_presets_execute_and_record_actual_temperature(experiment, tmp_
             assert [p["step"] for p in probes][:4] == [0, 3, 4, 5]
             assert [p["updates"] for p in probes][:4] == [0, 0, 1, 2]
             assert probes[0]["alpha"] == pytest.approx(row["initial_alpha"])
-            relative = f"seed_{seed}/{row['mode']}/task_{row['task_id']}"
+            stage = (
+                f"recovery/after_{len(config.goals)}" if row["mode"] == "recovery" else row["mode"]
+            )
+            relative = f"seed_{seed}/{stage}/task_{row['task_id']}"
             checkpoint = torch.load(
                 tmp_path / "run" / relative / "checkpoint.pt", weights_only=True
             )

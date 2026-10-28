@@ -37,11 +37,14 @@ def load_oracle(name):
             sys.modules.pop("rdkit.six", None)
 
 
-def make_tasks(names=DEFAULT_ORACLES):
+def make_tasks(names=DEFAULT_ORACLES, *, goal_capacity=None):
     if len(set(names)) != len(names) or not names:
         raise ValueError("Provide distinct oracle names")
+    capacity = len(names) if goal_capacity is None else goal_capacity
+    if not isinstance(capacity, int) or isinstance(capacity, bool) or capacity < len(names):
+        raise ValueError("goal_capacity must be a fixed integer >= the number of tasks")
     return [
-        dict(name=name, goal=np.eye(len(names), dtype=np.float32)[i].tolist())
+        dict(name=name, goal=np.eye(capacity, dtype=np.float32)[i].tolist())
         for i, name in enumerate(names)
     ]
 

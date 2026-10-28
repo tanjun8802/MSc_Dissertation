@@ -148,7 +148,7 @@ def plot_run(output_dir, *, style=DEFAULT_STYLE, export=True):
     finish(
         fig,
         title="Training cost and goal retention",
-        note="Unsolved tasks show their consumed budget, not a successful threshold. Recovery trials each restart from the final sequential model. Success is an empirical evaluation rate.",
+        note="Unsolved tasks show their consumed budget, not a successful threshold. Recovery trials each restart from the final sequential model. Success is an empirical evaluation rate. Blank cells: no saved evaluation for that goal at that stage.",
     )
     if export:
         save_figure(fig, Path(output_dir) / "figures/run-overview", style=style)

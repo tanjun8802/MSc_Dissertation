@@ -66,7 +66,7 @@ with tempfile.TemporaryDirectory(prefix="tbtrl-discovery-") as directory:
         outputs = [o for cell in notebook.cells if cell.cell_type == "code" for o in cell.outputs]
         assert any("Training task=" in o.get("text", "") for o in outputs)
         assert any("image/png" in o.get("data", {}) for o in outputs)
-        runs = list((work / "runs").glob(f"{benchmark.lower()}-*"))
+        runs = list((work / "runs").glob(f"{benchmark.lower()}-*/smoke"))
         records = json.loads((runs[0] / "summary.json").read_text())
         assert len(records) == 4 and all(r["losses"] for r in records)
         assert records[0]["history"] == records[2]["history"]

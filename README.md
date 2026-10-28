@@ -1,5 +1,8 @@
 # TBTRL: transfer reinforcement learning
 
+
+All maintained working notebooks support [task-boundary continuation](docs/task-continuation.md): keep the run ID, append tasks, and reuse completed scratch jobs while continuing TBTRL from its own replay/model state. Aggregate plots read saved results. Existing evaluation-only runs need one new run to produce full continuation checkpoints.
+
 Research code for an Imperial College London MSc dissertation on transferring
 factorised value representations between goal-conditioned RL tasks.
 

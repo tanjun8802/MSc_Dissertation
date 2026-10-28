@@ -349,37 +349,28 @@ ablations are needed to isolate factorisation itself or similarity-based evictio
 
 ### What is resumable?
 
-Keep `RUN_ID`, settings and software versions unchanged and rerun the notebook
-with `RESUME=True`. After **each completed campaign**, an atomic `resume.pt`
-contains:
+The working notebooks now use **task-boundary** continuation. Keep `RUN_ID` and
+settings unchanged, append tasks at the end, and rerun. Scratch jobs are reused
+independently; new scratch tasks still start fresh. Sequential TBTRL restores its
+own learner, optimizer, regulariser, replay, task labels and RNG streams. The
+controlled study sets `checkpoint_campaigns=False`; an interrupted task restarts
+from its previous completed task, not from the middle of a campaign.
 
-- online and target networks, Adam state and regulariser state;
-- recent and archived transitions, original task IDs and grouping state;
-- exploration/replay/regularisation and global RNG states;
-- native observed phase diagram, discovery history, reference energies and
-  evaluation counters; oracle weights and credentials are excluded;
-- completed campaign logs, losses and elapsed committed-work time.
+The previous campaign-resume API remains available with the explicit
+`checkpoint_campaigns=True` option. That mode saves native MADE state between
+campaigns; it is not enabled in the working notebooks. Recovery campaign snapshots
+remain available for the existing all-task recovery probes.
 
-Restoration bypasses MADE environment construction, avoiding repeated reference
-and proposal evaluations for completed campaigns. The next reset creates the next
-campaign's candidate pool. If interrupted during campaign 4, campaigns 1–3 remain
-committed and campaign 4 starts again. Up to one unfinished campaign's proposals
-and reference setup may be repeated. The interrupted campaign's previous calls
-are real extra compute; result budgets/time describe committed work, not all
-aborted attempts. This is **not** interruption recovery inside an ORB relaxation.
-
-Completed tasks have `complete.pt` and `results.json`; completed jobs are skipped.
-Training, retention and recovery all use this mechanism. A process lock prevents
-two kernels writing the same run. Manifests reject changes to task order, seeds,
-methods, configs, device, recorded dependency versions, implementation hashes and
-notebook-provided oracle/environment/data fingerprints. Choose a new `RUN_ID` for
-changes. Old pilot checkpoints cannot be resumed because they lack optimiser,
-replay and native-environment state. A manifest is a consistency check, not a
-promise of bitwise reproducibility across hardware or nondeterministic kernels.
+The latest continuing method state is in `boundary.pt`. Per-task `complete.pt`
+artifacts retain historical models and results without duplicating the full replay
+archive. Source/settings compatibility and unchanged-prefix validation prevent
+mixing different protocols. Old pilot evaluation-only weights cannot recover
+missing replay state. See [task continuation](task-continuation.md) for migration,
+fixed PMO task-vector capacity, checkpoint storage, recovery endpoints and plots.
 
 Only load your own local checkpoint files: restoration uses pickle for native
-phase diagrams and replay arrays. Runtime files remain ignored by Git. Full
-learner checkpoints are retained at task boundaries for later evaluation/recovery;
+phase diagrams and replay arrays. Runtime files remain ignored by Git. The latest full
+learner checkpoint is retained for continuation and recovery;
 these can occupy several GiB across seeds/methods. That disk storage is separate
 from the bounded in-memory replay payload. Recovery additionally retains its
 campaign-boundary checkpoints. Frozen evaluation checkpoints omit replay and Adam

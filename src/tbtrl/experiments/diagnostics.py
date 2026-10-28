@@ -86,6 +86,21 @@ class NotebookDiagnostics:
         self.rollout_episodes = rollout_episodes
         self.history = {}
 
+    def show_cached(self, record, directory):
+        from tbtrl.continuation import show_cached
+
+        saved = Path(directory) / "diagnostics.json"
+        if saved.exists():
+            branches = json.loads(saved.read_text())["branches"]
+            self.history[record["seed"], record["mode"]] = {
+                name: {
+                    key: np.asarray(value) if key in ("psi", "phi_fixed") else value
+                    for key, value in data.items()
+                }
+                for name, data in branches.items()
+            }
+        show_cached(directory, display=self.display)
+
     @torch.no_grad()
     @preserve_rng_state()
     @styled

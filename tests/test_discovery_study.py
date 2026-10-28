@@ -127,7 +127,7 @@ def factory(ledger, interrupt=None):
 
 def test_interrupted_campaign_resume_matches_uninterrupted_model_optimizer_and_replay(tmp_path):
     reference_calls, interrupted_calls = [], []
-    arguments = dict(config=config(), seeds=[7], methods=["sequential"])
+    arguments = dict(config=config(), seeds=[7], methods=["sequential"], checkpoint_campaigns=True)
     reference = run_study(TASKS, factory(reference_calls), tmp_path / "reference", **arguments)
     failed = [False]
 

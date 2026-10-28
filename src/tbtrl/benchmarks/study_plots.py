@@ -159,6 +159,9 @@ class StudyDiagnostics(NotebookDiagnostics):
 @styled
 def plot_study(records, output_dir, *, style=DEFAULT_STYLE, display=True):
     """Acquisition curves and campaign endpoints; shade variation ACROSS seeds."""
+    summary = Path(output_dir) / "summary.json"
+    if summary.exists():
+        records = json.loads(summary.read_text())
     if not records:
         return
     methods = list(dict.fromkeys(r["method"] for r in records))

@@ -35,6 +35,11 @@ class NotebookDiagnostics:
             raise ValueError("Choose pmo or made")
         self.benchmark, self.style, self.display = benchmark, style, display
 
+    def show_cached(self, record):
+        from tbtrl.continuation import show_cached
+
+        show_cached(record["path"], display=self.display)
+
     @styled
     def __call__(self, *, record, environment, learner):
         import matplotlib.pyplot as plt
@@ -202,6 +207,9 @@ def plot_comparison(records, benchmark, output_dir, *, style=DEFAULT_STYLE, disp
     import matplotlib.pyplot as plt
     from IPython.display import display as show
 
+    summary = Path(output_dir) / "summary.json"
+    if summary.exists():
+        records = json.loads(summary.read_text())
     tasks = sorted({r["task_id"] for r in records})
     fig, axes = subplots((len(tasks) + 1) // 2, 2, style=style, squeeze=False)
     for task, ax in zip(tasks, axes.flat):

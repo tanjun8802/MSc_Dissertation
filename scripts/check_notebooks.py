@@ -23,6 +23,7 @@ with tempfile.TemporaryDirectory(prefix="tbtrl-notebooks-") as directory:
                 "language": "python",
                 "env": {
                     "TBTRL_OUTPUT_ROOT": str(work / "runs"),
+                    "PYTHONPATH": str(root / "src"),
                     "MPLCONFIGDIR": str(work / "matplotlib"),
                     "MPLBACKEND": "Agg",
                     "IPYTHONDIR": str(work / "ipython"),
@@ -74,6 +75,11 @@ with tempfile.TemporaryDirectory(prefix="tbtrl-notebooks-") as directory:
                 assert "SMOKE = False" in cell.source
                 cell.source = cell.source.replace("SMOKE = False", "SMOKE = True")
                 cell.source += '\nDEVICE = "cpu"'
+                if (
+                    path.stem.startswith("TBTRL_Fetch")
+                    and os.environ.get("TBTRL_STUB_ROBOTICS_RENDER") == "1"
+                ):
+                    cell.source += "\nimport numpy as np\nfrom tbtrl.environments.fetch import FixedStartFetch\nFixedStartFetch.render = lambda self: np.full((120, 640, 3), 100, dtype=np.uint8)"
                 cell.source += '\nfrom tbtrl.experiments.figure_style import FigureStyle\n_validation_style = FigureStyle(dpi=80, formats=("png",))'
                 if experiment is not None:
                     cell.source = cell.source.replace(

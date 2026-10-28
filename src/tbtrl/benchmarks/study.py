@@ -20,6 +20,7 @@ import numpy as np
 import torch
 
 from tbtrl.benchmarks.candidates import CandidateConfig, CandidateLearner, Transition
+from tbtrl.continuation import save_progress, validate_append
 
 PROTOCOL = "made-study-v1"
 METHODS = {
@@ -139,6 +140,13 @@ def pack_learner(learner):
     )
 
 
+def _evaluation_state(state):
+    """Keep historical model artifacts without one replay-pool copy per task."""
+    return {
+        k: v for k, v in state.items() if k not in ("optimizer", "recent", "groups", "admission")
+    }
+
+
 def unpack_learner(state, device, *, evaluation=False):
     learner = CandidateLearner(
         state["state_dim"],
@@ -205,10 +213,14 @@ def _manifest(output, specification, resume):
     if path.exists():
         if not resume:
             raise FileExistsError("Study exists; use resume=True or choose a new run directory")
-        if json.loads(path.read_text()) != specification:
+        previous = json.loads(path.read_text())
+        if "tasks" in previous and "tasks" in specification:
+            validate_append(previous, specification)
+        elif previous != specification:
             raise ValueError(
                 "Study configuration differs from saved manifest; use a new run directory"
             )
+        _json(path, specification)
     else:
         if any(p.name != ".run.lock" for p in output.iterdir()):
             raise ValueError("Refusing to use a nonempty directory without a study manifest")
@@ -262,24 +274,34 @@ def _unit(
     campaigns=None,
     on_task_end=None,
     keep_campaign_checkpoints=False,
+    checkpoint_campaigns=True,
+    restore_completed=True,
 ):
     """One task, resumable at native campaign boundaries."""
     path.mkdir(parents=True, exist_ok=True)
     complete, checkpoint = path / "complete.pt", path / "resume.pt"
     if complete.exists():
-        saved = _load(complete)
-        record = saved["record"]
+        saved = _load(complete) if restore_completed else None
+        record = saved["record"] if saved else json.loads((path / "results.json").read_text())
         record["path"] = str(path)
         print(f"Reusing completed {phase}: {method} {record['task']} seed={seed}", flush=True)
         if on_task_end is not None and hasattr(on_task_end, "show_cached"):
             on_task_end.show_cached(record)
-        return record, unpack_learner(saved["learner"], device)
+        if not restore_completed:
+            return record, None
+        if phase == "training" and not checkpoint_campaigns and method != "scratch":
+            saved = _load(path.parent / "boundary.pt")
+            if saved["completed"] != task_id + 1:
+                raise ValueError("Continuation boundary does not match the completed prefix")
+        restored = unpack_learner(saved["learner"], device, evaluation=not learn)
+        restored.goals = {i: np.asarray(t["goal"], np.float32) for i, t in enumerate(tasks)}
+        return record, restored
     task = tasks[task_id]
     task_seed = seed + 1009 * task_id
     _seed(task_seed)
     started = time.perf_counter()
     elapsed, losses, history = 0.0, [], []
-    saved = _load(checkpoint) if checkpoint.exists() else None
+    saved = _load(checkpoint) if checkpoint_campaigns and checkpoint.exists() else None
     env = factory(
         task, task_seed, checkpoint=saved["environment"] if saved else None, campaigns=campaigns
     )
@@ -295,6 +317,7 @@ def _unit(
         if learner is None:
             goals = {i: np.asarray(t["goal"], np.float32) for i, t in enumerate(tasks)}
             learner = CandidateLearner(len(state), candidates.shape[1], goals, config, seed, device)
+        learner.goals = {i: np.asarray(t["goal"], np.float32) for i, t in enumerate(tasks)}
         learner.reset_rng(task_seed)
         if learn:
             learner.memory.begin_task()
@@ -370,18 +393,19 @@ def _unit(
                 for entry in history:
                     log.write(json.dumps(entry) + "\n")
                 log.flush()
-                payload = dict(
-                    learner=pack_learner(learner),
-                    environment=env.checkpoint(),
-                    history=history,
-                    losses=losses,
-                    global_rng=_rng_state(),
-                    seconds=elapsed + time.perf_counter() - started,
-                )
-                if keep_campaign_checkpoints:
-                    _atomic_torch(path / f"campaign_{env.campaign}.pt", payload)
-                _atomic_torch(checkpoint, payload)
-                print(f"  Saved campaign {env.campaign}; safe to resume here", flush=True)
+                if checkpoint_campaigns or keep_campaign_checkpoints:
+                    payload = dict(
+                        learner=pack_learner(learner),
+                        environment=env.checkpoint(),
+                        history=history,
+                        losses=losses,
+                        global_rng=_rng_state(),
+                        seconds=elapsed + time.perf_counter() - started,
+                    )
+                    if keep_campaign_checkpoints:
+                        _atomic_torch(path / f"campaign_{env.campaign}.pt", payload)
+                    _atomic_torch(checkpoint, payload)
+                    print(f"  Saved campaign {env.campaign}; safe to resume here", flush=True)
                 if not env.finished:
                     state, candidates = env.reset()
     representation = _representation(learner) if learn else {}
@@ -418,7 +442,17 @@ def _unit(
         path / "policy.pt",
     )
     _json(path / "results.json", record)
-    _atomic_torch(complete, dict(record=record, learner=pack_learner(learner)))
+    state = pack_learner(learner)
+    if phase == "training" and not checkpoint_campaigns:
+        if method != "scratch":
+            # This is the commit point. A receipt interrupted after this write is
+            # reconstructed from the boundary on the next invocation.
+            _atomic_torch(
+                path.parent / "boundary.pt",
+                dict(record=record, learner=state, completed=task_id + 1, global_rng=_rng_state()),
+            )
+        state = _evaluation_state(state)
+    _atomic_torch(complete, dict(record=record, learner=state))
     checkpoint.unlink(missing_ok=True)
     if on_task_end:
         on_task_end(record=record, environment=env, learner=learner)
@@ -435,6 +469,7 @@ def run_study(
     methods=("scratch", "sequential"),
     device="cpu",
     resume=True,
+    checkpoint_campaigns=False,
     metadata=None,
     on_task_end=None,
 ):
@@ -459,6 +494,7 @@ def run_study(
                 seeds=list(seeds),
                 methods=list(methods),
                 device=str(device),
+                checkpoint_campaigns=checkpoint_campaigns,
                 configs={m: asdict(c) for m, c in configs.items()},
                 metadata=metadata or {},
             ),
@@ -468,6 +504,22 @@ def run_study(
         for seed in seeds:
             for method in methods:
                 learner = None
+                boundary = output / f"seed_{seed}" / method / "boundary.pt"
+                if boundary.exists():
+                    saved = _load(boundary)
+                    last = _stage_path(output, seed, method, saved["completed"] - 1)
+                    if not last.exists():
+                        _atomic_torch(
+                            last,
+                            dict(
+                                record=saved["record"], learner=_evaluation_state(saved["learner"])
+                            ),
+                        )
+                completed = 0
+                while (
+                    completed < len(tasks) and _stage_path(output, seed, method, completed).exists()
+                ):
+                    completed += 1
                 for task_id in range(len(tasks)):
                     path = output / f"seed_{seed}" / method / f"task_{task_id}"
                     record, learner = _unit(
@@ -481,9 +533,12 @@ def run_study(
                         device=device,
                         learner=None if method == "scratch" else learner,
                         on_task_end=on_task_end,
+                        checkpoint_campaigns=checkpoint_campaigns,
+                        restore_completed=method != "scratch" and task_id == completed - 1,
                     )
                     records.append(record)
-                    _json(output / "summary.json", records)
+                    save_progress(output / "summary.json", records)
+        _json(output / "summary.json", records)
     return records
 
 
@@ -493,7 +548,10 @@ def _stage_path(output, seed, method, task):
 
 def _evaluation_manifest(path, parent, *, campaigns, recovery_campaigns=None):
     # Bind evaluations to the exact parent protocol. No accidental mixing after edits.
-    parent_hash = hashlib.sha256((parent / "study.json").read_bytes()).hexdigest()
+    parent_spec = json.loads((parent / "study.json").read_text())
+    parent_spec.pop("tasks", None)
+    parent_spec.get("metadata", {}).pop("dataset_sha256", None)
+    parent_hash = hashlib.sha256(json.dumps(parent_spec, sort_keys=True).encode()).hexdigest()
     _manifest(
         path,
         dict(
@@ -561,9 +619,9 @@ def run_recovery(
         raise ValueError("campaigns must be positive")
     output = Path(output_dir).resolve()
     manifest = json.loads((output / "study.json").read_text())
-    path = output / "recovery"
-    path.mkdir(exist_ok=True)
     tasks = manifest["tasks"]
+    path = output / "recovery" / f"after_{len(tasks)}"
+    path.mkdir(parents=True, exist_ok=True)
     retention_manifest = output / "retention" / "study.json"
     if retention_manifest.exists():
         retention_settings = json.loads(retention_manifest.read_text())
@@ -578,7 +636,9 @@ def run_recovery(
             for method in manifest["methods"]:
                 if method == "scratch":
                     continue
-                source = _stage_path(output, seed, method, len(tasks) - 1)
+                source = output / f"seed_{seed}" / method / "boundary.pt"
+                if not source.exists():
+                    source = _stage_path(output, seed, method, len(tasks) - 1)
                 if not source.exists():
                     continue
                 for recovered in range(len(tasks) - 1):
@@ -633,4 +693,7 @@ def run_recovery(
                                 )
                             )
                             _json(path / "probes.json", probes)
+    _json(output / "recovery" / "summary.json", records)
+    _json(output / "recovery" / "probes.json", probes)
+    _json(output / "recovery" / "endpoint.json", dict(after_tasks=len(tasks)))
     return records, probes

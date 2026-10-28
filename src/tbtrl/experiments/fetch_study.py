@@ -91,10 +91,9 @@ def _fingerprint(config, modes, device):
 
 
 def run_study_job(config, directory, *, modes=("scratch",), device="cpu", on_task_end=None):
-    """Reuse a completed job only if source and config match. Never resume partial training.
+    """Reuse completed tasks and append a validated goal suffix from full state.
 
-    Interrupted jobs require a new output directory; no replay/optimiser/RNG state
-    is reconstructed from evaluation-only checkpoints.
+    An interrupted task restarts from its preceding committed task boundary.
     """
     directory = Path(directory)
     print(f"Study job: {directory}", flush=True)
@@ -111,17 +110,15 @@ def run_study_job(config, directory, *, modes=("scratch",), device="cpu", on_tas
     )
     fingerprint = _fingerprint(config, modes, device)
     receipt = directory / "study-complete.json"
-    if directory.exists():
+    if directory.exists() and not (directory / "continuation.json").exists():
         if not receipt.exists():
-            raise RuntimeError(
-                f"Incomplete job at {directory}. Use a new study directory; this job cannot resume mid-training."
-            )
+            raise RuntimeError(f"Incomplete legacy job at {directory}; use a new output directory.")
         saved = json.loads(receipt.read_text())
         if saved["fingerprint"] != fingerprint:
             raise ValueError(
                 f"Source/config changed for {directory}; choose a new study directory."
             )
-        print(f"Reusing completed job: {directory}", flush=True)
+        print(f"Reusing completed legacy job: {directory}", flush=True)
         return json.loads((directory / "summary.json").read_text())
     # Histories belong to this job, never to a previous entropy/architecture case.
     from .diagnostics import NotebookDiagnostics
@@ -133,7 +130,9 @@ def run_study_job(config, directory, *, modes=("scratch",), device="cpu", on_tas
             gif_episodes=on_task_end.gif_episodes,
             style=on_task_end.style,
         )
-    run_experiment(config, directory, device=device, modes=modes, on_task_end=on_task_end)
+    run_experiment(
+        config, directory, device=device, modes=modes, on_task_end=on_task_end, resume=True
+    )
     receipt.write_text(json.dumps(dict(fingerprint=fingerprint), indent=2))
     return json.loads((directory / "summary.json").read_text())
 
@@ -220,6 +219,9 @@ def plot_baselines(records, directory, *, style=DEFAULT_STYLE):
     """Individual-seed evidence: no confidence bands inferred from one training seed."""
     from matplotlib.ticker import PercentFormatter
 
+    saved = Path(directory) / "baseline-results.json"
+    if saved.exists():
+        records = json.loads(saved.read_text())
     labels = list(dict.fromkeys(f"{r['exploration']} / {r['architecture']}" for r in records))
     fig, axes = subplots(1, 3, style=replace(style, width=13), height=3.5)
     for i, label in enumerate(labels):

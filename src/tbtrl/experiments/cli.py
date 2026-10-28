@@ -11,9 +11,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True)
     parser.add_argument(
-        "--output", required=True, help="New output directory; existing runs are never overwritten."
+        "--output",
+        required=True,
+        help="Run directory; use --resume to continue a matching task prefix.",
     )
     parser.add_argument("--device", default="cpu")
+    parser.add_argument(
+        "--resume", action="store_true", help="Reuse completed tasks and append goals."
+    )
     parser.add_argument(
         "--smoke", action="store_true", help="Small real training run for pipeline checks."
     )
@@ -28,7 +33,9 @@ def main():
     config = load_config(args.config)
     if args.smoke:
         config = config.smoke()
-    run_experiment(config, args.output, device=args.device, modes=tuple(args.modes))
+    run_experiment(
+        config, args.output, device=args.device, modes=tuple(args.modes), resume=args.resume
+    )
 
 
 if __name__ == "__main__":

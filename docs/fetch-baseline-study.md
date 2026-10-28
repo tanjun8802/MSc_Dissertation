@@ -83,15 +83,16 @@ Exploration-screen results alone do not satisfy confirmation. Eight rollout GIFs
 are rendered inline after each full job; that display count does not determine
 how many episodes are evaluated numerically.
 
-Version 2 uses a new output directory. Historical version 1 runs used hidden
+Version 3 adds task-boundary continuation in a new output directory. Version 2 corrected JSON precedence. Historical version 1 runs used hidden
 Python presets (including evaluation every 5,000 steps), so they must not be
 relabelled as the corrected experiment. The user's committed FetchReach notebook
 and outputs are preserved byte-for-byte under
 `experiments/recorded/fetch_study_v1/`. Working notebooks start clean in smoke mode.
 
-Completed jobs are reused only when effective config, source, dependencies and
-device match. Changing JSON or source requires a fresh directory. Interrupted
-jobs cannot resume mid-training. Review resolved settings before launching long
+Completed tasks are reused when effective config, source, dependencies and device
+match. Appending goals is permitted; other JSON/source changes require a fresh
+directory. Interrupted tasks restart from the preceding completed boundary.
+Scratch and TBTRL have separate progress. See [task continuation](task-continuation.md). Review resolved settings before launching long
 runs, and compare all methods under the same corrected evaluation protocol.
 
 ## Interpreting steps
