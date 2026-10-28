@@ -106,7 +106,8 @@ def test_optimizer_moments_carry_but_phase_rates_change(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("name", ["reach", "pick_and_place"])
 @pytest.mark.parametrize("architecture", ARCHITECTURES)
-def test_study_preserves_json_training_and_phase_settings(name, architecture):
+@pytest.mark.parametrize("exploration", ("auto", "bounded", "fixed"))
+def test_study_preserves_json_training_and_phase_settings(name, architecture, exploration):
     c = load_config(ROOT / f"configs/tbtrl_fetch_{name}_sac.json")
     expected = dict(
         total_steps=12345,
@@ -134,7 +135,7 @@ def test_study_preserves_json_training_and_phase_settings(name, architecture):
     c.first_task.update(warmup_steps=73, initial_alpha=0.13)
     c.recovery.update(total_steps=5432, eval_freq=41)
     before = c.to_dict()
-    resolved = configure_fetch_study(c, architecture=architecture)
+    resolved = configure_fetch_study(c, architecture=architecture, exploration=exploration)
     assert {k: resolved.training[k] for k in expected} == expected
     assert (resolved.eval_episodes, resolved.post_eval_episodes) == (19, 103)
     for phase in ("scratch", "first_task", "recovery"):
@@ -165,9 +166,10 @@ def test_tbtrl_regularisers_and_explicit_json_cases_are_preserved():
     )
 
 
-def test_real_baseline_job_uses_json_cadence_and_refuses_stale_results(tmp_path):
+@pytest.mark.parametrize("name", ["reach", "pick_and_place"])
+def test_real_baseline_job_uses_json_cadence_and_refuses_stale_results(name, tmp_path):
     pytest.importorskip("gymnasium_robotics")
-    c = base().smoke()
+    c = load_config(ROOT / f"configs/tbtrl_fetch_{name}_sac.json").smoke()
     c.goals = c.goals[:1]
     c.training.update(eval_freq=3, total_steps=12)
     rows = run_baselines(c, tmp_path / "jobs", explorations=("bounded",), smoke=False)
@@ -264,3 +266,44 @@ def test_actor_choice_does_not_change_initial_factorised_critic():
         critics.append(_models(c, factory, "cpu")[1].state_dict())
     for key in critics[0]:
         torch.testing.assert_close(critics[0][key], critics[1][key], rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("name", ["reach", "pick_and_place"])
+@pytest.mark.parametrize("study", [False, True])
+def test_fetch_all_phases_forward_resolved_settings_to_sac(name, study, tmp_path, monkeypatch):
+    """Exercise real updates and evaluation, not just the configuration merger."""
+    pytest.importorskip("gymnasium_robotics")
+    from tbtrl.experiments import runner
+
+    c = load_config(ROOT / f"configs/tbtrl_fetch_{name}_sac.json")
+    if study:
+        c = configure_fetch_study(c, architecture="tbtrl")
+    c = c.smoke()
+    c.entropy_transfer = "reset"  # Test configured alpha, independent of learned carry state.
+    c.training.update(total_steps=12, eval_freq=3, lr_actor=0.000123, gamma=0.93)
+    c.scratch.update(eval_freq=4, eval_episodes=2)
+    c.first_task.update(eval_freq=5, lr_critic=0.000234)
+    c.recovery.update(total_steps=12, eval_freq=6, eval_episodes=2)
+    expected = [
+        training_settings(c, mode, task)
+        for mode in ("scratch", "sequential", "recovery")
+        for task in range(len(c.goals))
+    ]
+    original = runner.train_sac
+    calls = []
+
+    def capture(**kwargs):
+        settings = expected[len(calls)]
+        assert {key: kwargs[key] for key in settings} == settings
+        result = original(**kwargs)
+        calls.append(settings)
+        assert [row["step"] for row in result.evaluation_details] == [
+            step
+            for step in range(settings["warmup_steps"], settings["total_steps"] + 1)
+            if step % settings["eval_freq"] == 0
+        ]
+        return result
+
+    monkeypatch.setattr(runner, "train_sac", capture)
+    run_experiment(c, tmp_path / "run", modes=("scratch", "sequential", "recovery"), verbose=False)
+    assert len(calls) == len(expected)

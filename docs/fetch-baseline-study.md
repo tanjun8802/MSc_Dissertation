@@ -3,7 +3,16 @@
 Use `experiments/working/TBTRL_FetchReach_Baseline_Study.ipynb` or
 `TBTRL_FetchPickAndPlace_Baseline_Study.ipynb`. Each loads its existing
 `configs/tbtrl_fetch_*_sac.json`. The JSON is the source of experiment settings;
-`configure_fetch_study` contains no numerical training presets.
+`configure_fetch_study` contains no numerical training presets. This applies to
+both FetchReach and FetchPickAndPlace. Their ordinary `*_SAC.ipynb` notebooks
+use the same runner and phase resolution, without selecting study cases.
+Both study notebooks import this checkout's `src` first, so an older installed
+package cannot silently supply a different runner; restart the kernel after pulling.
+
+Diagnostic rollout/GIF counts follow `eval_episodes` in both study notebooks,
+just as in the ordinary SAC notebooks. These visualisations are separate from
+the `post_eval_episodes` held-out evaluation. Legacy FetchPush/TD3 sandbox
+notebooks under `src/experiments/` are not part of this maintained framework.
 
 ## Configuration precedence
 
