@@ -58,6 +58,13 @@ with step-zero/early retention probes and actor gradient plots. Compare `matched
 against `temperature_carry` first; covariance scaling and policy KL are separate optional
 presets. See [the controlled experiment guide](docs/transfer-experiments.md).
 
+For the 10-goal, three-seed replication of the recorded successful transfer run, use
+[`TBTRL_GridworldMaze_SAC_Transfer_10Goals_3Seeds.ipynb`](experiments/working/TBTRL_GridworldMaze_SAC_Transfer_10Goals_3Seeds.ipynb).
+It preserves the original four-goal prefix and training settings, uses seeds 42/43/44,
+and resumes completed tasks from separate scratch/TBTRL state. Per-task diagnostics
+remain inline; aggregate plots reload saved results and show mean ± sample SD.
+The JSON, trainer, and recorded reference notebook are unchanged.
+
 For a fixed replay budget across tasks, use
 [`TBTRL_GridworldMaze_SAC_GlobalReplay.ipynb`](experiments/working/TBTRL_GridworldMaze_SAC_GlobalReplay.ipynb).
 It includes recent experience in the global limit, shares archive space by goal
