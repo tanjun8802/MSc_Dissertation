@@ -4,7 +4,7 @@ Open `experiments/working/TBTRL_GridworldMaze_DQN.ipynb`. It contains the enviro
 
 Install the locked development/notebook environment, restart the kernel, and execute the notebook from the repository. Full budgets are the default. Set `SMOKE=True` for a three-task CPU-compatible execution check; those curves do not establish convergence. Change `DEVICE`, `SEEDS`, `GOAL_COUNT`, `K`, `REPLAY_SAMPLES`, candidate capacity and refresh cadence in the parameters cell. Changing settings requires a new `RUN_ID`. With matching settings/source, append goals at the end and keep `RESUME=True` to continue completed task boundaries.
 
-Set `RUN_EXPERIMENTS=False` to regenerate tables and figures from saved results. `RUN_RECOVERY` enables independent adaptation trials; each starts from a separate copy of the same final model and archive. The study preset uses acquisition exploration/update cadence for recovery, with a held-out success gate to skip already retained tasks. Acquisition still uses the original return/patience stopping criterion. These criteria are recorded separately and must not be treated as identical statistical tests.
+Set `RUN_EXPERIMENTS=False` to regenerate tables and figures from saved results. `RUN_RECOVERY` enables independent adaptation trials; each starts from a separate copy of the same final model and archive. The study preset uses acquisition exploration/update cadence for recovery, with a held-out mean-return gate to skip already retained tasks. `recovery_return_threshold` sets the same numeric return target for initial gating and adaptation stopping; the latter retains the configured patience requirement. Acquisition keeps its original return/patience criterion. Zero-step and adapted records both identify the recovery target explicitly.
 
 ## Bounded mode
 
@@ -35,7 +35,7 @@ Basis selection chooses actual task IDs with large residual directions outside t
 
 A deterministic common archive probe of at most 32 state-action inputs measures Q-value drift from the first refresh within each task. It does not sample training RNGs or influence selection. This probe is local coverage evidence, not a guarantee of behavioural retention. Replay still samples selected tasks' existing archive views and recomputes reward and termination for each requested goal. Tasks sharing an archive group retain distinct objectives.
 
-Interference weights use negative gradient cosine against the current task, measured on the final shared state-action encoder layer. They are detached, smoothed, and mixed with a uniform floor, and sum to one. This is a local diagnostic-based heuristic, not a proof that the combined Adam update protects an earlier task. It adds at most K+1 periodic gradient measurements; log and compare that overhead. Uniform remains the default.
+Diagnostics record current/replay shared-layer gradient norms and per-refresh/cumulative extra gradient-pass counts. Interference weights use negative gradient cosine against the current task, measured on the final shared state-action encoder layer. They are detached, smoothed, and mixed with a uniform floor, and sum to one. This is a local diagnostic-based heuristic, not a proof that the combined Adam update protects an earlier task. It adds at most K+1 periodic gradient measurements; log and compare that overhead. Uniform remains the default.
 
 ## Outputs and interpretation
 

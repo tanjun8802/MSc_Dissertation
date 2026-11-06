@@ -2,6 +2,7 @@
 
 import inspect
 import json
+import math
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
@@ -37,6 +38,7 @@ class ExperimentConfig:
     scratch_seen_goals: bool = False
     recovery: dict = field(default_factory=dict)
     recovery_threshold: float | None = None
+    recovery_return_threshold: float | None = None
     eval_episodes: int = 8
     post_eval_episodes: int | None = None
     study_overrides: dict = field(default_factory=dict)
@@ -80,6 +82,15 @@ class ExperimentConfig:
                 ):
                     raise ValueError("MLP critics cannot use factor regularisers.")
 
+        if self.recovery_return_threshold is not None:
+            if (
+                self.algorithm != "dqn"
+                or self.training.get("k_replay") is None
+                or not math.isfinite(self.recovery_return_threshold)
+            ):
+                raise ValueError("A finite recovery_return_threshold requires bounded DQN.")
+            if self.recovery_threshold is not None:
+                raise ValueError("Choose one recovery metric: return or success.")
         if self.post_eval_episodes is not None and self.post_eval_episodes < 1:
             raise ValueError("post_eval_episodes must be positive.")
         if self.carry_optimizer_state and self.algorithm != "sac":
@@ -241,6 +252,7 @@ class ExperimentConfig:
             eval_episodes=1,
             post_eval_episodes=1 if self.post_eval_episodes is not None else None,
             recovery_threshold=None,
+            recovery_return_threshold=None,
             global_replay_capacity=64
             if self.replay_mode == "global"
             else self.global_replay_capacity,
@@ -269,6 +281,8 @@ def training_settings(config, mode, task_id):
             settings.update(config.first_task)
         if mode == "recovery":
             settings.update(config.recovery)
+            if config.recovery_return_threshold is not None:
+                settings["early_stop_reward"] = config.recovery_return_threshold
     if config.replay_mode == "global":
         settings["buffer_capacity"] = config.recent_replay_capacity
         if config.algorithm == "sac":

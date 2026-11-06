@@ -249,11 +249,16 @@ def _save_task(directory, result, config, seed, task_id, mode, evaluations):
         checkpoint = {"network": result.network.state_dict(), "target": result.target.state_dict()}
         if getattr(result, "selector_state", {}):
             state = result.selector_state
+            if mode == "recovery" and config.recovery_return_threshold is not None:
+                record["recovery_target"] = dict(
+                    metric="mean_return", value=config.recovery_return_threshold
+                )
             record["bounded_replay"] = dict(
                 options=state["options"],
                 completed=state["completed"],
                 updates=state["updates"],
                 candidate_count=len(state["reservoir"]) + (state["newest"] is not None),
+                weighting_gradient_passes=state.get("gradient_passes", 0),
             )
             record["replay_diagnostics"] = result.replay_diagnostics
             (directory / "replay-diagnostics.json").write_text(
@@ -516,9 +521,19 @@ def _run_experiment(
                 if directory.exists():
                     shutil.rmtree(directory)
                 recovery_memory = None
+                recovery_metric = (
+                    "mean_return"
+                    if config.recovery_return_threshold is not None
+                    else "success_rate"
+                )
+                recovery_threshold = (
+                    config.recovery_return_threshold
+                    if config.recovery_return_threshold is not None
+                    else config.recovery_threshold
+                )
                 if (
-                    config.recovery_threshold is not None
-                    and retention[task_id]["success_rate"] >= config.recovery_threshold
+                    recovery_threshold is not None
+                    and retention[task_id][recovery_metric] >= recovery_threshold
                 ):
                     record = dict(
                         seed=seed,
@@ -534,6 +549,10 @@ def _run_experiment(
                         learning_curve=[],
                         evaluation=retention,
                     )
+                    if config.recovery_return_threshold is not None:
+                        record["recovery_target"] = dict(
+                            metric="mean_return", value=recovery_threshold
+                        )
                     directory = recovery_root / f"task_{task_id}"
                     directory.mkdir(parents=True)
                     (directory / "metrics.json").write_text(json.dumps(record, indent=2) + "\n")
@@ -541,11 +560,12 @@ def _run_experiment(
                     atomic_json(receipt, dict(after_tasks=len(config.goals)))
                     save_progress(output / "summary.json", records, endpoint=len(config.goals))
                     logger.info(
-                        "Recovery skipped: seed=%s task=%s success=%.3f threshold=%.3f",
+                        "Recovery skipped: seed=%s task=%s %s=%.3f threshold=%.3f",
                         seed,
                         task_id,
-                        retention[task_id]["success_rate"],
-                        config.recovery_threshold,
+                        recovery_metric,
+                        retention[task_id][recovery_metric],
+                        recovery_threshold,
                     )
                     continue
                 if config.algorithm == "dqn":

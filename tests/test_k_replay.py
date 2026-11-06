@@ -98,6 +98,8 @@ def test_real_dqn_bounds_samples_goals_and_updates_with_adaptive_replay():
     assert any(not torch.equal(before[k], v) for k, v in model.state_dict().items())
     assert result.selector_state["completed"] == 11
     assert result.replay_diagnostics
+    assert result.replay_diagnostics[0]["weighting_gradient_passes"] == 3
+    assert len(result.replay_diagnostics[0]["replay_shared_grad_norms"]) == 2
     assert max(row["mean_value_drift"] for row in result.replay_diagnostics) > 0
     for row in result.losses:
         assert row["replay_tasks"] == 2
@@ -265,3 +267,47 @@ def test_candidate_pool_matches_between_selection_strategies():
         assert (
             selectors[0].candidate_ids == selectors[1].candidate_ids == selectors[2].candidate_ids
         )
+
+
+def test_tiny_task_embeddings_do_not_create_a_geometric_direction():
+    selector = TaskSelector(KReplayOptions(max_tasks=2))
+    _, diagnostics = selector.select({0: [1, 0], 1: [0, 1e-10], 2: [1, 0]})
+    assert diagnostics["rank"] == 1
+
+
+def test_recovery_gate_uses_the_same_return_target_as_adaptation(tmp_path):
+    from pathlib import Path
+
+    from tbtrl.experiments.config import load_config, training_settings
+    from tbtrl.experiments.dqn_study import configure_k_replay
+    from tbtrl.experiments.runner import run_experiment
+
+    base = load_config(
+        Path(__file__).resolve().parents[1] / "configs/tbtrl_gridworldmaze_dqn.json"
+    ).smoke()
+    config = configure_k_replay(
+        base,
+        max_tasks=1,
+        sample_budget=4,
+        candidate_capacity=3,
+        capacity=32,
+        recent_capacity=16,
+        max_groups=2,
+    )
+    # Even perfect success cannot pass this deliberately unattainable return target.
+    config.recovery_return_threshold = 1.1
+    assert training_settings(config, "recovery", 0)["early_stop_reward"] == 1.1
+    rows = run_experiment(
+        config, tmp_path / "gate", modes=("sequential", "recovery"), verbose=False
+    )
+    recovery = [r for r in rows if r["mode"] == "recovery"]
+    assert all(r["steps"] > 0 for r in recovery)
+    assert all(r["recovery_target"] == dict(metric="mean_return", value=1.1) for r in recovery)
+
+    config.recovery_return_threshold = -100.0
+    rows = run_experiment(
+        config, tmp_path / "already-retained", modes=("sequential", "recovery"), verbose=False
+    )
+    recovery = [r for r in rows if r["mode"] == "recovery"]
+    assert all(r["steps"] == 0 and r["solved"] for r in recovery)
+    assert all(r["recovery_target"] == dict(metric="mean_return", value=-100.0) for r in recovery)

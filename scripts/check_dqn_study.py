@@ -55,6 +55,9 @@ with tempfile.TemporaryDirectory(prefix="tbtrl-dqn-study-") as directory:
         rows = json.loads(summary.read_text())
         assert rows
         for row in rows:
+            if row.get("recovery_performed") is False:
+                assert row["steps"] == 0
+                continue  # A retained task performs no updates and has no replay diagnostics.
             options = row["bounded_replay"]["options"]
             for probe in row["replay_diagnostics"]:
                 assert len(probe["selected_tasks"]) <= options["max_tasks"]

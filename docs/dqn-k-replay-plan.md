@@ -129,3 +129,10 @@ Relevant primary sources: GradNorm (https://proceedings.mlr.press/v80/chen18a.ht
 - Residual-greedy basis selection is implemented; optional improving swaps and full-history controls are deferred. Exact-spanner guarantees are not claimed.
 - Interference weights are optional and periodic. Uniform is the default.
 - The notebook compares the four selection/weighting conditions plus factorised scratch and factorised fine-tuning; conventional MLP architecture controls remain outside this trainer improvement.
+
+
+## Review corrections
+
+- Raw task vectors below the norm tolerance are zeroed before directional scoring/rank calculations.
+- The new DQN study uses a mean-return recovery target consistently for the zero-step gate and adapted stopping; the existing success-rate gate remains available for legacy/SAC conditions.
+- Adaptive-weight diagnostics include current/replay shared-layer norms and per-refresh/cumulative extra gradient-pass counts.

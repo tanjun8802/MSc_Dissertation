@@ -134,7 +134,8 @@
   "recovery": {
     "total_steps": 100000
   },
-  "recovery_threshold": 0.9,
+  "recovery_threshold": null,
+  "recovery_return_threshold": 0.99,
   "eval_episodes": 8,
   "post_eval_episodes": null,
   "study_overrides": {}

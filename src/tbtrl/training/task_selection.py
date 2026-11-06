@@ -66,6 +66,7 @@ class TaskSelector:
         self.completed = 0
         self.refreshes = 0
         self.updates = 0
+        self.gradient_passes = 0
         self.selected = []
         self.weights = []
         self.scores = {}
@@ -83,6 +84,7 @@ class TaskSelector:
                 "scores",
             ):
                 setattr(self, name, deepcopy(state[name]))
+            self.gradient_passes = state.get("gradient_passes", 0)
             self.admission_rng.bit_generator.state = deepcopy(state["admission_rng"])
             self.selection_rng.bit_generator.state = deepcopy(state["selection_rng"])
 
@@ -114,7 +116,9 @@ class TaskSelector:
         if values.ndim != 2 or not np.isfinite(values).all():
             raise ValueError("Task vectors must be a finite matrix.")
         norms = np.linalg.norm(values, axis=1, keepdims=True)
-        unit = values / np.maximum(norms, self.options.rank_tolerance)
+        unit = np.divide(
+            values, norms, out=np.zeros_like(values), where=norms > self.options.rank_tolerance
+        )
         start = self.refreshes % len(ids)
         order = list(range(start, len(ids))) + list(range(start))
         if self.options.selector == "random":
@@ -199,6 +203,7 @@ class TaskSelector:
                 completed=self.completed,
                 refreshes=self.refreshes,
                 updates=self.updates,
+                gradient_passes=self.gradient_passes,
                 selected=self.selected,
                 weights=self.weights,
                 scores=self.scores,

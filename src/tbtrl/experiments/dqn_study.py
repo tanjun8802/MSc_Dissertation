@@ -62,7 +62,8 @@ def configure_k_replay(
     result.scratch = dict(replay_ratio=0, replay_loss_coef=0)
     result.first_task = dict(replay_ratio=0)
     result.recovery = dict(total_steps=result.training["total_steps"])
-    result.recovery_threshold = 0.9
+    result.recovery_threshold = None
+    result.recovery_return_threshold = result.training.get("early_stop_reward", 0.99)
     return result.validate()
 
 

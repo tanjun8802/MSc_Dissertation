@@ -390,6 +390,9 @@ def train_dqn(
         for old_task_id, old_goal, old_batch in replay_batches:
             old_losses.append(task_loss(old_batch, old_goal))
         weighting_seconds = 0.0
+        gradient_metrics = dict(
+            weighting_gradient_passes=0, current_shared_grad_norm=None, replay_shared_grad_norms=[]
+        )
         if selector is not None and old_losses and refresh:
             weighting_started = time.perf_counter()
             if options.weighting == "interference":
@@ -399,9 +402,20 @@ def train_dqn(
                     gradients = torch.autograd.grad(loss, parameters, retain_graph=True)
                     return torch.cat([gradient.detach().flatten() for gradient in gradients])
 
-                selector.update_weights(
-                    shared_gradient(current_loss), [shared_gradient(loss) for loss in old_losses]
+                current_gradient = shared_gradient(current_loss)
+                replay_gradients = [shared_gradient(loss) for loss in old_losses]
+                selector.update_weights(current_gradient, replay_gradients)
+
+                def finite_norm(gradient):
+                    norm = torch.linalg.vector_norm(gradient.to(device="cpu", dtype=torch.float64))
+                    return float(norm) if torch.isfinite(norm) else None
+
+                gradient_metrics = dict(
+                    weighting_gradient_passes=1 + len(replay_gradients),
+                    current_shared_grad_norm=finite_norm(current_gradient),
+                    replay_shared_grad_norms=[finite_norm(g) for g in replay_gradients],
                 )
+                selector.gradient_passes += gradient_metrics["weighting_gradient_passes"]
             weighting_seconds = time.perf_counter() - weighting_started
         if len(old_losses) > 0:
             if selector is not None:
@@ -476,6 +490,8 @@ def train_dqn(
                 weighting_seconds=weighting_seconds,
                 update_seconds=time.perf_counter() - update_started,
                 optimiser_updates=selector.updates,
+                weighting_gradient_passes_total=selector.gradient_passes,
+                **gradient_metrics,
             )
             if refresh:
                 replay_diagnostics.append(
