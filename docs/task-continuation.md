@@ -52,9 +52,12 @@ deterministic prefix. Do not alter the other settings or change `RUN_ID`.
 
 ```python
 records = run_experiment(
-    config, output, device=DEVICE,
+    config,
+    output,
+    device=DEVICE,
     modes=("scratch", "sequential"),
-    resume=True, on_task_end=diagnostics,
+    resume=True,
+    on_task_end=diagnostics,
 )
 ```
 

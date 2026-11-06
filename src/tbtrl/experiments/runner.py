@@ -91,6 +91,7 @@ def _train(
     settings,
     memory=None,
     optimizer_state=None,
+    selector_state=None,
 ):
     env = factory(goal=config.goals[task_id])
     common = dict(
@@ -115,7 +116,12 @@ def _train(
     )
     try:
         if config.algorithm == "dqn":
-            return train_dqn(q_network=models[0], q_target_network=models[1], **common)
+            return train_dqn(
+                q_network=models[0],
+                q_target_network=models[1],
+                selector_state=selector_state,
+                **common,
+            )
         return train_sac(
             actor=models[0],
             critic=models[1],
@@ -241,6 +247,18 @@ def _save_task(directory, result, config, seed, task_id, mode, evaluations):
     )
     if config.algorithm == "dqn":
         checkpoint = {"network": result.network.state_dict(), "target": result.target.state_dict()}
+        if getattr(result, "selector_state", {}):
+            state = result.selector_state
+            record["bounded_replay"] = dict(
+                options=state["options"],
+                completed=state["completed"],
+                updates=state["updates"],
+                candidate_count=len(state["reservoir"]) + (state["newest"] is not None),
+            )
+            record["replay_diagnostics"] = result.replay_diagnostics
+            (directory / "replay-diagnostics.json").write_text(
+                json.dumps(result.replay_diagnostics, indent=2, allow_nan=False) + "\n"
+            )
     else:
         checkpoint = {
             "actor": result.actor.state_dict(),
@@ -405,6 +423,9 @@ def _run_experiment(
                     and mode == "sequential"
                     and final_result is not None
                     else None,
+                    selector_state=getattr(final_result, "selector_state", {})
+                    if mode == "sequential" and final_result is not None
+                    else None,
                 )
                 task_config = replace(config, training=settings)
                 if mode == "sequential" and isinstance(memory, GlobalReplayMemory):
@@ -568,6 +589,7 @@ def _run_experiment(
                     settings,
                     recovery_memory,
                     final_result.optimizer_state if config.carry_optimizer_state else None,
+                    selector_state=deepcopy(getattr(final_result, "selector_state", {})),
                 )
                 task_config = replace(config, training=settings)
                 evaluation = _evaluate(task_config, result, factory, seed)

@@ -94,6 +94,14 @@ They preserve the native molecular-edit/materials-discovery mechanisms and use
 optional dependencies plus a separate candidate-aware trainer. See
 [installation, preserved semantics and experiment interpretation](docs/discovery-benchmarks.md).
 
+For bounded task selection in discrete DQN, use
+[`TBTRL_GridworldMaze_DQN.ipynb`](experiments/working/TBTRL_GridworldMaze_DQN.ipynb).
+It contains the complete Maze study: fixed replay storage, at most K historical
+objectives and R historical samples per update, rotating/random/basis selection,
+optional interference weights, independent recovery and publication figures.
+See [the DQN study guide](docs/dqn-k-replay.md). The recorded pre-task-continuation
+notebook and historical JSON configs are unchanged; this is a new protocol.
+
 ## Supported configurations
 
 | Configuration | Actions | Task memory |

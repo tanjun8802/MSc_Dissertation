@@ -99,6 +99,8 @@ report = {}
 cases = [(algo + "_all_penalties", algo, None) for algo in ("dqn", "sac")]
 for path in sorted((Path(__file__).resolve().parents[1] / "configs").glob("*.json")):
     config = load_config(path)
+    if config.training.get("k_replay") is not None:
+        continue  # Bounded replay intentionally changes the historical objectives.
     if config.actor_type != "mlp":
         continue  # Preserve parity checks for the original algorithms.
     cases.append((config.name, config.algorithm, config))

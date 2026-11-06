@@ -12,6 +12,7 @@ from tbtrl.random import set_seed
 from tbtrl.replay import ReplayBuffer
 from tbtrl.training.common import LossHistory, validate_training_options
 from tbtrl.training.results import DQNResult
+from tbtrl.training.task_selection import KReplayOptions, TaskSelector
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +57,8 @@ def train_dqn(
     psi_raw_norm_coef=0.0001,
     phi_raw_norm_coef=0.0001,
     current_buffer=None,
+    k_replay=None,
+    selector_state=None,
 ):
     """
     Functional factorised critic:
@@ -134,6 +137,20 @@ def train_dqn(
         early_stop_patience=early_stop_patience,
         eval_episodes=eval_episodes,
     )
+    options = KReplayOptions.from_dict(k_replay) if k_replay is not None else None
+    if options is not None and (replay_ratio != 0 or replay_tasks_per_batch is not None):
+        raise ValueError(
+            "k_replay owns replay budgets; set replay_ratio=0 and omit replay_tasks_per_batch."
+        )
+    if options is not None and current_buffer is None:
+        raise ValueError("k_replay requires a current buffer from global replay.")
+    selector = TaskSelector(options, selector_state) if options is not None else None
+    if selector is not None and replay_task_buffers and not selector_state:
+        raise ValueError("Existing k_replay archives require their selector_state.")
+    replay_diagnostics = []
+    first_update = True
+    probe_inputs = None
+    probe_reference = None
     set_seed(seed)
     env.action_space.seed(seed)
     sigreg_loss = CovarianceRegularizer(sketch_dim=sketch_dim)
@@ -278,58 +295,138 @@ def train_dqn(
         if len(buffer) < warmup_steps or global_step % train_freq != 0:
             continue
         current_batch = buffer.sample(batch_size)
-        eligible_old_task_ids = []
-        for old_task_id, old_buffer in replay_task_buffers.items():
-            if old_buffer is None:
-                continue
-            if len(old_buffer) < 1:
-                continue
-            if old_task_id not in task_goals:
-                raise KeyError(f"Missing goal for replay task {old_task_id}. Add it to task_goals.")
-            eligible_old_task_ids.append(old_task_id)
-        replay_batches = []
-        if len(eligible_old_task_ids) > 0 and replay_ratio > 0.0:
-            if replay_tasks_per_batch is None:
-                n_old_tasks = len(eligible_old_task_ids)
-            else:
-                n_old_tasks = min(int(replay_tasks_per_batch), len(eligible_old_task_ids))
-            cycle_index = global_step // train_freq % len(eligible_old_task_ids)
-            ordered_old_task_ids = (
-                eligible_old_task_ids[cycle_index:] + eligible_old_task_ids[:cycle_index]
-            )
-            selected_old_task_ids = ordered_old_task_ids[:n_old_tasks]
-            replay_batch_size = max(1, int(batch_size * replay_ratio / n_old_tasks))
-            for old_task_id in selected_old_task_ids:
-                old_buffer = replay_task_buffers[old_task_id]
-                if len(old_buffer) < replay_batch_size and current_buffer is None:
+        update_started = time.perf_counter()
+        selection_seconds = 0.0
+        refresh = False
+        geometry = {}
+        if selector is not None:
+            refresh = first_update or selector.updates % options.refresh_updates == 0
+            if refresh:
+                selection_started = time.perf_counter()
+                candidates = [
+                    i
+                    for i in selector.candidate_ids
+                    if i != task_id and i in replay_task_buffers and len(replay_task_buffers[i]) > 0
+                ]
+                if candidates:
+                    with torch.no_grad():
+                        descriptors = torch.as_tensor(
+                            np.asarray([task_goals[i] for i in candidates]),
+                            dtype=torch.float32,
+                            device=device,
+                        )
+                        vectors = q_network.encode_goal(descriptors).cpu().numpy()
+                    _, geometry = selector.select(dict(zip(candidates, vectors)))
+                else:
+                    _, geometry = selector.select({})
+                geometry["mean_value_drift"] = 0.0
+                geometry["max_value_drift"] = 0.0
+                if candidates:
+                    with torch.no_grad():
+                        if probe_inputs is None:
+                            source = replay_task_buffers[candidates[0]]
+                            count = min(32, len(source))
+                            probe_obs = torch.as_tensor(source.obs[:count], device=device)
+                            probe_actions = (
+                                torch.as_tensor(source.actions[:count], device=device)
+                                .long()
+                                .view(-1)
+                            )
+                            probe_onehot = F.one_hot(probe_actions, num_classes=num_actions).to(
+                                probe_obs.dtype
+                            )
+                            probe_inputs = (probe_obs.clone(), probe_onehot)
+                        phi_probe = q_network.encode_state_action(*probe_inputs).cpu().numpy()
+                        values = phi_probe @ vectors.T
+                        if probe_reference is None:
+                            probe_reference = values.copy()
+                        drift = np.abs(values - probe_reference)
+                        geometry["mean_value_drift"] = float(drift.mean())
+                        geometry["max_value_drift"] = float(drift.max())
+                selection_seconds = time.perf_counter() - selection_started
+            selected_old_task_ids = selector.selected
+            replay_batches = [
+                (i, task_goals[i], replay_task_buffers[i].sample(count))
+                for i, count in zip(
+                    selected_old_task_ids, selector.sample_counts(selected_old_task_ids)
+                )
+            ]
+            regularised_goals = {i: task_goals[i] for i in selected_old_task_ids}
+            regularised_goals[task_id] = task_goals[task_id]
+        else:
+            eligible_old_task_ids = []
+            for old_task_id, old_buffer in replay_task_buffers.items():
+                if old_buffer is None:
                     continue
-                old_batch = old_buffer.sample(replay_batch_size)
-                old_goal = task_goals[old_task_id]
-                replay_batches.append((old_task_id, old_goal, old_batch))
+                if len(old_buffer) < 1:
+                    continue
+                if old_task_id not in task_goals:
+                    raise KeyError(
+                        f"Missing goal for replay task {old_task_id}. Add it to task_goals."
+                    )
+                eligible_old_task_ids.append(old_task_id)
+            replay_batches = []
+            if len(eligible_old_task_ids) > 0 and replay_ratio > 0.0:
+                if replay_tasks_per_batch is None:
+                    n_old_tasks = len(eligible_old_task_ids)
+                else:
+                    n_old_tasks = min(int(replay_tasks_per_batch), len(eligible_old_task_ids))
+                cycle_index = global_step // train_freq % len(eligible_old_task_ids)
+                ordered_old_task_ids = (
+                    eligible_old_task_ids[cycle_index:] + eligible_old_task_ids[:cycle_index]
+                )
+                selected_old_task_ids = ordered_old_task_ids[:n_old_tasks]
+                replay_batch_size = max(1, int(batch_size * replay_ratio / n_old_tasks))
+                for old_task_id in selected_old_task_ids:
+                    old_buffer = replay_task_buffers[old_task_id]
+                    if len(old_buffer) < replay_batch_size and current_buffer is None:
+                        continue
+                    old_batch = old_buffer.sample(replay_batch_size)
+                    old_goal = task_goals[old_task_id]
+                    replay_batches.append((old_task_id, old_goal, old_batch))
+            regularised_goals = task_goals
         current_loss = task_loss(current_batch, goal)
         old_losses = []
         for old_task_id, old_goal, old_batch in replay_batches:
             old_losses.append(task_loss(old_batch, old_goal))
+        weighting_seconds = 0.0
+        if selector is not None and old_losses and refresh:
+            weighting_started = time.perf_counter()
+            if options.weighting == "interference":
+                parameters = tuple(q_network.sa_encoder[-1].parameters())
+
+                def shared_gradient(loss):
+                    gradients = torch.autograd.grad(loss, parameters, retain_graph=True)
+                    return torch.cat([gradient.detach().flatten() for gradient in gradients])
+
+                selector.update_weights(
+                    shared_gradient(current_loss), [shared_gradient(loss) for loss in old_losses]
+                )
+            weighting_seconds = time.perf_counter() - weighting_started
         if len(old_losses) > 0:
-            old_replay_loss = torch.stack(old_losses).mean()
+            if selector is not None:
+                weights = torch.as_tensor(selector.weights, device=device, dtype=current_loss.dtype)
+                old_replay_loss = (torch.stack(old_losses) * weights).sum()
+            else:
+                old_replay_loss = torch.stack(old_losses).mean()
         else:
             old_replay_loss = torch.zeros((), device=device)
         if sigreg_coef > 0.0:
             current_sigreg = sigreg_phi_loss(current_batch)
         else:
             current_sigreg = torch.zeros((), device=device)
-        if goal_separation_coef > 0.0 and len(task_goals) > 1:
+        if goal_separation_coef > 0.0 and len(regularised_goals) > 1:
             (goal_separation_loss, cosine_matrix) = online_goal_separation_loss(
                 q_network=q_network,
-                task_goals=task_goals,
+                task_goals=regularised_goals,
                 device=device,
                 target_cosine=goal_separation_target_cosine,
             )
         else:
             goal_separation_loss = torch.zeros((), device=device)
-        seen_task_ids = sorted(task_goals.keys())
+        seen_task_ids = sorted(regularised_goals.keys())
         seen_goal_tensor = torch.as_tensor(
-            np.asarray([task_goals[task_id] for task_id in seen_task_ids], dtype=np.float32),
+            np.asarray([regularised_goals[task_id] for task_id in seen_task_ids], dtype=np.float32),
             dtype=torch.float32,
             device=device,
         )
@@ -365,6 +462,30 @@ def train_dqn(
             opt_sa.step()
         if lr_goal_init > 0.0:
             opt_goal.step()
+        bounded_metrics = {}
+        if selector is not None:
+            selector.updates += 1
+            first_update = False
+            bounded_metrics = dict(
+                replay_samples=sum(len(batch.obs) for _, _, batch in replay_batches),
+                regularised_goals=len(regularised_goals),
+                selected_tasks=selector.selected.copy(),
+                replay_weights=selector.weights.copy(),
+                candidate_count=len(selector.candidate_ids),
+                selector_seconds=selection_seconds,
+                weighting_seconds=weighting_seconds,
+                update_seconds=time.perf_counter() - update_started,
+                optimiser_updates=selector.updates,
+            )
+            if refresh:
+                replay_diagnostics.append(
+                    dict(
+                        step=global_step,
+                        **bounded_metrics,
+                        **geometry,
+                        candidate_ids=selector.candidate_ids,
+                    )
+                )
         loss_history.append(
             {
                 "step": global_step,
@@ -378,6 +499,7 @@ def train_dqn(
                 "psi_norm": psi_raw_norm_loss.detach().item(),
                 "total": total_loss.detach().item(),
                 "replay_tasks": len(replay_batches),
+                **bounded_metrics,
             }
         )
         with torch.no_grad():
@@ -427,6 +549,8 @@ def train_dqn(
         min_time = time.perf_counter() - start_time
     with torch.no_grad():
         final_task_embedding = q_network.encode_goal(goal_tensor).squeeze(0).detach().cpu().numpy()
+    if selector is not None:
+        selector.observe_completed_task(task_id)
     return DQNResult(
         q_network,
         q_target_network,
@@ -438,4 +562,6 @@ def train_dqn(
         final_task_embedding,
         cosine_matrix,
         loss_history,
+        selector_state=selector.state_dict() if selector is not None else {},
+        replay_diagnostics=replay_diagnostics,
     )

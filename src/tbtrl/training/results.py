@@ -16,6 +16,8 @@ class DQNResult:
     task_embedding: Any
     goal_cosines: Any
     losses: list = field(default_factory=list)
+    selector_state: dict = field(default_factory=dict)
+    replay_diagnostics: list = field(default_factory=list)
 
 
 @dataclass

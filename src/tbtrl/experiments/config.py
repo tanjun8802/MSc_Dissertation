@@ -174,6 +174,7 @@ class ExperimentConfig:
             "make_env",
             "task_goals",
             "optimizer_state",
+            "selector_state",
             "replay_task_buffers",
             "current_buffer",
             "q_network",
@@ -190,6 +191,20 @@ class ExperimentConfig:
             unknown = set(settings) - allowed
             if unknown:
                 raise ValueError(f"Unknown or runner-owned training settings: {sorted(unknown)}")
+        for phase in ({}, self.scratch, self.first_task, self.recovery):
+            settings = dict(self.training, **phase)
+            if settings.get("k_replay") is not None:
+                from tbtrl.training.task_selection import KReplayOptions
+
+                KReplayOptions.from_dict(settings["k_replay"])
+                if self.algorithm != "dqn" or self.replay_mode != "global":
+                    raise ValueError("k_replay requires DQN with global replay.")
+                if self.replay_schedule != "constant" or settings.get("replay_ratio", 0.5) != 0:
+                    raise ValueError(
+                        "k_replay requires constant replay_schedule and replay_ratio=0."
+                    )
+                if settings.get("replay_tasks_per_batch") is not None:
+                    raise ValueError("k_replay owns the task cap; omit replay_tasks_per_batch.")
         return self
 
     def to_dict(self):
