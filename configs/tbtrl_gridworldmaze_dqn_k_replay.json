@@ -1,5 +1,5 @@
 {
-  "name": "TBTRL_GridworldMaze_DQN-k4-basis-uniform",
+  "name": "TBTRL_GridworldMaze_DQN-k4-basis-uniform-soft-ball",
   "algorithm": "dqn",
   "environment": "maze-discrete",
   "goals": [
@@ -69,7 +69,8 @@
     "hidden_dim": 64,
     "rep_dim": 16,
     "phi_max_norm": 1.0,
-    "psi_max_norm": 1.0
+    "psi_max_norm": 1.0,
+    "embedding_constraint": "soft"
   },
   "entropy_transfer": "reset",
   "actor_type": "mlp",
@@ -98,9 +99,9 @@
     "early_stop_reward": 0.99,
     "early_stop_patience": 3,
     "enable_early_stop": true,
-    "sigreg_coef": 0.01,
+    "sigreg_coef": 0,
     "sketch_dim": 16,
-    "goal_separation_coef": 0.04,
+    "goal_separation_coef": 0,
     "goal_separation_target_cosine": 0.7,
     "psi_raw_norm_coef": 0.0002,
     "phi_raw_norm_coef": 0.0002,

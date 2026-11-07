@@ -96,8 +96,9 @@ optional dependencies plus a separate candidate-aware trainer. See
 
 For bounded task selection in discrete DQN, use
 [`TBTRL_GridworldMaze_DQN.ipynb`](experiments/working/TBTRL_GridworldMaze_DQN.ipynb).
-It contains the complete Maze study: fixed replay storage, at most K historical
-objectives and R historical samples per update, rotating/random/basis selection,
+It contains the complete Maze study: raw bilinear factors with soft squared
+radius-excess penalties, fixed replay storage, at most K historical objectives
+and R historical samples per update, rotating/random/basis selection,
 optional interference weights, independent recovery and publication figures.
 See [the DQN study guide](docs/dqn-k-replay.md). The recorded pre-task-continuation
 notebook and historical JSON configs are unchanged; this is a new protocol.

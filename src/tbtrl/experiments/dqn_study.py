@@ -41,13 +41,16 @@ def configure_k_replay(
     if config.algorithm != "dqn":
         raise ValueError("Bounded K replay is a DQN study.")
     result = deepcopy(config)
-    result.name = f"{config.name}-k{max_tasks}-{selector}-{weighting}"
+    result.name = f"{config.name}-k{max_tasks}-{selector}-{weighting}-soft-ball"
+    result.model = dict(result.model, embedding_constraint="soft")
     result.replay_mode, result.replay_schedule = "global", "constant"
     result.global_replay_capacity, result.recent_replay_capacity = capacity, recent_capacity
     result.replay_max_groups, result.similarity_threshold = max_groups, 0.8
     result.training.pop("replay_tasks_per_batch", None)
     result.training.update(
         replay_ratio=0,
+        goal_separation_coef=0,
+        sigreg_coef=0,
         k_replay=dict(
             max_tasks=max_tasks,
             sample_budget=sample_budget,
@@ -328,6 +331,101 @@ def plot_replay_allocation(directory, *, seed=None, style=DEFAULT_STYLE):
         fig,
         directory
         / f"figures/replay-allocation{'-' + str(seed) if seed != config['seeds'][0] else ''}",
+        style=style,
+    )
+    return fig
+
+
+@styled
+def plot_soft_ball_norms(directory, *, seed=None, style=DEFAULT_STYLE):
+    """Audit soft radii and penalty activation from saved task snapshots/losses."""
+    directory = Path(directory)
+    case = load_study({"run": directory})["run"]
+    config = case["config"]
+    seed = config["seeds"][0] if seed is None else seed
+    rows = sorted(
+        (r for r in case["records"] if r["mode"] == "sequential" and r["seed"] == seed),
+        key=lambda r: r["task_id"],
+    )
+    snapshots, losses, boundaries, offset = [], [], [], 0
+    for row in rows:
+        snapshots.extend(
+            dict(s, sequence_step=offset + s["step"])
+            for s in row.get("replay_diagnostics", [])
+            if s.get("norm_constraint") == "soft"
+        )
+        path = directory / f"seed_{seed}/sequential/task_{row['task_id']}/losses.jsonl"
+        if path.exists():
+            losses.extend(
+                dict(s, sequence_step=offset + s["step"])
+                for s in map(json.loads, path.read_text().splitlines())
+            )
+        offset += row["steps"]
+        boundaries.append(offset)
+    fig, axes = subplots(2, 2, height=6.5, style=style)
+    if not snapshots:
+        for ax in axes.flat:
+            empty_panel(ax, "No saved soft-ball diagnostics")
+    else:
+        x = [s["sequence_step"] for s in snapshots]
+        for branch, ax, letter in (("phi", axes[0, 0], "a"), ("psi", axes[0, 1], "b")):
+            ax.plot(x, [s[f"{branch}_norm_mean"] for s in snapshots], label="Mean norm")
+            ax.plot(
+                x,
+                [s[f"{branch}_norm_max"] for s in snapshots],
+                label="Maximum norm",
+                color=COLORS[1],
+            )
+            ax.axhline(
+                config["model"][f"{branch}_max_norm"],
+                color="#555555",
+                linestyle=":",
+                label="Soft radius",
+            )
+            ax.set(
+                title=f"({letter}) {'State-action' if branch == 'phi' else 'Task'} factor norms",
+                ylabel="Euclidean norm",
+            )
+        for branch, color in (("phi", COLORS[0]), ("psi", COLORS[1])):
+            axes[1, 0].plot(
+                x,
+                [s[f"{branch}_radius_excess_fraction"] for s in snapshots],
+                label=branch,
+                color=color,
+            )
+        axes[1, 0].set(
+            title="(c) Samples outside soft radii", ylabel="Exceedance fraction", ylim=(-0.03, 1.05)
+        )
+        lx = [s["sequence_step"] for s in losses]
+        for key, label, color, coefficient in (
+            ("td", "Current TD", COLORS[2], 1),
+            (
+                "phi_norm",
+                "State-action norm penalty",
+                COLORS[0],
+                config["training"]["phi_raw_norm_coef"],
+            ),
+            ("psi_norm", "Task norm penalty", COLORS[1], config["training"]["psi_raw_norm_coef"]),
+        ):
+            axes[1, 1].plot(lx, [s[key] * coefficient for s in losses], label=label, color=color)
+        axes[1, 1].set(title="(d) Weighted sampled losses", ylabel="Loss contribution")
+        axes[1, 1].set_yscale("symlog", linthresh=1e-6)
+        axes[1, 1].set_ylim(bottom=0)
+        for ax in axes.flat:
+            ax.set_xlabel("Sequence environment steps")
+            for boundary in boundaries[:-1]:
+                ax.axvline(boundary, color="#777777", alpha=0.2, linewidth=0.6)
+            numeric_axis(ax, x=True)
+            legend(ax)
+    finish(
+        fig,
+        title=f"Soft-ball representation diagnostics · seed {seed}",
+        note="Radii are soft preferences, not hard bounds. Norms cover current/replayed state-actions and selected goals. Snapshots precede each recorded update; weighted loss sizes do not measure gradient influence.",
+    )
+    save_figure(
+        fig,
+        directory
+        / f"figures/soft-ball-norms{'-' + str(seed) if seed != config['seeds'][0] else ''}",
         style=style,
     )
     return fig

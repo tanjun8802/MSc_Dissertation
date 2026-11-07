@@ -1,3 +1,5 @@
+import math
+
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -32,27 +34,12 @@ def project_to_l2_ball(x: torch.Tensor, max_norm: float, eps: float = 1e-08) -> 
 
 
 class FactorisedQNetwork(nn.Module):
-    """
-    Factorised goal-conditioned Q-network:
+    """Bilinear Q-network with raw soft-ball factors or legacy projection.
 
-        Q(s, a, g)
-        =
-        phi(s, a)^T psi(g)
-
-    The state-action and goal encoder outputs are not
-    unit-normalised. Instead, each vector is projected
-    into a bounded L2 ball:
-
-        ||phi(s,a)|| <= phi_max_norm
-        ||psi(g)||   <= psi_max_norm
-
-    Therefore:
-
-        |Q(s,a,g)|
-        <= phi_max_norm * psi_max_norm
-
-    This allows variable embedding magnitudes while
-    retaining a provable Q-value bound.
+    Soft mode returns unnormalised encoder outputs; training penalties encourage
+    configurable radii but provide no hard bound on embeddings or Q-values.
+    Projected mode remains the default for historical checkpoint compatibility.
+    The current bounded DQN study explicitly selects soft mode.
     """
 
     def __init__(
@@ -64,6 +51,7 @@ class FactorisedQNetwork(nn.Module):
         rep_dim: int = 64,
         phi_max_norm: float = 2.0,
         psi_max_norm: float = 5.0,
+        embedding_constraint: str = "projected",
     ):
         super().__init__()
         if obs_dim <= 0:
@@ -76,10 +64,13 @@ class FactorisedQNetwork(nn.Module):
             raise ValueError("hidden_dim must be positive.")
         if rep_dim <= 0:
             raise ValueError("rep_dim must be positive.")
-        if phi_max_norm <= 0.0:
+        if not math.isfinite(phi_max_norm) or phi_max_norm <= 0.0:
             raise ValueError("phi_max_norm must be positive.")
-        if psi_max_norm <= 0.0:
+        if not math.isfinite(psi_max_norm) or psi_max_norm <= 0.0:
             raise ValueError("psi_max_norm must be positive.")
+        if embedding_constraint not in ("projected", "soft"):
+            raise ValueError("embedding_constraint must be projected or soft.")
+        self.embedding_constraint = embedding_constraint
         self.obs_dim = obs_dim
         self.num_actions = num_actions
         self.action_dim = num_actions
@@ -97,9 +88,28 @@ class FactorisedQNetwork(nn.Module):
             nn.Linear(goal_dim, hidden_dim), nn.ReLU(), nn.Linear(hidden_dim, rep_dim)
         )
 
+    @property
+    def uses_projection(self) -> bool:
+        # Old task-boundary pickles predate this explicit model option.
+        return getattr(self, "embedding_constraint", "projected") == "projected"
+
+    @property
+    def theoretical_q_bound(self):
+        return self.phi_max_norm * self.psi_max_norm if self.uses_projection else None
+
+    def _constrain(self, values, radius):
+        return project_to_l2_ball(values, radius) if self.uses_projection else values
+
+    def _supplied_goal(self, values, normalize_embedding):
+        if normalize_embedding:
+            if not self.uses_projection:
+                raise ValueError("Soft-ball factors do not support cosine normalisation.")
+            return F.normalize(values, p=2, dim=-1, eps=1e-08)
+        return self._constrain(values, self.psi_max_norm)
+
     def encode_goal(self, goal: torch.Tensor) -> torch.Tensor:
         """
-        Encode goal vectors into bounded task representations.
+        Encode goal vectors using the configured soft or projected constraint.
 
         Args:
             goal:
@@ -111,12 +121,12 @@ class FactorisedQNetwork(nn.Module):
             [rep_dim], matching the input batch structure.
         """
         psi_logits = self.goal_encoder(goal)
-        psi = project_to_l2_ball(psi_logits, max_norm=self.psi_max_norm)
+        psi = self._constrain(psi_logits, self.psi_max_norm)
         return psi
 
     def encode_state_action(self, obs: torch.Tensor, act: torch.Tensor) -> torch.Tensor:
         """
-        Encode state-action pairs into bounded representations.
+        Encode state-action pairs using the configured constraint.
 
         Args:
             obs:
@@ -136,7 +146,7 @@ class FactorisedQNetwork(nn.Module):
             raise ValueError("obs and act must have the same batch size.")
         sa = torch.cat([obs, act], dim=-1)
         phi_logits = self.sa_encoder(sa)
-        phi = project_to_l2_ball(phi_logits, max_norm=self.phi_max_norm)
+        phi = self._constrain(phi_logits, self.phi_max_norm)
         return phi
 
     def forward(self, obs: torch.Tensor, act: torch.Tensor, goal: torch.Tensor) -> torch.Tensor:
@@ -212,10 +222,8 @@ class FactorisedQNetwork(nn.Module):
         """
         Compute Q(s, a | psi) using a supplied task embedding.
 
-        The default behaviour is to apply bounded-ball projection
-        to the supplied task embedding. The argument
-        normalize_embedding=True is retained only for
-        backwards-compatible cosine experiments.
+        Soft mode uses the supplied embedding unchanged. Projected mode keeps
+        the historical ball projection and optional cosine experiment flag.
 
         Args:
             obs:
@@ -229,10 +237,10 @@ class FactorisedQNetwork(nn.Module):
 
             normalize_embedding:
                 If False:
-                    project task_embedding into the psi ball.
+                    use task_embedding unchanged in soft mode; project in legacy mode.
 
                 If True:
-                    apply strict L2 normalisation.
+                    apply strict L2 normalisation in legacy mode only.
 
         Returns:
             Tensor with shape [B, 1].
@@ -246,10 +254,7 @@ class FactorisedQNetwork(nn.Module):
             raise ValueError(
                 "task_embedding must have shape [rep_dim], [1, rep_dim], or [B, rep_dim]."
             )
-        if normalize_embedding:
-            psi = F.normalize(task_embedding, p=2, dim=-1, eps=1e-08)
-        else:
-            psi = project_to_l2_ball(task_embedding, max_norm=self.psi_max_norm)
+        psi = self._supplied_goal(task_embedding, normalize_embedding)
         q_values = (phi * psi).sum(dim=-1, keepdim=True)
         return q_values
 
@@ -269,10 +274,10 @@ class FactorisedQNetwork(nn.Module):
 
             normalize_embedding:
                 If False:
-                    project task_embedding into the psi ball.
+                    use task_embedding unchanged in soft mode; project in legacy mode.
 
                 If True:
-                    apply strict L2 normalisation.
+                    apply strict L2 normalisation in legacy mode only.
 
         Returns:
             Tensor with shape [B, num_actions].
@@ -298,10 +303,7 @@ class FactorisedQNetwork(nn.Module):
             raise ValueError(
                 "task_embedding must have shape [rep_dim], [1, rep_dim], or [B, rep_dim]."
             )
-        if normalize_embedding:
-            psi = F.normalize(task_embedding, p=2, dim=-1, eps=1e-08)
-        else:
-            psi = project_to_l2_ball(task_embedding, max_norm=self.psi_max_norm)
+        psi = self._supplied_goal(task_embedding, normalize_embedding)
         psi = psi.unsqueeze(1).expand(batch_size, num_actions, -1)
         q_values = (phi * psi).sum(dim=-1)
         return q_values
@@ -320,5 +322,6 @@ class FactorisedQNetwork(nn.Module):
             "phi_norm": phi.norm(dim=-1),
             "psi_norm": psi.norm(dim=-1),
             "q_values": q_values,
-            "theoretical_q_bound": self.phi_max_norm * self.psi_max_norm,
+            "theoretical_q_bound": self.theoretical_q_bound,
+            "reference_q_scale": self.phi_max_norm * self.psi_max_norm,
         }

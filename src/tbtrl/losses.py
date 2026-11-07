@@ -57,3 +57,14 @@ def norm_penalty_loss_l1(raw_embedding, target_norm=1.0):
     raw_norms = torch.linalg.vector_norm(raw_embedding, ord=2, dim=-1)
     excess = F.relu(raw_norms - target_norm)
     return F.smooth_l1_loss(excess, torch.zeros_like(excess))
+
+
+def norm_penalty_loss_l2(raw_embedding, target_norm=1.0):
+    """Squared Euclidean-radius excess; zero throughout the ball, not a shell.
+
+    This is a soft penalty and does not guarantee norm <= target_norm.
+    """
+    if not np.isfinite(target_norm) or target_norm <= 0:
+        raise ValueError("Norm radius must be finite and positive.")
+    norms = torch.linalg.vector_norm(raw_embedding, ord=2, dim=-1)
+    return F.relu(norms - target_norm).square().mean()

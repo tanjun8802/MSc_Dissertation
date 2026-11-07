@@ -2,7 +2,7 @@
 
 Open `experiments/working/TBTRL_GridworldMaze_DQN.ipynb`. It contains the environment settings, six study conditions, training, independent recovery, completeness table and saved-result figures. Trainer and plot implementations remain shared Python modules so a new environment notebook does not duplicate algorithms. The recorded pre-task-continuation notebook is unchanged.
 
-Install the locked development/notebook environment, restart the kernel, and execute the notebook from the repository. Full budgets are the default. Set `SMOKE=True` for a three-task CPU-compatible execution check; those curves do not establish convergence. Change `DEVICE`, `SEEDS`, `GOAL_COUNT`, `K`, `REPLAY_SAMPLES`, candidate capacity and refresh cadence in the parameters cell. Changing settings requires a new `RUN_ID`. With matching settings/source, append goals at the end and keep `RESUME=True` to continue completed task boundaries.
+Install the locked development/notebook environment, restart the kernel, and execute the notebook from the repository. The current soft-ball v2 preset uses raw factors, squared radius-excess penalties, no goal separation and covariance off by default. Full budgets are the default. Set `SMOKE=True` for a three-task CPU-compatible execution check; those curves do not establish convergence. Change `DEVICE`, `SEEDS`, `GOAL_COUNT`, `K`, `REPLAY_SAMPLES`, `PHI_RADIUS`, `PSI_RADIUS`, norm coefficients, candidate capacity and refresh cadence in the parameters cell. Changing settings requires a new `RUN_ID`. With matching settings/source, append goals at the end and keep `RESUME=True` to continue completed task boundaries.
 
 Set `RUN_EXPERIMENTS=False` to regenerate tables and figures from saved results. `RUN_RECOVERY` enables independent adaptation trials; each starts from a separate copy of the same final model and archive. The study preset uses acquisition exploration/update cadence for recovery, with a held-out mean-return gate to skip already retained tasks. `recovery_return_threshold` sets the same numeric return target for initial gating and adaptation stopping; the latter retains the configured patience requirement. Acquisition keeps its original return/patience criterion. Zero-step and adapted records both identify the recovery target explicitly.
 
@@ -25,13 +25,13 @@ Set `RUN_EXPERIMENTS=False` to regenerate tables and figures from saved results.
 
 K=0 and R=0 explicitly disable historical replay. Otherwise both are positive. R is divided across at most min(K,R,eligible candidates) tasks without exceeding its total. Historical loss is a normalised weighted sum of per-task means; the outer `replay_loss_coef` is fixed. Uniform weights reproduce a mean over selected tasks, independent of K.
 
-Goal-separation and task-norm penalties operate on current-plus-selected goals, at most K+1, instead of all seen goals. Their approximation is an intentional algorithm change. Current-state covariance and state-action norm objectives are unchanged. Both encoders remain trainable. This implementation does not add a frozen teacher, distillation or covariance rescaling.
+Goal separation is disabled in the soft-ball preset. Task-norm penalties operate on current-plus-selected goals, at most K+1. The state-action norm penalty covers current and replayed samples, at most B+R. Both encoders remain trainable. This implementation does not add a frozen teacher, distillation or covariance rescaling.
 
 ## Candidate admission and geometry
 
 The pool contains the newest completed task plus a uniform reservoir of older tasks. This admission policy is identical across all selectors; its RNG is separate from random selection, exploration and replay. It replaces the earlier plan's protected-basis pool so selection comparisons do not implicitly change candidate admission. The pool is an approximation: a dropped task can drift and need recovery. A full-history selector is not implemented as part of the bounded path.
 
-Basis selection chooses actual task IDs with large residual directions outside the selected span. Near-zero/collinear vectors are handled, and unused slots are filled by deterministic rotation. This is not PCA and is not a proven barycentric spanner. Selection uses projected, normalised task vectors; raw norms are reported separately. Diagnostic rank, residual and coefficient measurements refer to the candidate pool, not every historical task.
+Basis selection chooses actual task IDs with large residual directions outside the selected span. Near-zero/collinear vectors are handled, and unused slots are filled by deterministic rotation. This is not PCA and is not a proven barycentric spanner. Selection uses direction-normalised task vectors (the Q forward pass retains raw magnitudes); raw norms are reported separately. Diagnostic rank, residual and coefficient measurements refer to the candidate pool, not every historical task.
 
 A deterministic common archive probe of at most 32 state-action inputs measures Q-value drift from the first refresh within each task. It does not sample training RNGs or influence selection. This probe is local coverage evidence, not a guarantee of behavioural retention. Replay still samples selected tasks' existing archive views and recomputes reward and termination for each requested goal. Tasks sharing an archive group retain distinct objectives.
 
@@ -51,8 +51,23 @@ Full exports use 300 dpi PNG and editable PDF/SVG. Bands show sample SD across c
 
 Transition-array capacity and per-update objective/sample/regularisation work are bounded independently of task count. Goal catalogues, task-to-group metadata, result histories and full all-goal evaluation still grow. The claim is not constant total memory or constant end-to-end evaluation cost.
 
-All study conditions use factorised DQN. The six conditions are rotating/random/basis uniform replay, basis interference replay, factorised scratch and factorised fine-tuning. Conventional MLP-DQN controls and individual regulariser ablations remain future experiments. The historical covariance target/norm-bound conflict is unchanged; study it separately from selection.
+All study conditions use factorised DQN. The six conditions are rotating/random/basis uniform replay, basis interference replay, factorised scratch and factorised fine-tuning. Conventional MLP-DQN controls and individual regulariser ablations remain future experiments. The historical covariance target is off by default pending a compatible design; study it separately from selection. The previous projected v1 protocol remains reproducible from its commit and saved configs, but source changes require a new output directory.
 
 ## Validation
 
 Run `python -m pytest tests/test_k_replay.py`, `python scripts/check_dqn_study.py`, and the normal repository checks in the configured development environment. Fresh-kernel smoke validation executes all six conditions, real TD updates, replay/recovery, inline plots and count constraints. Smoke checks establish execution and continuation correctness, not acquisition gains, retention or recovery speedups.
+
+
+## Soft radii and the revised value model
+
+The current study sets `model.embedding_constraint="soft"`. Encoder outputs and supplied goal factors are used directly in every Q-value/inference interface. Their dot product is not a cosine score. Directional normalization remains confined to task selection and archive similarity. Soft mode rejects the legacy cosine-inference flag.
+
+For each factor z and configurable radius r, the penalty is `mean(max(0, ||z||_2-r)^2)`. It starts at r exactly, is zero throughout the interior, and does not pull all vectors onto a sphere. This replaces the legacy Smooth-L1 excess penalty starting at r-0.1. The old penalty measured Euclidean lengths already; “L1” referred to the excess penalty, not an L1 embedding norm. Squared excess grows faster for large violations, but finite coefficients cannot guarantee that factors remain inside the ball or eliminate bilinear scaling ambiguity.
+
+`q_bound` is null in soft mode. Radius product is a reference scale, not a theorem about Q. Historical projected configs/checkpoints retain their old semantics via the default `embedding_constraint="projected"`; SAC and candidate-discovery trainers are unchanged. The soft study explicitly opts in and persists this model choice in checkpoints.
+
+The notebook's new soft-ball figure reports phi/psi norm means/maxima, radius-exceedance fractions and weighted losses. Norm diagnostics use bounded current/replay samples and selected goals; they do not certify every state or old task. The radii can reflect problem value scale with headroom, but neither their product nor penalty coefficients are automatically optimal.
+
+The existing covariance-to-identity implementation remains available for controlled experiments, but its coefficient defaults to zero in this revised preset. No Gaussian matching or frozen representation constraint has been added. For a future covariance study, use a compatible variance scale and an explicit current/archive sampling distribution; isotropy over arbitrary data does not establish useful features or prevent forgetting.
+
+Finish an in-flight v1 run under its existing kernel; restart the kernel for v2 and use `maze-dqn-k-replay-soft-ball-v2` or another new run ID. Do not reload trainer modules mid-run or combine v1/v2 results as one condition.

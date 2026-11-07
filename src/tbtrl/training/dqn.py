@@ -7,7 +7,12 @@ import torch.nn.functional as F
 from torch import nn, optim
 
 from tbtrl.evaluation import evaluate_policy
-from tbtrl.losses import CovarianceRegularizer, norm_penalty_loss_l1, online_goal_separation_loss
+from tbtrl.losses import (
+    CovarianceRegularizer,
+    norm_penalty_loss_l1,
+    norm_penalty_loss_l2,
+    online_goal_separation_loss,
+)
 from tbtrl.random import set_seed
 from tbtrl.replay import ReplayBuffer
 from tbtrl.training.common import LossHistory, validate_training_options
@@ -151,6 +156,9 @@ def train_dqn(
     first_update = True
     probe_inputs = None
     probe_reference = None
+    soft_ball = not getattr(q_network, "uses_projection", True)
+    if soft_ball and goal_separation_coef != 0:
+        raise ValueError("Soft-ball DQN disables goal separation; set goal_separation_coef=0.")
     set_seed(seed)
     env.action_space.seed(seed)
     sigreg_loss = CovarianceRegularizer(sketch_dim=sketch_dim)
@@ -445,18 +453,51 @@ def train_dqn(
             device=device,
         )
         raw_psi_all = q_network.goal_encoder(seen_goal_tensor)
-        psi_raw_norm_loss = norm_penalty_loss_l1(
-            raw_psi_all, target_norm=q_network.psi_max_norm - 0.1
+        norm_penalty = norm_penalty_loss_l2 if soft_ball else norm_penalty_loss_l1
+        psi_raw_norm_loss = norm_penalty(
+            raw_psi_all,
+            target_norm=q_network.psi_max_norm if soft_ball else q_network.psi_max_norm - 0.1,
         )
         actions = current_batch.actions.long().view(-1)
         action_onehot = F.one_hot(actions, num_classes=q_network.num_actions).to(
             dtype=current_batch.obs.dtype, device=current_batch.obs.device
         )
         sa_input = torch.cat([current_batch.obs, action_onehot], dim=-1)
+        if soft_ball and replay_batches:
+            sa_input = torch.cat(
+                [sa_input]
+                + [
+                    torch.cat([batch.obs, action_onehot_from_batch(batch)], dim=-1)
+                    for _, _, batch in replay_batches
+                ]
+            )
         raw_phi_current = q_network.sa_encoder(sa_input)
-        phi_raw_norm_loss = norm_penalty_loss_l1(
-            raw_phi_current, target_norm=q_network.phi_max_norm - 0.1
+        phi_raw_norm_loss = norm_penalty(
+            raw_phi_current,
+            target_norm=q_network.phi_max_norm if soft_ball else q_network.phi_max_norm - 0.1,
         )
+        radius_metrics = {}
+        if soft_ball:
+            with torch.no_grad():
+                phi_norms = raw_phi_current.norm(dim=-1)
+                psi_norms = raw_psi_all.norm(dim=-1)
+                radius_metrics = dict(
+                    phi_norm_samples=len(phi_norms),
+                    phi_norm_mean=float(phi_norms.mean()),
+                    phi_norm_max=float(phi_norms.max()),
+                    psi_norm_mean=float(psi_norms.mean()),
+                    psi_norm_max=float(psi_norms.max()),
+                    phi_radius_excess_fraction=float(
+                        (phi_norms > q_network.phi_max_norm).float().mean()
+                    ),
+                    psi_radius_excess_fraction=float(
+                        (psi_norms > q_network.psi_max_norm).float().mean()
+                    ),
+                    phi_radius=q_network.phi_max_norm,
+                    psi_radius=q_network.psi_max_norm,
+                    norm_constraint="soft",
+                    norm_penalty="squared_excess",
+                )
         total_loss = (
             current_loss
             + replay_loss_coef * old_replay_loss
@@ -500,13 +541,16 @@ def train_dqn(
                         **bounded_metrics,
                         **geometry,
                         candidate_ids=selector.candidate_ids,
+                        **radius_metrics,
                     )
                 )
         loss_history.append(
             {
                 "step": global_step,
                 "epsilon": float(epsilon),
-                "q_bound": float(q_network.phi_max_norm * q_network.psi_max_norm),
+                "q_bound": None
+                if soft_ball
+                else float(q_network.phi_max_norm * q_network.psi_max_norm),
                 "td": current_loss.detach().item(),
                 "replay": old_replay_loss.detach().item(),
                 "sigreg": current_sigreg.detach().item(),
@@ -516,6 +560,7 @@ def train_dqn(
                 "total": total_loss.detach().item(),
                 "replay_tasks": len(replay_batches),
                 **bounded_metrics,
+                **radius_metrics,
             }
         )
         with torch.no_grad():

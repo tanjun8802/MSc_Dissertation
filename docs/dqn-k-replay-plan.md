@@ -136,3 +136,12 @@ Relevant primary sources: GradNorm (https://proceedings.mlr.press/v80/chen18a.ht
 - Raw task vectors below the norm tolerance are zeroed before directional scoring/rank calculations.
 - The new DQN study uses a mean-return recovery target consistently for the zero-step gate and adapted stopping; the existing success-rate gate remains available for legacy/SAC conditions.
 - Adaptive-weight diagnostics include current/replay shared-layer norms and per-refresh/cumulative extra gradient-pass counts.
+
+
+## Soft-ball revision (2026-11-06)
+
+At the user's request, the current DQN study removes forward-pass projection and goal separation. Factor outputs retain their raw magnitudes; squared Euclidean-radius excess penalties activate at the configured radii. They cover current/replayed state-action samples and current/selected task factors within existing K/R budgets. Radius-exceedance diagnostics and plots replace claims of a hard Q bound.
+
+Historical projection is retained only as the default compatibility mode for old configs/checkpoints and other users of the shared model, including candidate discovery. The working DQN notebook and its JSON explicitly select soft mode and a new run ID. The previous Smooth-L1 penalty and radius-minus-0.1 threshold remain confined to legacy projected DQN.
+
+Covariance is temporarily off in the revised preset while a compatible objective is being designed; the existing implementation is unchanged and available for controlled experiments. No Gaussian matching or frozen feature targets are introduced. The next covariance study should specify its reference distribution and variance scale, permitting phi to learn from newly encountered state-action pairs while rehearsal protects earlier task values.

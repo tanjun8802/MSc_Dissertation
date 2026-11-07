@@ -63,6 +63,8 @@ with tempfile.TemporaryDirectory(prefix="tbtrl-dqn-study-") as directory:
                 assert len(probe["selected_tasks"]) <= options["max_tasks"]
                 assert probe["replay_samples"] <= options["sample_budget"]
                 assert probe["regularised_goals"] <= options["max_tasks"] + 1
+                assert probe["norm_constraint"] == "soft"
+                assert probe["phi_norm_samples"] <= options["sample_budget"] + 4
     assert list((work / "runs").rglob("replay-allocation.png"))
     print(
         "Executed Maze DQN study: six conditions, acquisition/recovery, inline figures and bounded-update audits."

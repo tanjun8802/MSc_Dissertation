@@ -2,6 +2,8 @@
 
 ## DQN
 
+The equations below describe the historical projected configurations. The current bounded DQN study opts into raw soft-ball factors, squared excess-radius penalties, and no goal separation; its covariance term is off pending redesign. See [the current study guide](dqn-k-replay.md).
+
 `tbtrl.training.dqn.train_dqn` is extracted from the working
 `dqn_train_phi_psi_adjustment` trainer. It computes
 `Q(s,a,g) = phi(s,a)^T psi(g)` and projects each embedding into its configured
