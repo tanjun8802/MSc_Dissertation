@@ -151,3 +151,24 @@ reuse without oracle calls, separate scratch/TBTRL state, prefix incompatibility
 and endpoint-specific recovery. Notebook smoke checks exercise orchestration,
 inline diagnostics and plots; they do not establish convergence or cross-device
 bitwise reproducibility.
+
+## Maze DQN study after the MPS conversion fix
+
+The Maze DQN notebook's training cell now restores each existing condition's saved
+configuration when `RESUME=True`. This keeps a projected v1 run on its original
+model and regularisers even though `configure_k_replay()` now defaults to soft
+embeddings. New scratch/fine-tuning controls inherit the saved study protocol.
+Use a new run directory to change experimental settings; task goals may still be
+appended while preserving the existing prefix.
+
+Conditions with complete acquisition and requested recovery records are reused
+for analysis without rewriting their historical manifests. Incomplete conditions
+retain the runner's configuration, runtime and source checks. The notebook permits
+only the verified source transition for the CPU-first MPS float64 conversion fix,
+with an original-manifest backup and `mps-fix-migration.json` receipt. Other source
+changes still require a separate compatibility review.
+
+After an interrupted cell, reload the notebook from disk and run its setup,
+configuration and training cells with the original `RUN_ID` and `RESUME=True`.
+The training cell reloads the repaired trainer modules. Completed task boundaries
+are retained; an interrupted task restarts from the preceding saved boundary.
