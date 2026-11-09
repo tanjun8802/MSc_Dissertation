@@ -88,6 +88,7 @@ Persist bounded per-refresh diagnostics and sampled update counts: selected IDs,
 
 ## Required verification
 
+- Apply the repository's [MPS compatibility and backend validation requirements](../AGENTS.md) to trainer, selector, diagnostic, and notebook changes. The CPU/MPS cases in `tests/test_k_replay.py` must exercise interference weighting with historical tasks, including gradient-norm diagnostics; report native MPS passes separately from unavailable-backend skips.
 - Across more than K and M tasks, no update exceeds K historical objectives, R historical samples, K+1 regularised goals or M stored selector candidates; boundary candidate refresh is at most M+1.
 - No full seen-goal forward pass or full task-map scan inside a bounded-mode gradient update.
 - Known synthetic directions: independent, duplicate, opposite, nearly collinear, low-norm, and rank greater than K. Selection remains finite and deterministic; selected IDs always refer to real completed tasks.

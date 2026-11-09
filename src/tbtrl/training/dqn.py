@@ -415,7 +415,8 @@ def train_dqn(
                 selector.update_weights(current_gradient, replay_gradients)
 
                 def finite_norm(gradient):
-                    norm = torch.linalg.vector_norm(gradient.to(device="cpu", dtype=torch.float64))
+                    # Transfer before casting: MPS does not support float64.
+                    norm = torch.linalg.vector_norm(gradient.cpu().to(dtype=torch.float64))
                     return float(norm) if torch.isfinite(norm) else None
 
                 gradient_metrics = dict(

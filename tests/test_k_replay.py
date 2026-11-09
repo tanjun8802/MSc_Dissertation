@@ -43,7 +43,19 @@ def test_selector_does_not_consume_training_rng():
     torch.testing.assert_close(torch.rand(3), expected_torch, rtol=0, atol=0)
 
 
-def test_real_dqn_bounds_samples_goals_and_updates_with_adaptive_replay():
+@pytest.mark.parametrize(
+    "device",
+    [
+        "cpu",
+        pytest.param(
+            "mps",
+            marks=pytest.mark.skipif(
+                not torch.backends.mps.is_available(), reason="Apple MPS is unavailable"
+            ),
+        ),
+    ],
+)
+def test_real_dqn_bounds_samples_goals_and_updates_with_adaptive_replay(device):
     from functools import partial
 
     from tbtrl.environments.registry import make_environment
@@ -61,18 +73,19 @@ def test_real_dqn_bounds_samples_goals_and_updates_with_adaptive_replay():
     )
     selector = TaskSelector(KReplayOptions(**options))
     goals = {i: np.array([i + 1, 1], dtype=np.float32) for i in range(10)}
-    replay = ReplayBuffer(8, 2, 1, discrete=True)
+    replay = ReplayBuffer(8, 2, 1, device=device, discrete=True)
     for _ in range(8):
         replay.add_transition([1, 1], 3, 999, [2, 1], False)
     for i in goals:
         selector.observe_completed_task(i)
     factory = partial(make_environment, "maze-discrete", max_horizon=4)
-    model = FactorisedQNetwork(2, 4, hidden_dim=8, rep_dim=4)
+    model = FactorisedQNetwork(2, 4, hidden_dim=8, rep_dim=4).to(device)
     before = deepcopy(model.state_dict())
     env = factory(goal=[3, 3])
     try:
         result = train_dqn(
             q_network=model,
+            device=device,
             q_target_network=deepcopy(model),
             env=env,
             goal=[3, 3],
@@ -81,7 +94,7 @@ def test_real_dqn_bounds_samples_goals_and_updates_with_adaptive_replay():
             task_goals=goals,
             replay_task_buffers={i: replay for i in goals},
             buffer_capacity=16,
-            current_buffer=ReplayBuffer(16, 2, 1, discrete=True),
+            current_buffer=ReplayBuffer(16, 2, 1, device=device, discrete=True),
             total_steps=8,
             warmup_steps=2,
             train_freq=1,
@@ -110,19 +123,34 @@ def test_real_dqn_bounds_samples_goals_and_updates_with_adaptive_replay():
         assert min(row["replay_weights"]) >= 0.1
 
 
-def test_interference_weights_protect_conflicting_task_with_a_floor():
+@pytest.mark.parametrize(
+    "device",
+    [
+        "cpu",
+        pytest.param(
+            "mps",
+            marks=pytest.mark.skipif(
+                not torch.backends.mps.is_available(), reason="Apple MPS is unavailable"
+            ),
+        ),
+    ],
+)
+def test_interference_weights_protect_conflicting_task_with_a_floor(device):
     options = KReplayOptions(
         max_tasks=2, weighting="interference", weight_smoothing=0, weight_temperature=0.2
     )
     selector = TaskSelector(options)
     selector.select({0: [1, 0], 1: [0, 1]})
     weights = selector.update_weights(
-        torch.tensor([1.0, 0.0]), [torch.tensor([-1.0, 0.0]), torch.tensor([1.0, 0.0])]
+        torch.tensor([1.0, 0.0], device=device),
+        [torch.tensor([-1.0, 0.0], device=device), torch.tensor([1.0, 0.0], device=device)],
     )
     assert weights[0] > 0.8
     assert weights[1] >= 0.1
     assert sum(weights) == pytest.approx(1)
-    assert selector.update_weights(torch.zeros(2), [torch.ones(2)] * 2) == [0.5, 0.5]
+    assert selector.update_weights(
+        torch.zeros(2, device=device), [torch.ones(2, device=device)] * 2
+    ) == [0.5, 0.5]
 
 
 def test_runner_continues_bounded_selector_without_reusing_scratch_state(tmp_path):

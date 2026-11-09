@@ -168,13 +168,14 @@ class TaskSelector:
         """Detached negative-cosine scores, with a positive uniform floor."""
         if self.options.weighting == "uniform" or not old_gradients:
             return self.weights.copy()
-        current = current_gradient.detach().to(device="cpu", dtype=torch.float64)
+        # MPS cannot cast to float64 during a device transfer: copy first.
+        current = current_gradient.detach().cpu().to(dtype=torch.float64)
         current_norm = torch.linalg.vector_norm(current)
         if not torch.isfinite(current).all() or current_norm <= 1e-12:
             self.weights = [1.0 / len(self.selected)] * len(self.selected)
             return self.weights.copy()
         for task, gradient in zip(self.selected, old_gradients):
-            gradient = gradient.detach().to(device="cpu", dtype=torch.float64)
+            gradient = gradient.detach().cpu().to(dtype=torch.float64)
             norm = torch.linalg.vector_norm(gradient)
             if not torch.isfinite(gradient).all() or norm <= 1e-12:
                 score = 0.0
