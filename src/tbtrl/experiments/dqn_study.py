@@ -13,10 +13,19 @@ from .figure_style import (
     finish,
     legend,
     numeric_axis,
+    panel_grid,
     save_figure,
     styled,
-    subplots,
 )
+
+CASE_LABELS = {
+    "scratch": "From scratch",
+    "fine-tuning": "Fine-tuning (no replay)",
+    "rotating-uniform": "Rotating · uniform",
+    "random-uniform": "Random · uniform",
+    "basis-uniform": "Basis · uniform",
+    "basis-interference": "Basis · interference",
+}
 
 
 def configure_k_replay(
@@ -130,24 +139,33 @@ def _complete_sequences(case, mode):
     return sequences
 
 
-def _band(ax, values, color, label):
+def _band(ax, values, color, label, *, linestyle="-", marker="o"):
     values = np.asarray(values, dtype=float)
     x = np.arange(values.shape[1])
     mean = values.mean(0)
-    ax.plot(x, mean, color=color, marker="o", label=f"{label} (n={len(values)})")
+    ax.plot(
+        x,
+        mean,
+        color=color,
+        marker=marker,
+        linestyle=linestyle,
+        label=f"{label} (n={len(values)})",
+    )
     if len(values) > 1:
         deviation = values.std(0, ddof=1)
         ax.fill_between(x, mean - deviation, mean + deviation, color=color, alpha=0.12)
 
 
 @styled
-def plot_study(paths, destination, *, style=DEFAULT_STYLE):
+def plot_study(paths, destination, *, style=DEFAULT_STYLE, columns=2):
     """Acquisition, retention, recovery and sampled update cost with explicit n."""
     cases = load_study(paths)
-    fig, axes = subplots(2, 2, height=7.5, style=style)
+    fig, axes = panel_grid(4, columns=columns, panel_height=4.2, style=style)
+    axes = axes.reshape(2, 2)
     incomplete = 0
     for index, (label, case) in enumerate(cases.items()):
         color = COLORS[index % len(COLORS)]
+        display_label = CASE_LABELS.get(label, label)
         for mode in ("scratch", "sequential"):
             sequences = _complete_sequences(case, mode)
             if not sequences:
@@ -158,7 +176,9 @@ def plot_study(paths, destination, *, style=DEFAULT_STYLE):
                 axes[0, 0],
                 np.cumsum(costs, axis=1),
                 color,
-                label + (" scratch" if mode == "scratch" and label != "scratch" else ""),
+                display_label + (" · scratch" if mode == "scratch" and label != "scratch" else ""),
+                linestyle="--" if mode == "scratch" else "-",
+                marker="s" if mode == "scratch" else "o",
             )
             if mode == "sequential":
                 retention = [
@@ -174,7 +194,7 @@ def plot_study(paths, destination, *, style=DEFAULT_STYLE):
                     ]
                     for rows in sequences
                 ]
-                _band(axes[0, 1], retention, color, label)
+                _band(axes[0, 1], retention, color, display_label)
         recovery = _complete_sequences(case, "recovery")
         if recovery:
             values = [sum(r["steps"] for r in rows) for rows in recovery]
@@ -187,18 +207,42 @@ def plot_study(paths, destination, *, style=DEFAULT_STYLE):
                 xytext=(0, 7),
                 textcoords="offset points",
                 ha="center",
-                fontsize=7,
+                fontsize=style.font_size - 1,
             )
+        else:
+            axes[1, 0].text(
+                index,
+                0.03,
+                "Not run",
+                ha="center",
+                va="bottom",
+                transform=axes[1, 0].get_xaxis_transform(),
+                fontsize=style.font_size - 1,
+            )
+        timing_mode = (
+            "sequential" if any(r["mode"] == "sequential" for r in case["records"]) else "scratch"
+        )
         timings = [
             v["update_seconds"] * 1000
             for r in case["records"]
-            if r["mode"] == "sequential"
+            if r["mode"] == timing_mode
             for v in r.get("replay_diagnostics", [])
+            if v.get("update_seconds") is not None and np.isfinite(v["update_seconds"])
         ]
         if timings:
             q = np.quantile(timings, [0.25, 0.5, 0.75])
             axes[1, 1].errorbar(
                 index, q[1], yerr=[[q[1] - q[0]], [q[2] - q[1]]], color=color, fmt="o", capsize=3
+            )
+        else:
+            axes[1, 1].text(
+                index,
+                0.03,
+                "No timing",
+                ha="center",
+                va="bottom",
+                transform=axes[1, 1].get_xaxis_transform(),
+                fontsize=style.font_size - 1,
             )
     axes[0, 0].set(
         title="(a) Acquisition cost",
@@ -206,32 +250,41 @@ def plot_study(paths, destination, *, style=DEFAULT_STYLE):
         ylabel="Cumulative environment steps",
     )
     axes[0, 1].set(
-        title="(b) Retention across\nintroduced tasks",
+        title="(b) Success across introduced tasks",
         xlabel="Introduced task ID",
         ylabel="Mean success",
         ylim=(-0.03, 1.05),
     )
     axes[1, 0].set(title="(c) Independent recovery trials", ylabel="Summed environment steps")
     axes[1, 1].set(title="(d) Refresh-update host timing", ylabel="Milliseconds · median and IQR")
+    axes[0, 0].set_ylim(bottom=0)
+    numeric_axis(axes[0, 0], y=True)
+    numeric_axis(axes[0, 1], percent=True)
     for ax in axes[0]:
-        numeric_axis(ax)
-        ax.legend(loc="best", fontsize=6.5, frameon=True, facecolor="white", framealpha=0.8)
-        ax.set_ylim(bottom=0)
+        ax.set_xticks(range(max(len(c["config"]["goals"]) for c in cases.values())))
+        legend(ax, columns=2 if columns == 1 else 1)
     for ax in axes[1]:
-        ax.set_xticks(range(len(cases)), [name.replace("-", "\n", 1) for name in cases], fontsize=7)
+        ax.set_xticks(
+            range(len(cases)),
+            [
+                CASE_LABELS.get(name, name).replace(" · ", "\n").replace(" (", "\n(")
+                for name in cases
+            ],
+        )
         ax.set_ylim(bottom=0)
         numeric_axis(ax)
+    numeric_axis(axes[1, 0], y=True)
     finish(
         fig,
         title="Bounded task replay · acquisition, retention and recovery",
-        note=f"Bands: ±1 sample SD across complete seed sequences; no band for n=1. {incomplete} incomplete acquisition seed/modes omitted from curves; inspect the table. Failed runs retain spent budgets. Recovery branches are independent. Timings sample refresh updates and include selection/weighting; GPU execution is not synchronised.",
+        note=f"Bands: ±1 sample SD across complete seed sequences; no band for n=1. {incomplete} incomplete acquisition seed/modes omitted from curves; inspect the table. Failed runs retain spent budgets. Recovery branches are independent; scratch has no recovery trial. Timing median/IQR pools saved acquisition refresh samples, including scratch; it includes selection/weighting but does not synchronise GPU execution.",
     )
     save_figure(fig, Path(destination) / "k-replay-study", style=style)
     return fig
 
 
 @styled
-def plot_replay_allocation(directory, *, seed=None, style=DEFAULT_STYLE):
+def plot_replay_allocation(directory, *, seed=None, style=DEFAULT_STYLE, columns=2):
     """Task-weight timeline, measured budgets and candidate-span coverage."""
     directory = Path(directory)
     records = json.loads((directory / "summary.json").read_text())
@@ -247,7 +300,8 @@ def plot_replay_allocation(directory, *, seed=None, style=DEFAULT_STYLE):
             snapshots.append(dict(item, sequence_step=offset + item["step"]))
         offset += row["steps"]
         boundaries.append(offset)
-    fig, axes = subplots(2, 2, height=6.5, style=style)
+    fig, axes = panel_grid(4, columns=columns, panel_height=3.8, style=style)
+    axes = axes.reshape(2, 2)
     if not snapshots:
         for ax in axes.flat:
             empty_panel(ax, "No saved bounded-replay diagnostics")
@@ -337,7 +391,7 @@ def plot_replay_allocation(directory, *, seed=None, style=DEFAULT_STYLE):
 
 
 @styled
-def plot_soft_ball_norms(directory, *, seed=None, style=DEFAULT_STYLE):
+def plot_soft_ball_norms(directory, *, seed=None, style=DEFAULT_STYLE, columns=2):
     """Audit soft radii and penalty activation from saved task snapshots/losses."""
     directory = Path(directory)
     case = load_study({"run": directory})["run"]
@@ -362,7 +416,8 @@ def plot_soft_ball_norms(directory, *, seed=None, style=DEFAULT_STYLE):
             )
         offset += row["steps"]
         boundaries.append(offset)
-    fig, axes = subplots(2, 2, height=6.5, style=style)
+    fig, axes = panel_grid(4, columns=columns, panel_height=3.8, style=style)
+    axes = axes.reshape(2, 2)
     if not snapshots:
         for ax in axes.flat:
             empty_panel(ax, "No saved soft-ball diagnostics")

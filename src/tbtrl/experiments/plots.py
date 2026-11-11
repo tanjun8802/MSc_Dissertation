@@ -14,9 +14,9 @@ from .figure_style import (
     goal_ticks,
     legend,
     numeric_axis,
+    panel_grid,
     save_figure,
     styled,
-    subplots,
 )
 
 
@@ -27,15 +27,51 @@ def _records(output_dir):
     return records
 
 
+def _with_scratch_baseline(output_dir, baseline_dir):
+    """Join a separately saved scratch control, rejecting unmatched task/seed data."""
+    records = _records(output_dir)
+    if baseline_dir is None:
+        return records
+    if any(r["mode"] == "scratch" for r in records):
+        raise ValueError("This run already contains scratch records; omit baseline_dir.")
+    scratch = [r for r in _records(baseline_dir) if r["mode"] == "scratch"]
+    acquisition = [r for r in records if r["mode"] == "sequential"]
+
+    def key(row):
+        return row["seed"], row["task_id"]
+
+    reference = {key(r): r for r in scratch}
+    if (
+        not acquisition
+        or len(reference) != len(scratch)
+        or len({key(r) for r in acquisition}) != len(acquisition)
+        or set(reference) != {key(r) for r in acquisition}
+    ):
+        raise ValueError("Scratch baseline must match acquisition seeds and task IDs exactly.")
+    for row in acquisition:
+        other = reference[key(row)]
+        if row.get("goal") != other.get("goal"):
+            raise ValueError("Scratch baseline goal definitions do not match acquisition.")
+    return records + scratch
+
+
 @styled
-def plot_run(output_dir, *, style=DEFAULT_STYLE, export=True):
+def plot_run(
+    output_dir, *, style=DEFAULT_STYLE, export=True, columns=2, seed=None, baseline_dir=None
+):
     """Stopping cost and all-goal success; export run-overview under figures/."""
     from matplotlib.lines import Line2D
     from matplotlib.ticker import PercentFormatter
 
-    records = _records(output_dir)
+    suffix = f"-seed-{seed}" if seed is not None else ""
+    records = _with_scratch_baseline(output_dir, baseline_dir)
+    if seed is not None:
+        records = [r for r in records if r["seed"] == seed]
+        if not records:
+            raise ValueError(f"No saved records for seed {seed}.")
     seeds = sorted({row["seed"] for row in records})
-    fig, axes = subplots(len(seeds), 2, style=style, height=3.8 * len(seeds), squeeze=False)
+    fig, axes = panel_grid(2 * len(seeds), columns=columns, style=style)
+    axes = axes.reshape(len(seeds), 2)
     for i, seed in enumerate(seeds):
         rows = [row for row in records if row["seed"] == seed]
         tasks = sorted({row["task_id"] for row in rows})
@@ -151,18 +187,21 @@ def plot_run(output_dir, *, style=DEFAULT_STYLE, export=True):
         note="Unsolved tasks show their consumed budget, not a successful threshold. Recovery trials each restart from the final sequential model. Success is an empirical evaluation rate. Blank cells: no saved evaluation for that goal at that stage.",
     )
     if export:
-        save_figure(fig, Path(output_dir) / "figures/run-overview", style=style)
+        save_figure(fig, Path(output_dir) / f"figures/run-overview{suffix}", style=style)
     return fig
 
 
 @styled
-def plot_comparison(output_dir, *, style=DEFAULT_STYLE, export=True):
+def plot_comparison(output_dir, *, style=DEFAULT_STYLE, export=True, columns=2, baseline_dir=None):
     """Mean spent cost; ±1 sample SD only for n>=2, using paired seed coverage.
 
     Failed budgets count. Recovery sums independent trials, not a continued run.
     """
-    records = _records(output_dir)
-    fig, axes = subplots(2, 2, style=style, height=6.7)
+    records = _with_scratch_baseline(output_dir, baseline_dir)
+    fig, axes = panel_grid(
+        4, columns=columns, style=style, panel_height=4.0 if columns == 1 else 3.35
+    )
+    axes = axes.reshape(2, 2)
     counts = []
     all_tasks = sorted({r["task_id"] for r in records})
     for mode, (label, color, marker, linestyle) in MODES.items():
@@ -203,12 +242,15 @@ def plot_comparison(output_dir, *, style=DEFAULT_STYLE, export=True):
                 title=f"({chr(97 + row * 2 + column)}) {'Per-goal' if row == 0 else 'Accumulated'} {'sample cost' if column == 0 else 'wall time'}",
             )
             numeric_axis(ax, y=column == 0)
+            ax.set_ylim(bottom=0)
             goal_ticks(ax, all_tasks)
             legend(ax, columns=1)
     note = (
         "; ".join(counts)
         + ". Lines: seed mean; bands: ±1 seed SD only for n≥2 (not confidence intervals). Unsolved budgets count; skipped recovery costs zero. Accumulated recovery sums independent trials. Wall time depends on hardware."
     )
+    if baseline_dir is not None:
+        note += " From scratch is the separately saved acquisition control, not scratch recovery."
     finish(fig, title="Sample and computation costs", note=note)
     if export:
         save_figure(fig, Path(output_dir) / "figures/cost-comparison", style=style)

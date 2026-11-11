@@ -94,6 +94,19 @@ def subplots(rows=1, cols=1, *, style=DEFAULT_STYLE, height=None, **kwargs):
     )
 
 
+def panel_grid(count, *, columns=2, panel_height=3.8, style=DEFAULT_STYLE):
+    """Flat panel order with an optional single-column notebook layout."""
+    from math import ceil
+
+    if columns not in (1, 2):
+        raise ValueError("Choose one or two panel columns.")
+    rows = ceil(count / columns)
+    fig, axes = subplots(rows, columns, style=style, height=panel_height * rows, squeeze=False)
+    for ax in axes.flat[count:]:
+        ax.set_visible(False)
+    return fig, axes.ravel()[:count]
+
+
 def numeric_axis(ax, *, x=False, y=False, percent=False):
     from matplotlib.ticker import EngFormatter, MaxNLocator, PercentFormatter
 

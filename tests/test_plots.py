@@ -96,6 +96,103 @@ def test_cost_bands_are_seed_sd_and_incomplete_seed_coverage_is_rejected(tmp_pat
     plt.close("all")
 
 
+def test_separate_scratch_control_is_used_in_all_cost_panels(tmp_path):
+    rows = records((1, 3))
+    baseline = tmp_path / "scratch"
+    condition = tmp_path / "condition"
+    baseline.mkdir()
+    condition.mkdir()
+    scratch = [dict(r, steps=r["steps"] * 2) for r in rows if r["mode"] == "scratch"]
+    write_run(baseline, scratch)
+    write_run(condition, [r for r in rows if r["mode"] != "scratch"])
+    before = {p: p.read_bytes() for p in tmp_path.rglob("summary.json")}
+    style = FigureStyle(width=9.5, font_size=11, dpi=70, formats=("png",))
+    fig = plot_comparison(condition, baseline_dir=baseline, columns=1, style=style, export=False)
+    for ax in fig.axes:
+        assert ax.get_legend_handles_labels()[1] == [m[0] for m in MODES.values()]
+    np.testing.assert_allclose(fig.axes[0].lines[0].get_ydata(), [404, 410])
+    np.testing.assert_allclose(fig.axes[1].lines[0].get_ydata(), [4, 7])
+    np.testing.assert_allclose(fig.axes[2].lines[0].get_ydata(), [404, 814])
+    np.testing.assert_allclose(fig.axes[3].lines[0].get_ydata(), [4, 11])
+    assert all(ax.get_subplotspec().get_gridspec().ncols == 1 for ax in fig.axes)
+    plt.close(fig)
+    fig = plot_run(condition, baseline_dir=baseline, columns=1, seed=3, style=style, export=False)
+    assert len([ax for ax in fig.axes if ax.images]) == 1
+    assert "From scratch" in fig.axes[0].get_legend_handles_labels()[1]
+    assert "seed 3" in fig.axes[0].get_title()
+    plt.close(fig)
+    assert all(p.read_bytes() == value for p, value in before.items())
+
+
+@pytest.mark.parametrize("mismatch", ["seed", "goal", "duplicate", "missing"])
+def test_separate_scratch_control_rejects_incompatible_results(tmp_path, mismatch):
+    baseline, condition = tmp_path / "scratch", tmp_path / "condition"
+    baseline.mkdir()
+    condition.mkdir()
+    rows = records()
+    scratch = [r for r in rows if r["mode"] == "scratch"]
+    write_run(condition, [r for r in rows if r["mode"] != "scratch"])
+    if mismatch == "seed":
+        scratch[0]["seed"] = 99
+    elif mismatch == "goal":
+        scratch[0]["goal"] = [99, 99]
+    elif mismatch == "duplicate":
+        scratch.append(scratch[0])
+    else:
+        scratch.pop()
+    write_run(baseline, scratch)
+    with pytest.raises(ValueError, match="Scratch baseline"):
+        plot_comparison(condition, baseline_dir=baseline, export=False)
+
+
+def test_study_timing_includes_scratch_and_excludes_recovery(tmp_path):
+    from tbtrl.experiments.dqn_study import plot_study
+
+    paths = {}
+    for label, modes, seconds in (
+        ("scratch", ["scratch"], 0.02),
+        ("basis-uniform", ["sequential", "recovery"], 0.05),
+    ):
+        path = tmp_path / label
+        path.mkdir()
+        paths[label] = path
+        rows = []
+        for task in (0, 1):
+            for mode in modes:
+                rows.append(
+                    dict(
+                        seed=1,
+                        task_id=task,
+                        mode=mode,
+                        steps=100,
+                        solved=True,
+                        evaluation=[dict(task_id=task, success_rate=1)],
+                        replay_diagnostics=[
+                            dict(update_seconds=9 if mode == "recovery" else seconds)
+                        ],
+                    )
+                )
+        write_run(path, rows)
+        (path / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "config": {
+                        "goals": [[0, 0], [1, 1]],
+                        "seeds": [1],
+                    }
+                }
+            )
+        )
+    fig = plot_study(paths, tmp_path / "figures", columns=1, style=FAST)
+    points = [line for line in fig.axes[3].lines if line.get_marker() == "o"]
+    assert len(points) == 2
+    np.testing.assert_allclose([line.get_ydata()[0] for line in points], [20, 50])
+    assert "From scratch" in fig.axes[3].get_xticklabels()[0].get_text()
+    assert len(fig.axes[0].lines) == 2
+    assert len(fig.axes[1].lines) == 1  # scratch is not a retention trajectory
+    plt.close(fig)
+
+
 def test_return_success_and_undefined_gradient_cosines_are_not_conflated():
     result = SimpleNamespace(
         evaluations=[(10, -20), (20, 50)], success_rates=[(10, 0.25), (20, 1)], losses=[]
