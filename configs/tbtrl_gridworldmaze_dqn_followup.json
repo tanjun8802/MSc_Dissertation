@@ -1,0 +1,144 @@
+{
+  "name": "TBTRL_GridworldMaze_DQN_Followup",
+  "algorithm": "dqn",
+  "environment": "maze-discrete",
+  "goals": [
+    [
+      5,
+      6
+    ],
+    [
+      3,
+      5
+    ],
+    [
+      3,
+      3
+    ],
+    [
+      6,
+      3
+    ],
+    [
+      9,
+      7
+    ],
+    [
+      3,
+      9
+    ],
+    [
+      1,
+      1
+    ],
+    [
+      9,
+      1
+    ],
+    [
+      1,
+      7
+    ],
+    [
+      6,
+      9
+    ],
+    [
+      4,
+      1
+    ],
+    [
+      1,
+      4
+    ]
+  ],
+  "seeds": [
+    42,
+    123,
+    456
+  ],
+  "environment_options": {
+    "max_horizon": 100,
+    "slip_prob": 0.0,
+    "reward_mode": "simple",
+    "goal_reward": 1.0,
+    "step_reward": 0.0,
+    "wall_penalty": -0.1
+  },
+  "model": {
+    "hidden_dim": 64,
+    "rep_dim": 16,
+    "phi_max_norm": 1.0,
+    "psi_max_norm": 1.0,
+    "embedding_constraint": "projected"
+  },
+  "entropy_transfer": "reset",
+  "actor_type": "mlp",
+  "critic_type": "factorised",
+  "archive_compression": "similarity",
+  "carry_optimizer_state": false,
+  "independent_model_initialization": false,
+  "actor_model": {},
+  "training": {
+    "buffer_capacity": 100000,
+    "lr_sa": 0.001,
+    "lr_goal_init": 0.001,
+    "total_steps": 100000,
+    "warmup_steps": 1000,
+    "batch_size": 256,
+    "eval_freq": 1000,
+    "gamma": 0.99,
+    "tau": 0.005,
+    "eps_start": 1.0,
+    "eps_end": 0.05,
+    "eps_decay_steps": 60000,
+    "train_freq": 3,
+    "replay_ratio": 0,
+    "replay_loss_coef": 1.0,
+    "bootstrap_on_truncation": true,
+    "early_stop_reward": 0.99,
+    "early_stop_patience": 3,
+    "enable_early_stop": false,
+    "sigreg_coef": 0.01,
+    "sketch_dim": 16,
+    "goal_separation_coef": 0.04,
+    "goal_separation_target_cosine": 0.7,
+    "psi_raw_norm_coef": 0.0002,
+    "phi_raw_norm_coef": 0.0002,
+    "k_replay": {
+      "max_tasks": 4,
+      "sample_budget": 256,
+      "selector": "basis",
+      "weighting": "uniform",
+      "candidate_capacity": 32,
+      "refresh_updates": 100,
+      "seed": 0
+    }
+  },
+  "replay_keep_fraction": 0.4,
+  "replay_schedule": "constant",
+  "similarity_threshold": 0.8,
+  "replay_mode": "global",
+  "global_replay_capacity": 100000,
+  "recent_replay_capacity": 50000,
+  "replay_max_groups": 16,
+  "scratch": {
+    "replay_ratio": 0,
+    "replay_loss_coef": 0
+  },
+  "first_task": {
+    "replay_ratio": 0
+  },
+  "task_seed_stride": 0,
+  "recovery_seed_offset": 0,
+  "scratch_seen_goals": false,
+  "recovery": {
+    "total_steps": 100000,
+    "enable_early_stop": true
+  },
+  "recovery_threshold": null,
+  "recovery_return_threshold": 0.99,
+  "eval_episodes": 8,
+  "post_eval_episodes": 8,
+  "study_overrides": {}
+}

@@ -72,6 +72,8 @@ jobs:
         run: uv run --extra robotics python scripts/check_notebooks.py
       - name: Execute bounded DQN study in a fresh kernel
         run: uv run --extra robotics python scripts/check_dqn_study.py
+      - name: Execute DQN fixed-budget recovery follow-up
+        run: uv run --extra robotics python scripts/check_dqn_followup.py
       - name: Execute Fetch baseline studies in fresh kernels
         run: uv run --extra robotics python scripts/check_fetch_study.py
       - name: Build wheel and source distribution

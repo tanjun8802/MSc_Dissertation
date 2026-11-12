@@ -81,3 +81,7 @@ The notebook's geometry figures use separate centred SVD reference planes for ta
 Black rings identify the actual task IDs in the last logged replay selection, with its step and weights in the caption. Displayed factors are task-end measurements, not reconstructed selection-time vectors. These highlights show selected objectives, not PCA axes or guaranteed preservation. Exports include means, bases and selection metadata. All calculations use detached saved JSON on CPU; this path does not execute a model or touch device tensors.
 
 The small fixed state–action probe set is illustrative. Useful-representation evidence needs balanced held-out probes, feature covariance spectra and predictive/transfer checks. Covariance-to-identity on unit-bounded d-dimensional features has a scale mismatch: population covariance trace is at most 1, while identity has trace d. Soft constraints remove that hard incompatibility but still create competing scale preferences. Any future variance/decorrelation objective should use an explicit probe distribution and a variance target compatible with the intended feature scale, then be tested as a separate ablation.
+
+## Fixed-budget follow-up
+
+The separate [follow-up study](dqn-followup.md) retains the historical v1 regularisers, compares basis/random across K at fixed acquisition budgets, and saves two independent recovery protocols with collateral-forgetting analysis. Open `experiments/working/TBTRL_GridworldMaze_DQN_Followup.ipynb`.

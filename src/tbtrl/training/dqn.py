@@ -598,17 +598,17 @@ def train_dqn(
             success_streak += 1
         else:
             success_streak = 0
-        if enable_early_stop and success_streak >= early_stop_patience:
+        if success_streak >= early_stop_patience and not solved:
             solved = True
             min_steps = global_step
-            min_time = time.perf_counter() - start_time
+        if enable_early_stop and solved:
             logger.info(
                 f"Early stopping at step={global_step}, return={mean_return:.3f}, streak={success_streak}"
             )
             break
     if min_steps is None:
         min_steps = global_step
-        min_time = time.perf_counter() - start_time
+    min_time = time.perf_counter() - start_time
     with torch.no_grad():
         final_task_embedding = q_network.encode_goal(goal_tensor).squeeze(0).detach().cpu().numpy()
     if selector is not None:
