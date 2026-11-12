@@ -2,6 +2,7 @@
 
 import json
 from copy import deepcopy
+from dataclasses import asdict
 from pathlib import Path
 
 import numpy as np
@@ -26,6 +27,43 @@ CASE_LABELS = {
     "basis-uniform": "Basis · uniform",
     "basis-interference": "Basis · interference",
 }
+
+
+def assert_study_protocol(requested, saved, *, case, allow_saved_protocol=False):
+    """Require an explicit choice before restoring different study settings.
+
+    Names and appended goals are not protocol changes; task-prefix validation is
+    performed by the notebook and the continuation layer. This check never
+    bypasses checkpoint/source compatibility checks.
+    """
+
+    def settings(config):
+        result = asdict(config)
+        result.pop("name")
+        result.pop("goals")
+        result["model"].setdefault("embedding_constraint", "projected")
+        return result
+
+    def differences(left, right, prefix=""):
+        changed = []
+        for key in sorted(left.keys() | right.keys()):
+            path = f"{prefix}.{key}" if prefix else key
+            a, b = left.get(key), right.get(key)
+            if isinstance(a, dict) and isinstance(b, dict):
+                changed.extend(differences(a, b, path))
+            elif key not in left or key not in right or a != b:
+                changed.append(f"{path}: requested={a!r}, saved={b!r}")
+        return changed
+
+    changed = differences(settings(requested), settings(saved))
+    if changed and not allow_saved_protocol:
+        raise ValueError(
+            f"{case}: saved study protocol differs from the requested settings. "
+            + "; ".join(changed)
+            + ". Use a new RUN_ID for the requested protocol, or explicitly set "
+            "CONTINUE_SAVED_PROTOCOL=True to retain the historical protocol. "
+            "For plotting only, set RUN_EXPERIMENTS=False."
+        )
 
 
 def configure_k_replay(

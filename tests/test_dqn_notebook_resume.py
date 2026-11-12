@@ -143,7 +143,9 @@ def test_restores_saved_protocol_for_existing_and_new_control(tmp_path, helpers)
     scratch = configure_k_replay(config, max_tasks=0, sample_budget=0)
     configs = {"basis-interference": requested, "scratch": scratch}
     paths = {"basis-interference": output, "scratch": tmp_path / "scratch"}
-    restored = helpers["restore_saved_study_configs"](configs, paths)
+    with pytest.raises(ValueError, match="protocol"):
+        helpers["restore_saved_study_configs"](configs, paths)
+    restored = helpers["restore_saved_study_configs"](configs, paths, allow_saved_protocol=True)
     assert restored["basis-interference"] == config
     assert restored["scratch"].model == config.model
     assert restored["scratch"].training["goal_separation_coef"] == 0.04

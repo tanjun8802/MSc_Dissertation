@@ -22,11 +22,12 @@ from .figure_style import (
 )
 
 
-def factor_geometry(vectors, *, raw_vectors=None, basis=None, tolerance=1e-8):
-    """True norms/angles plus an origin-preserving orthogonal 2D projection.
+def factor_geometry(vectors, *, raw_vectors=None, basis=None, center=None, tolerance=1e-8):
+    """True norms/angles plus an orthogonal 2D display projection.
 
     Zero-length factors have undefined angles (NaN), including with themselves.
-    Projection never centres or normalises the displayed factors.
+    Only display coordinates subtract ``center``; original norms/angles never do.
+    Supplying a reference center and basis keeps views aligned across stages.
     """
     vectors = np.asarray(vectors, dtype=np.float64)
     if vectors.ndim != 2 or min(vectors.shape) == 0 or not np.isfinite(vectors).all():
@@ -34,9 +35,13 @@ def factor_geometry(vectors, *, raw_vectors=None, basis=None, tolerance=1e-8):
     raw = vectors if raw_vectors is None else np.asarray(raw_vectors, dtype=np.float64)
     if raw.shape != vectors.shape or not np.isfinite(raw).all():
         raise ValueError("Raw and used factors must have matching finite shapes.")
+    centered = center is not None
+    center = np.zeros(vectors.shape[1]) if center is None else np.asarray(center, dtype=float)
+    if center.shape != (vectors.shape[1],) or not np.isfinite(center).all():
+        raise ValueError("Projection center must be finite and match the factor dimension.")
+    display_vectors = vectors - center
     if basis is None:
-        # Uncentred SVD preserves the meaningful zero of the inner-product model.
-        _, _, vt = np.linalg.svd(vectors, full_matrices=True)
+        _, _, vt = np.linalg.svd(display_vectors, full_matrices=True)
         basis = vt[:2].T
         # Resolve sign ambiguity for reproducible reference axes.
         for column in range(basis.shape[1]):
@@ -58,9 +63,9 @@ def factor_geometry(vectors, *, raw_vectors=None, basis=None, tolerance=1e-8):
     cosine[~(valid[:, None] & valid[None, :])] = np.nan
     angles = np.degrees(np.arccos(cosine))
     angles[np.diag_indices_from(angles)] = np.where(valid, 0, np.nan)
-    projected = vectors @ basis
+    projected = display_vectors @ basis
     projected = np.pad(projected, ((0, 0), (0, 2 - projected.shape[1])))
-    energy = float(np.square(vectors).sum())
+    energy = float(np.square(display_vectors).sum())
     return dict(
         vectors=vectors,
         raw_vectors=raw,
@@ -69,13 +74,15 @@ def factor_geometry(vectors, *, raw_vectors=None, basis=None, tolerance=1e-8):
         angles_degrees=angles,
         cosine=cosine,
         basis=basis,
+        center=center,
+        centered=centered,
         projected=projected,
         retained_energy=float(np.square(projected).sum() / energy) if energy else None,
     )
 
 
 def load_saved_task_geometry(directory, *, seed, task_id=None, reference_task_id=None):
-    """Load DQN diagnostics; fit axes once to the chosen reference stage's psi.
+    """Load diagnostics and fixed, branch-specific centred SVD reference planes.
 
     The last available diagnostic stage is the default display/reference stage.
     Final-stage axes are an offline visualisation choice, never a training input.
@@ -106,12 +113,44 @@ def load_saved_task_geometry(directory, *, seed, task_id=None, reference_task_id
     required = ("psi", "bounded_psi", "phi_fixed", "bounded_phi")
     if any(key not in data or key not in ref for key in required):
         raise ValueError("Saved diagnostics must include both raw and forward-pass factors.")
-    basis = factor_geometry(ref["bounded_psi"])["basis"]
-    psi = factor_geometry(data["bounded_psi"], raw_vectors=data["psi"], basis=basis)
-    phi = factor_geometry(data["bounded_phi"], raw_vectors=data["phi_fixed"], basis=basis)
+
+    def project(used_key, raw_key):
+        center = np.asarray(ref[used_key], dtype=float).mean(axis=0)
+        basis = factor_geometry(ref[used_key], center=center)["basis"]
+        return factor_geometry(
+            data[used_key], raw_vectors=data[raw_key], basis=basis, center=center
+        )
+
+    psi, phi = project("bounded_psi", "psi"), project("bounded_phi", "phi_fixed")
     task_ids = diagnostic["task_ids"]
     if len(task_ids) != len(psi["norms"]) or len(set(task_ids)) != len(task_ids):
         raise ValueError("Saved goal IDs must identify each task vector exactly once.")
+    replay = None
+    summary = directory / "summary.json"
+    if summary.exists():
+        rows = [
+            r
+            for r in json.loads(summary.read_text())
+            if r["seed"] == seed and r["mode"] == "sequential" and r["task_id"] == task_id
+        ]
+        if len(rows) > 1:
+            raise ValueError("Multiple saved acquisition records for the requested seed/task.")
+        if rows and rows[0].get("replay_diagnostics"):
+            row = rows[0]
+            snapshot = max(row["replay_diagnostics"], key=lambda item: item["step"])
+            selected = snapshot["selected_tasks"]
+            if not set(selected).issubset(task_ids) or task_id in selected:
+                raise ValueError("Saved replay task IDs do not match historical factor IDs.")
+            weights = snapshot["replay_weights"]
+            if len(weights) != len(selected):
+                raise ValueError("Saved replay weights must match selected task IDs.")
+            replay = dict(
+                selected_tasks=selected,
+                weights=weights,
+                step=snapshot["step"],
+                training_steps=row["steps"],
+                selector=config["training"]["k_replay"]["selector"],
+            )
     return dict(
         case=directory.name,
         seed=seed,
@@ -121,16 +160,30 @@ def load_saved_task_geometry(directory, *, seed, task_id=None, reference_task_id
         psi=psi,
         phi=phi,
         model=config["model"],
+        training=config.get("training", {}),
+        replay=replay,
         source=str(stages[task_id].resolve()),
     )
 
 
-def _vector_panel(ax, geometry, ids, *, prefix, title, radius, constraint):
+def _vector_panel(
+    ax,
+    geometry,
+    ids,
+    *,
+    prefix,
+    title,
+    radius,
+    constraint,
+    selected=(),
+    current=None,
+):
     from matplotlib.patches import Circle
 
     points = geometry["projected"]
-    extent = max(float(np.abs(points).max()), radius or 0, 1e-3) * 1.12
-    if radius is not None:
+    centered = geometry.get("centered", False)
+    extent = max(float(np.abs(points).max()), 0 if centered else radius or 0, 1e-3) * 1.12
+    if radius is not None and not centered:
         label = "Hard radius" if constraint == "projected" else "Soft radius (not a bound)"
         ax.add_patch(Circle((0, 0), radius, facecolor="#E8EEF6", edgecolor="#A7BDDA", alpha=0.6))
         ax.plot([], [], color="#A7BDDA", label=f"{label}: {radius:g}")
@@ -142,9 +195,28 @@ def _vector_panel(ax, geometry, ids, *, prefix, title, radius, constraint):
             "",
             xy=point,
             xytext=(0, 0),
-            arrowprops=dict(arrowstyle="->", color=appearance["color"], linewidth=1.2),
+            arrowprops=dict(
+                arrowstyle="->",
+                color=appearance["color"],
+                linewidth=2.8 if identity in selected else 1.0,
+                alpha=1 if identity in selected or not selected else 0.55,
+            ),
         )
         ax.scatter(*point, color=appearance["color"], marker=appearance["marker"], s=24, zorder=3)
+        if identity in selected:
+            ax.scatter(
+                *point, facecolors="none", edgecolors="black", s=100, linewidths=1.2, zorder=4
+            )
+        if identity == current:
+            ax.scatter(*point, color="#FFD166", edgecolors="black", marker="*", s=120, zorder=5)
+    if selected:
+        ax.scatter(
+            [], [], facecolors="none", edgecolors="black", s=70, label="Selected replay tasks"
+        )
+    if current is not None:
+        ax.scatter(
+            [], [], color="#FFD166", edgecolors="black", marker="*", s=90, label="Current task"
+        )
     # Put labels outside the circle, ordered by endpoint height on each side.
     # This keeps almost coincident task vectors individually identifiable.
     for right in (False, True):
@@ -155,22 +227,24 @@ def _vector_panel(ax, geometry, ids, *, prefix, title, radius, constraint):
             if len(indices) == 1:
                 y = points[i, 1]
             ax.annotate(
-                f"{prefix}{ids[i]}",
+                f"{prefix}{ids[i]}" + (" [replay]" if ids[i] in selected else ""),
                 xy=points[i],
                 xytext=(extent * (1.08 if right else -1.08), y),
                 ha="left" if right else "right",
                 va="center",
                 color=goal_style(ids[i])["color"],
+                fontweight="bold" if ids[i] in selected else "normal",
                 arrowprops=dict(arrowstyle="-", color="#AAAAAA", linewidth=0.5),
             )
     retained = geometry["retained_energy"]
+    quantity = "reference-centred energy retained" if centered else "squared norm retained"
     description = (
-        f"{retained:.1%} squared norm retained" if retained is not None else "all factors zero"
+        f"{retained:.1%} {quantity}" if retained is not None else "no variation to project"
     )
     ax.set(
         title=f"{title}\n2D projection: {description}",
-        xlabel="Reference direction 1",
-        ylabel="Reference direction 2",
+        xlabel="Centred SVD direction 1" if centered else "Reference direction 1",
+        ylabel="Centred SVD direction 2" if centered else "Reference direction 2",
         xlim=(-1.4 * extent, 1.4 * extent),
         ylim=(-1.05 * extent, 1.05 * extent),
         aspect="equal",
@@ -196,6 +270,8 @@ def plot_saved_task_geometry(
     )
     psi, phi, ids, model = data["psi"], data["phi"], data["task_ids"], data["model"]
     constraint = model.get("embedding_constraint", "projected")
+    replay = data["replay"]
+    selected = replay["selected_tasks"] if replay else []
     fig, axes = panel_grid(4, columns=columns, panel_height=4.6, style=style)
     for ax, geometry, identities, branch, prefix, title in (
         (axes[0], psi, ids, "psi", "G", r"(a) Task factors $\psi(g)$ used by Q"),
@@ -216,6 +292,8 @@ def plot_saved_task_geometry(
             title=title,
             radius=model.get(f"{branch}_max_norm"),
             constraint=constraint,
+            selected=selected if branch == "psi" else (),
+            current=data["task_id"] if branch == "psi" else None,
         )
     x = np.arange(len(ids))
     axes[2].plot(x, psi["raw_norms"], "s--", label="Raw encoder output", color="#D55E00")
@@ -235,6 +313,17 @@ def plot_saved_task_geometry(
         ylim=(0, None),
     )
     axes[2].set_xticks(x, ids)
+    if selected:
+        positions = [ids.index(task) for task in selected]
+        axes[2].scatter(
+            positions,
+            psi["norms"][positions],
+            facecolors="none",
+            edgecolors="black",
+            s=100,
+            zorder=5,
+            label="Selected replay tasks",
+        )
     numeric_axis(axes[2])
     legend(axes[2])
     angles = psi["angles_degrees"]
@@ -256,6 +345,10 @@ def plot_saved_task_geometry(
     )
     goal_ticks(axes[3], ids, matrix=True)
     goal_ticks(axes[3], ids, matrix=True, axis="y")
+    for labels in (axes[3].get_xticklabels(), axes[3].get_yticklabels()):
+        for label, identity in zip(labels, ids):
+            if identity in selected:
+                label.set_fontweight("bold")
     if len(ids) <= 12:
         for (row, col), angle in np.ndenumerate(angles):
             axes[3].text(
@@ -267,10 +360,19 @@ def plot_saved_task_geometry(
                 fontsize=style.font_size - 2,
                 color="white" if np.isfinite(angle) and (angle < 40 or angle > 140) else "black",
             )
+    selection_note = "Replay selection was not saved."
+    if replay:
+        weighted_ids = ", ".join(
+            f"G{task}={weight:.3f}" for task, weight in zip(selected, replay["weights"])
+        )
+        selection_note = (
+            f"Last logged {replay['selector']} selection at step {replay['step']:,}/{replay['training_steps']:,}: "
+            f"{weighted_ids or 'no historical tasks'}. Vectors are task-end factors, not selection-time factors."
+        )
     finish(
         fig,
         title=f"{data['case']} · seed {seed} · embedding geometry after goal {data['task_id']}",
-        note=f"Shared, uncentred orthogonal axes fitted to task factors after goal {data['reference_task_id']}; no display normalisation. 2D lengths/angles are approximations; panels (c–d) use full-dimensional vectors. Circles show configured radii, not evidence of unit norms. Zero-vector angles are undefined. Probe IDs refer to saved state–action inputs; geometry alone does not establish transfer or retention.",
+        note=f"Separate centred SVD planes for ψ and φ, fitted after goal {data['reference_task_id']}; no normalisation. Origins are reference means; branch axes are not comparable. Display energy equals explained variance at the reference stage. Panels (c–d) retain original-space norms/angles. Saved protocol: {constraint}, SIGReg={data['training'].get('sigreg_coef', 'unknown')}. {selection_note} Highlighted vectors identify replay tasks, not PCA directions or a guarantee of retention.",
     )
     if export:
         destination = (
